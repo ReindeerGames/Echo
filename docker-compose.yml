@@ -1,0 +1,18 @@
+services:
+  echo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/${GHCR_IMAGE:-echo-sre-assistant}:local
+    container_name: echo
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    volumes:
+      - echo_data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  echo_data:

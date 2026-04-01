@@ -1,0 +1,41 @@
+{
+  "thresholds": {
+    "cpuHighPct": 85,
+    "memHighPct": 85,
+    "cpuChangePct": 25,
+    "memChangePct": 25,
+    "outlierZScore": 2,
+    "outlierMinCpuPct": 40,
+    "outlierMinMemPct": 40,
+    "logMaxLines": 120,
+    "logTail": 200,
+    "logLineMaxChars": 240
+  },
+  "grouping": {
+    "overrides": {
+      "byName": {},
+      "byImage": {
+        "wordpress": "wordpress",
+        "mysql": "database",
+        "mariadb": "database",
+        "postgres": "database",
+        "redis": "cache",
+        "nginx": "edge",
+        "traefik": "edge"
+      }
+    }
+  },
+  "features": {
+    "aiSummaries": true,
+    "scheduler": true,
+    "skillDrafting": true,
+    "guardedRemediation": true
+  },
+  "scheduler": {
+    "cron": "*/5 * * * *"
+  },
+  "remediation": {
+    "confirmationTtlSeconds": 120,
+    "restartTimeoutSeconds": 10
+  }
+}

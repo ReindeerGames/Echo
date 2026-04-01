@@ -1,0 +1,8 @@
+{
+  "enabled": [
+    "core/incident-triage.md",
+    "core/log-triage.md",
+    "core/performance-investigation.md"
+  ],
+  "disabled": []
+}

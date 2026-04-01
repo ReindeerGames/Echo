@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+npm-debug.log*
+.env
+.env.*
+data/*.db*
+tests
+echo-conversation.txt
+*.log
