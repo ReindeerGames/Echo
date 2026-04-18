@@ -36,7 +36,26 @@ app.get('/health', (_req, res) => {
 });
 
 app.post('/webhook', (req, res) => {
+  const debugWebhooks = process.env.DEBUG_WEBHOOKS === 'true';
+
+  if (debugWebhooks) {
+    console.log('[webhook] Received webhook:', JSON.stringify({
+      timestamp: new Date().toISOString(),
+      headers: req.headers,
+      body: req.body
+    }, null, 2));
+  }
+
   const inbound = parseIncomingWebhook(req.body);
+
+  if (debugWebhooks) {
+    console.log('[webhook] Parsed inbound:', JSON.stringify({
+      shouldProcess: inbound.shouldProcess,
+      reason: inbound.reason,
+      sender: inbound.sender,
+      message: inbound.message
+    }, null, 2));
+  }
 
   if (!inbound.shouldProcess) {
     if (inbound.reason === 'not_whitelisted') {
@@ -50,6 +69,10 @@ app.post('/webhook', (req, res) => {
   if (isDuplicateInbound(inbound.sender, inbound.message)) {
     console.log(`[webhook] Ignored duplicate delivery from ${inbound.sender}`);
     return res.status(200).json({ ok: true });
+  }
+
+  if (debugWebhooks) {
+    console.log(`[webhook] Processing message from ${inbound.sender}: "${inbound.message}"`);
   }
 
   res.status(200).json({ ok: true });
