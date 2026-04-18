@@ -265,22 +265,6 @@ npm run check
 # Run full tests
 npm test
 ```
-
-## CI/CD
-
-GitHub Actions workflow included at:
-
-- `.github/workflows/docker-publish.yml`
-
-Behavior:
-
-- runs `npm run check` and `npm test`
-- builds Docker image from `Dockerfile`
-- publishes image to GHCR (`ghcr.io/<owner>/<repo>`) on:
-  - pushes to `main`
-  - version tags matching `v*`
-  - manual `workflow_dispatch`
-
 ## Troubleshooting
 
 | Symptom | Checks |

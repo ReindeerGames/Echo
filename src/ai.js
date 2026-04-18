@@ -162,7 +162,9 @@ async function summarizeWithAI(input) {
     };
   }
 
-  const selectedModel = model || process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const provider = process.env.AI_PROVIDER || 'openai';
+  const defaultModel = provider === 'ollama' ? 'gemma4:e2b' : 'gpt-4o-mini';
+  const selectedModel = model || process.env.AI_MODEL || defaultModel;
   const identityPrompt = readIdentityPrompt();
   const skills = loadEnabledSkills(APP_ROOT);
   const selectedSkills = pickRelevantSkills(message, skills, 2);
@@ -182,6 +184,48 @@ async function summarizeWithAI(input) {
   };
 
   try {
+    const provider = process.env.AI_PROVIDER || 'openai';
+    
+    // Ollama uses OpenAI-compatible API but with different request format
+    if (provider === 'ollama') {
+      const response = await client.chat.completions.create({
+        model: selectedModel,
+        max_tokens: 220,
+        messages: [
+          {
+            role: 'system',
+            content: `${identityPrompt}\n\n${skillsBlock}`.trim()
+          },
+          {
+            role: 'user',
+            content: JSON.stringify(userPayload)
+          }
+        ]
+      });
+
+      const text = response.choices?.[0]?.message?.content || '';
+      const normalizedText = normalizeModelText(text);
+      const usage = {
+        inputTokens: response.usage?.prompt_tokens || 0,
+        cachedInputTokens: 0,
+        outputTokens: response.usage?.completion_tokens || 0,
+        reasoningTokens: 0,
+        totalTokens: response.usage?.total_tokens || 0,
+        raw: response.usage || {}
+      };
+
+      return {
+        called: true,
+        text: normalizedText,
+        usage,
+        model: response.model || selectedModel,
+        responseId: response.id || null,
+        status: 'completed',
+        error: null
+      };
+    }
+
+    // OpenAI provider (original code)
     const response = await client.responses.create({
       model: selectedModel,
       max_output_tokens: 220,
@@ -225,6 +269,20 @@ async function summarizeWithAI(input) {
 }
 
 function getClient() {
+  const provider = process.env.AI_PROVIDER || 'openai';
+
+  if (provider === 'ollama') {
+    const baseURL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434/v1';
+    if (!cachedClient) {
+      cachedClient = new OpenAI({
+        baseURL,
+        apiKey: 'ollama' // Ollama doesn't require a real API key
+      });
+    }
+    return cachedClient;
+  }
+
+  // Default OpenAI provider
   if (!process.env.OPENAI_API_KEY) {
     return null;
   }
