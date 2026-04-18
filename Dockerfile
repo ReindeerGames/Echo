@@ -14,6 +14,10 @@ COPY . .
 
 RUN mkdir -p /app/data && chown -R node:node /app
 
+# Add node user to docker group (GID 999 is common for docker group)
+# This allows the container to access the Docker socket
+RUN groupadd -g 999 docker || true && usermod -aG docker node
+
 USER node
 EXPOSE 3000
 
