@@ -58,12 +58,12 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 			jobErr := r.execute(ctx, job)
-			if err := r.store.CompleteJob(ctx, job.ID, jobErr); err != nil {
+			if err := r.store.CompleteJob(ctx, job.ID, job.Attempts, jobErr); err != nil {
 				slog.Error("complete worker job", "error", err)
 			}
 			if jobErr != nil {
 				slog.Error("worker job failed", "job_id", job.ID, "job_type", job.Type, "error", jobErr)
-				if job.Attempts+1 >= job.MaxAttempts {
+				if job.Attempts >= job.MaxAttempts {
 					r.notifyTerminalFailure(ctx, job, jobErr)
 				}
 			}

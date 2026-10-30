@@ -300,6 +300,8 @@ type OutboundMessage struct {
 	ID        string
 	ChatJID   string
 	Body      string
+	Status    string
+	Attempts  int
 	CreatedAt time.Time
 }
 

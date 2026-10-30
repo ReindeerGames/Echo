@@ -31,7 +31,7 @@ The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commi
 `echo_core` is migration-owned by Echo. The key durable queues are:
 
 - `echo_jobs`: leased, retryable background work.
-- `echo_whatsapp_outbox`: retryable outbound messages.
+- `echo_whatsapp_outbox`: retryable outbound messages with expiring leases and stable WhatsApp message IDs across crash recovery.
 - `echo_approvals`: expiring one-action authorization.
 - `echo_audit_events`: append-only operational evidence.
 - `echo_encrypted_settings`: AES-GCM ciphertext and non-secret connection metadata; the encryption key remains outside MariaDB.

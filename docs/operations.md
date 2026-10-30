@@ -7,7 +7,7 @@
 
 The WhatsApp, AI, GitHub, worker, deployment, and audit states are visible in the authenticated System UI.
 
-The Overview and System screens also show pending and dead WhatsApp outbox counts. A small pending count can be normal while the gateway sends; a growing pending count or any dead message means a notification or assistant reply has not been confirmed after bounded retries. Check the gateway connection and logs before intervening. Echo does not automatically replay dead messages because a network failure can be ambiguous and blind replay could duplicate a message.
+The Overview and System screens also show pending and dead WhatsApp outbox counts. A small pending count can be normal while the gateway sends; a growing pending count or any dead message means a notification or assistant reply has not been confirmed after bounded retries. Check the gateway connection and logs before intervening. A process crash releases an expired delivery lease for automatic recovery using the same deterministic WhatsApp message ID, which lets the recipient deduplicate an ambiguous retry. Echo does not automatically replay messages already marked dead.
 
 For every observer-managed service, configure a heartbeat timeout at least twice its reporting interval. An `observer-silent` alert means Echo is running but has stopped receiving evidence from that service's observer; check the observer process, network path, webhook secret, and the target health endpoint. Do not treat silence as proof that the workload itself is down.
 
@@ -37,7 +37,7 @@ Stop the worker process or set `ECHO_WORKER_ENABLED=false`. This preserves repor
 
 ## Failed jobs
 
-Jobs retry with bounded backoff and become `dead` after their configured attempt limit. Deployment records are written in `dispatching` state before GitHub is called and are unique per approval. If a network failure leaves a dispatch ambiguous, Echo will not send it twice: reconcile GitHub using `echo_deployment_id`, then allow the signed webhook to complete the record or create a fresh approval after cancelling the stale action. Before replaying any other mutation, reconcile GitHub for an existing branch or pull request. Do not blindly reset a dead mutation job to queued.
+Jobs retry with bounded backoff and become `dead` after their configured attempt limit. A `running` job with an expired lease is reclaimed after a worker crash; an expired final-attempt lease is finalized as `dead` instead of remaining stuck forever. Deployment records are written in `dispatching` state before GitHub is called and are unique per approval. If a network failure leaves a dispatch ambiguous, Echo will not send it twice: reconcile GitHub using `echo_deployment_id`, then allow the signed webhook to complete the record or create a fresh approval after cancelling the stale action. Before replaying any other mutation, reconcile GitHub for an existing branch or pull request. Do not blindly reset a dead mutation job to queued.
 
 ## Dependency upgrades
 

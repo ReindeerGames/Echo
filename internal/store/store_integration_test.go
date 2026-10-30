@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/domain"
+	"github.com/ReindeerGames/echo/internal/id"
 	"github.com/ReindeerGames/echo/internal/monitor"
 )
 
@@ -293,6 +294,97 @@ func TestMariaDBAssistantConversationIsIdempotent(t *testing.T) {
 	}
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&outboxCount); err != nil || outboxCount != 1 {
 		t.Fatalf("failed completion changed outbox: count=%d err=%v", outboxCount, err)
+	}
+}
+
+func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+
+	if err := st.EnqueueOutbound(ctx, "owner@s.whatsapp.net", "lease recovery"); err != nil {
+		t.Fatal(err)
+	}
+	first, err := st.ClaimOutbound(ctx, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET locked_until=DATE_SUB(NOW(6),INTERVAL 1 SECOND) WHERE id=?`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := st.ClaimOutbound(ctx, time.Minute)
+	if err != nil || first.Attempts != 1 || reclaimed.ID != first.ID || reclaimed.Status != "sending" || reclaimed.Attempts != 2 {
+		t.Fatalf("outbox lease was not reclaimed: first=%#v reclaimed=%#v err=%v", first, reclaimed, err)
+	}
+	if err := st.CompleteOutbound(ctx, first.ID, first.Attempts, "stale-message-id", nil); err != nil {
+		t.Fatal(err)
+	}
+	var leasedStatus, leasedMessageID string
+	if err := st.db.QueryRowContext(ctx, `SELECT status,whatsapp_message_id FROM echo_whatsapp_outbox WHERE id=?`, first.ID).Scan(&leasedStatus, &leasedMessageID); err != nil || leasedStatus != "sending" || leasedMessageID != "" {
+		t.Fatalf("stale outbox completion changed newer lease: status=%q message=%q err=%v", leasedStatus, leasedMessageID, err)
+	}
+	if err := st.CompleteOutbound(ctx, reclaimed.ID, reclaimed.Attempts, "current-message-id", nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT status,whatsapp_message_id FROM echo_whatsapp_outbox WHERE id=?`, first.ID).Scan(&leasedStatus, &leasedMessageID); err != nil || leasedStatus != "sent" || leasedMessageID != "current-message-id" {
+		t.Fatalf("current outbox completion was not recorded: status=%q message=%q err=%v", leasedStatus, leasedMessageID, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sending',attempts=5,locked_until=DATE_SUB(NOW(6),INTERVAL 1 SECOND) WHERE id=?`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ClaimOutbound(ctx, time.Minute); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("final expired outbox lease was returned: %v", err)
+	}
+	var outboxStatus, outboxError string
+	if err := st.db.QueryRowContext(ctx, `SELECT status,last_error FROM echo_whatsapp_outbox WHERE id=?`, first.ID).Scan(&outboxStatus, &outboxError); err != nil || outboxStatus != "dead" || !strings.Contains(outboxError, "lease expired") {
+		t.Fatalf("final outbox lease not finalized: status=%q error=%q err=%v", outboxStatus, outboxError, err)
+	}
+
+	jobID := id.New("job")
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json,max_attempts) VALUES(?,?,?,?)`, jobID, "test", `{}`, 3); err != nil {
+		t.Fatal(err)
+	}
+	firstJob, err := st.ClaimJob(ctx, "worker-a", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_jobs SET locked_until=DATE_SUB(NOW(6),INTERVAL 1 SECOND) WHERE id=?`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimedJob, err := st.ClaimJob(ctx, "worker-b", time.Minute)
+	if err != nil || firstJob.Attempts != 1 || reclaimedJob.ID != firstJob.ID || reclaimedJob.Status != "running" || reclaimedJob.Attempts != 2 || reclaimedJob.LockedBy != "worker-b" {
+		t.Fatalf("job lease was not reclaimed: first=%#v reclaimed=%#v err=%v", firstJob, reclaimedJob, err)
+	}
+	if err := st.CompleteJob(ctx, firstJob.ID, firstJob.Attempts, nil); err != nil {
+		t.Fatal(err)
+	}
+	var leasedJobStatus, leasedJobWorker string
+	if err := st.db.QueryRowContext(ctx, `SELECT status,locked_by FROM echo_jobs WHERE id=?`, jobID).Scan(&leasedJobStatus, &leasedJobWorker); err != nil || leasedJobStatus != "running" || leasedJobWorker != "worker-b" {
+		t.Fatalf("stale job completion changed newer lease: status=%q worker=%q err=%v", leasedJobStatus, leasedJobWorker, err)
+	}
+	if err := st.CompleteJob(ctx, reclaimedJob.ID, reclaimedJob.Attempts, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT status,locked_by FROM echo_jobs WHERE id=?`, jobID).Scan(&leasedJobStatus, &leasedJobWorker); err != nil || leasedJobStatus != "complete" || leasedJobWorker != "" {
+		t.Fatalf("current job completion was not recorded: status=%q worker=%q err=%v", leasedJobStatus, leasedJobWorker, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_jobs SET status='running',attempts=max_attempts,locked_until=DATE_SUB(NOW(6),INTERVAL 1 SECOND) WHERE id=?`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ClaimJob(ctx, "worker-c", time.Minute); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("final expired job lease was returned: %v", err)
+	}
+	var jobStatus, jobError string
+	if err := st.db.QueryRowContext(ctx, `SELECT status,last_error FROM echo_jobs WHERE id=?`, jobID).Scan(&jobStatus, &jobError); err != nil || jobStatus != "dead" || !strings.Contains(jobError, "lease expired") {
+		t.Fatalf("final job lease not finalized: status=%q error=%q err=%v", jobStatus, jobError, err)
 	}
 }
 

@@ -1123,9 +1123,22 @@ func (s *Store) ClaimOutbound(ctx context.Context, lease time.Duration) (domain.
 	}
 	defer tx.Rollback()
 	var item domain.OutboundMessage
-	err = tx.QueryRowContext(ctx, `SELECT id,chat_jid,body,created_at FROM echo_whatsapp_outbox WHERE status IN ('queued','failed') AND available_at<=NOW(6) AND (locked_until IS NULL OR locked_until<NOW(6)) AND attempts<5 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&item.ID, &item.ChatJID, &item.Body, &item.CreatedAt)
+	err = tx.QueryRowContext(ctx, `SELECT id,chat_jid,body,status,attempts,created_at FROM echo_whatsapp_outbox
+      WHERE (((status IN ('queued','failed')) AND available_at<=NOW(6) AND (locked_until IS NULL OR locked_until<NOW(6)))
+         OR (status='sending' AND locked_until<NOW(6)))
+        AND attempts<=5
+      ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&item.ID, &item.ChatJID, &item.Body, &item.Status, &item.Attempts, &item.CreatedAt)
 	if err != nil {
 		return domain.OutboundMessage{}, notFound(err)
+	}
+	if item.Attempts >= 5 {
+		if _, err = tx.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='dead',locked_until=NULL,last_error=IF(last_error='','delivery lease expired after final attempt',last_error) WHERE id=?`, item.ID); err != nil {
+			return domain.OutboundMessage{}, err
+		}
+		if err = tx.Commit(); err != nil {
+			return domain.OutboundMessage{}, err
+		}
+		return domain.OutboundMessage{}, ErrNotFound
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sending',attempts=attempts+1,locked_until=? WHERE id=?`, time.Now().Add(lease), item.ID)
 	if err != nil {
@@ -1134,15 +1147,17 @@ func (s *Store) ClaimOutbound(ctx context.Context, lease time.Duration) (domain.
 	if err = tx.Commit(); err != nil {
 		return domain.OutboundMessage{}, err
 	}
+	item.Status = "sending"
+	item.Attempts++
 	return item, nil
 }
 
-func (s *Store) CompleteOutbound(ctx context.Context, outboxID, messageID string, sendErr error) error {
+func (s *Store) CompleteOutbound(ctx context.Context, outboxID string, attempt int, messageID string, sendErr error) error {
 	if sendErr == nil {
-		_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sent',whatsapp_message_id=?,sent_at=NOW(6),locked_until=NULL WHERE id=?`, messageID, outboxID)
+		_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sent',whatsapp_message_id=?,sent_at=NOW(6),locked_until=NULL WHERE id=? AND status='sending' AND attempts=?`, messageID, outboxID, attempt)
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status=IF(attempts>=5,'dead','failed'),last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,60) SECOND),locked_until=NULL WHERE id=?`, truncate(sendErr.Error(), 1000), outboxID)
+	_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status=IF(attempts>=5,'dead','failed'),last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,60) SECOND),locked_until=NULL WHERE id=? AND status='sending' AND attempts=?`, truncate(sendErr.Error(), 1000), outboxID, attempt)
 	return err
 }
 
@@ -1153,26 +1168,44 @@ func (s *Store) ClaimJob(ctx context.Context, worker string, lease time.Duration
 	}
 	defer tx.Rollback()
 	var item domain.Job
-	err = tx.QueryRowContext(ctx, `SELECT id,job_type,payload_json,status,attempts,max_attempts,locked_by,locked_until,created_at FROM echo_jobs WHERE status IN ('queued','failed') AND available_at<=NOW(6) AND (locked_until IS NULL OR locked_until<NOW(6)) AND attempts<max_attempts ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&item.ID, &item.Type, &item.Payload, &item.Status, &item.Attempts, &item.MaxAttempts, &item.LockedBy, &item.LockedUntil, &item.CreatedAt)
+	err = tx.QueryRowContext(ctx, `SELECT id,job_type,payload_json,status,attempts,max_attempts,locked_by,locked_until,created_at FROM echo_jobs
+      WHERE (((status IN ('queued','failed')) AND available_at<=NOW(6) AND (locked_until IS NULL OR locked_until<NOW(6)))
+         OR (status='running' AND locked_until<NOW(6)))
+        AND attempts<=max_attempts
+      ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&item.ID, &item.Type, &item.Payload, &item.Status, &item.Attempts, &item.MaxAttempts, &item.LockedBy, &item.LockedUntil, &item.CreatedAt)
 	if err != nil {
 		return domain.Job{}, notFound(err)
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status='running',attempts=attempts+1,locked_by=?,locked_until=? WHERE id=?`, worker, time.Now().Add(lease), item.ID)
+	if item.Attempts >= item.MaxAttempts {
+		if _, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status='dead',locked_by='',locked_until=NULL,last_error=IF(last_error='','job lease expired after final attempt',last_error) WHERE id=?`, item.ID); err != nil {
+			return domain.Job{}, err
+		}
+		if err = tx.Commit(); err != nil {
+			return domain.Job{}, err
+		}
+		return domain.Job{}, ErrNotFound
+	}
+	lockedUntil := time.Now().Add(lease)
+	_, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status='running',attempts=attempts+1,locked_by=?,locked_until=? WHERE id=?`, worker, lockedUntil, item.ID)
 	if err != nil {
 		return domain.Job{}, err
 	}
 	if err = tx.Commit(); err != nil {
 		return domain.Job{}, err
 	}
+	item.Status = "running"
+	item.Attempts++
+	item.LockedBy = worker
+	item.LockedUntil = &lockedUntil
 	return item, nil
 }
 
-func (s *Store) CompleteJob(ctx context.Context, jobID string, jobErr error) error {
+func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, jobErr error) error {
 	if jobErr == nil {
-		_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status='complete',locked_by='',locked_until=NULL,last_error='' WHERE id=?`, jobID)
+		_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status='complete',locked_by='',locked_until=NULL,last_error='' WHERE id=? AND status='running' AND attempts=?`, jobID, attempt)
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=?`, truncate(jobErr.Error(), 1000), jobID)
+	_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=? AND status='running' AND attempts=?`, truncate(jobErr.Error(), 1000), jobID, attempt)
 	return err
 }
 

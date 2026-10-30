@@ -2,6 +2,8 @@ package whatsapp
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -312,20 +314,26 @@ func (g *Gateway) sendOutbox(ctx context.Context) error {
 			}
 			jid, parseErr := types.ParseJID(item.ChatJID)
 			if parseErr != nil {
-				_ = g.core.CompleteOutbound(ctx, item.ID, "", parseErr)
+				_ = g.core.CompleteOutbound(ctx, item.ID, item.Attempts, "", parseErr)
 				continue
 			}
 			body := item.Body
-			resp, sendErr := g.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: &body})
-			messageID := ""
-			if sendErr == nil {
+			outboundID := outboundMessageID(item.ID)
+			resp, sendErr := g.client.SendMessage(ctx, jid, &waE2E.Message{Conversation: &body}, whatsmeow.SendRequestExtra{ID: outboundID})
+			messageID := string(outboundID)
+			if sendErr == nil && resp.ID != "" {
 				messageID = string(resp.ID)
 			}
-			if err := g.core.CompleteOutbound(ctx, item.ID, messageID, sendErr); err != nil {
+			if err := g.core.CompleteOutbound(ctx, item.ID, item.Attempts, messageID, sendErr); err != nil {
 				slog.Error("complete WhatsApp outbox", "error", err)
 			}
 		}
 	}
+}
+
+func outboundMessageID(outboxID string) types.MessageID {
+	digest := sha256.Sum256([]byte("echo-outbox\x00" + outboxID))
+	return types.MessageID(whatsmeow.WebMessageIDPrefix + strings.ToUpper(hex.EncodeToString(digest[:9])))
 }
 
 func (g *Gateway) connected() bool {

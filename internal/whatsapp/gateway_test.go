@@ -1,11 +1,21 @@
 package whatsapp
 
 import (
+	"strings"
 	"testing"
 
 	runtimestate "github.com/ReindeerGames/echo/internal/runtime"
 	"github.com/polymorfa/hypermeow/proto/waE2E"
 )
+
+func TestOutboundMessageIDIsStableAndWhatsAppShaped(t *testing.T) {
+	first := outboundMessageID("out_0123456789abcdef01234567")
+	second := outboundMessageID("out_0123456789abcdef01234567")
+	other := outboundMessageID("out_0123456789abcdef01234568")
+	if first != second || first == other || !strings.HasPrefix(string(first), "3EB0") || len(first) != 22 {
+		t.Fatalf("unexpected deterministic message IDs first=%q second=%q other=%q", first, second, other)
+	}
+}
 
 func TestMessageBodyAndMentions(t *testing.T) {
 	text := "lead form is blank"
