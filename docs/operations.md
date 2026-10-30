@@ -5,7 +5,7 @@
 - `/healthz`: process liveness only
 - `/readyz`: operational readiness across core MariaDB, exact agreement between applied and embedded migrations, and every required supervised runtime loop (worker, worker watchdog, monitor watchdog, and WhatsApp gateway when enabled)
 
-The System view shows each background component's current state and last transition. Echo restarts a component with bounded exponential backoff if it exits unexpectedly; readiness remains unavailable until the component is running again. Readiness responses expose only safe state labels, while the underlying error is retained in server logs.
+The System view shows each background component's current state and last transition. Echo restarts a component with bounded exponential backoff if it exits unexpectedly; readiness remains unavailable until the component is running again. The first failure opens one durable component alert and privately notifies the owner. Further failures refresh the same alert without message spam. Echo resolves the alert and sends one recovery only after the component has run continuously for 30 seconds; this also reconciles stale alerts after a whole-process restart. If the WhatsApp gateway is the failed component, its notifications remain in the durable outbox and are delivered in order after the gateway recovers. Disabling a component intentionally clears a stale alert. Readiness responses and notifications expose only fixed safe state labels and summaries, while the underlying error is retained in server logs.
 
 The WhatsApp, AI, GitHub, worker, deployment, and audit states are visible in the authenticated System UI.
 

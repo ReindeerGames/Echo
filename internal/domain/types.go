@@ -279,6 +279,13 @@ type WorkerHealthTransition struct {
 	Health WorkerHealth `json:"health"`
 }
 
+type RuntimeComponentTransition struct {
+	Kind      string `json:"kind"`
+	Component string `json:"component"`
+	Status    string `json:"status"`
+	Summary   string `json:"summary"`
+}
+
 type SchemaStatus struct {
 	Current    bool `json:"current"`
 	Expected   int  `json:"expected"`

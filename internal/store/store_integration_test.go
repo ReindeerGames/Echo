@@ -72,6 +72,61 @@ func TestMariaDBSchemaStatusDetectsDrift(t *testing.T) {
 	}
 }
 
+func TestMariaDBRuntimeComponentAlertLifecycleIsAtomicAndDeduplicated(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	owner := "owner@s.whatsapp.net"
+	if transition, err := st.ReconcileRuntimeComponent(ctx, "monitor-watchdog", "running", true, now, owner); err != nil || transition != nil {
+		t.Fatalf("healthy component without alert: transition=%#v err=%v", transition, err)
+	}
+
+	opened, err := st.ReconcileRuntimeComponent(ctx, "worker", "error", false, now, owner)
+	if err != nil || opened == nil || opened.Kind != "opened" {
+		t.Fatalf("open runtime alert: transition=%#v err=%v", opened, err)
+	}
+	duplicate, err := st.ReconcileRuntimeComponent(ctx, "worker", "error", false, now.Add(time.Second), owner)
+	if err != nil || duplicate != nil {
+		t.Fatalf("duplicate runtime alert: transition=%#v err=%v", duplicate, err)
+	}
+	resolved, err := st.ReconcileRuntimeComponent(ctx, "worker", "running", true, now.Add(30*time.Second), owner)
+	if err != nil || resolved == nil || resolved.Kind != "resolved" {
+		t.Fatalf("resolve runtime alert: transition=%#v err=%v", resolved, err)
+	}
+	if transition, err := st.ReconcileRuntimeComponent(ctx, "worker", "running", true, now.Add(time.Minute), owner); err != nil || transition != nil {
+		t.Fatalf("duplicate runtime recovery: transition=%#v err=%v", transition, err)
+	}
+	reopened, err := st.ReconcileRuntimeComponent(ctx, "worker", "error", false, now.Add(2*time.Minute), owner)
+	if err != nil || reopened == nil || reopened.Kind != "reopened" {
+		t.Fatalf("reopen runtime alert: transition=%#v err=%v", reopened, err)
+	}
+	disabled, err := st.ReconcileRuntimeComponent(ctx, "worker", "disabled", true, now.Add(3*time.Minute), owner)
+	if err != nil || disabled == nil || disabled.Kind != "resolved" || disabled.Status != "disabled" {
+		t.Fatalf("disable runtime component: transition=%#v err=%v", disabled, err)
+	}
+
+	var notifications, audits int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE chat_jid=?`, owner).Scan(&notifications); err != nil || notifications != 4 {
+		t.Fatalf("runtime notifications count=%d err=%v", notifications, err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_audit_events WHERE resource_type='runtime_component' AND resource_id='worker'`).Scan(&audits); err != nil || audits != 4 {
+		t.Fatalf("runtime audits count=%d err=%v", audits, err)
+	}
+	var open int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_runtime_component_alerts WHERE component_name='worker' AND alert_status='open'`).Scan(&open); err != nil || open != 0 {
+		t.Fatalf("runtime alert state count=%d err=%v", open, err)
+	}
+}
+
 func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -594,7 +649,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)
