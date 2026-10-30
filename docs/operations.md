@@ -7,6 +7,8 @@
 
 The WhatsApp, AI, GitHub, worker, deployment, and audit states are visible in the authenticated System UI.
 
+For every observer-managed service, configure a heartbeat timeout at least twice its reporting interval. An `observer-silent` alert means Echo is running but has stopped receiving evidence from that service's observer; check the observer process, network path, webhook secret, and the target health endpoint. Do not treat silence as proof that the workload itself is down.
+
 ## Backup
 
 Back up `echo_whatsapp` and `echo_core` independently using encrypted storage. The session database contains cryptographic key material and must receive the stricter retention and access policy.

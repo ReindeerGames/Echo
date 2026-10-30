@@ -53,7 +53,8 @@ type GitHub struct {
 }
 
 type Monitor struct {
-	WebhookSecret string
+	WebhookSecret    string
+	WatchdogInterval time.Duration
 }
 
 type AI struct {
@@ -114,7 +115,8 @@ func Load() (Config, error) {
 			WebhookSecret: strings.TrimSpace(os.Getenv("ECHO_GITHUB_WEBHOOK_SECRET")),
 		},
 		Monitor: Monitor{
-			WebhookSecret: strings.TrimSpace(os.Getenv("ECHO_MONITOR_WEBHOOK_SECRET")),
+			WebhookSecret:    strings.TrimSpace(os.Getenv("ECHO_MONITOR_WEBHOOK_SECRET")),
+			WatchdogInterval: duration("ECHO_MONITOR_WATCHDOG_INTERVAL", 30*time.Second),
 		},
 		AI: AI{
 			Enabled: boolean("ECHO_AI_ENABLED", false),
@@ -163,6 +165,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Assistant.Retention < 24*time.Hour || cfg.Assistant.Retention > 365*24*time.Hour {
 		return Config{}, errors.New("ECHO_ASSISTANT_RETENTION must be between 24h and 8760h")
+	}
+	if cfg.Monitor.WatchdogInterval < 5*time.Second || cfg.Monitor.WatchdogInterval > 5*time.Minute {
+		return Config{}, errors.New("ECHO_MONITOR_WATCHDOG_INTERVAL must be between 5s and 5m")
 	}
 	publicURL, err := url.ParseRequestURI(cfg.HTTP.PublicBaseURL)
 	if err != nil {

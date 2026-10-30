@@ -87,3 +87,14 @@ func TestMonitorWebhookRejectsUnsignedPayload(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestServiceRejectsUnsafeHeartbeatTimeout(t *testing.T) {
+	server := &Server{}
+	request := httptest.NewRequest("POST", "/api/v1/services", strings.NewReader(`{"projectId":"prj_1","key":"api","name":"API","heartbeatTimeoutSeconds":30,"metadata":{}}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.services(response, request)
+	if response.Code != 400 || !strings.Contains(response.Body.String(), "between 60 and 86400") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}

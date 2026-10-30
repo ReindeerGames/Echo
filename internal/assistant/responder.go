@@ -134,7 +134,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			if query != "" && !strings.Contains(strings.ToLower(service.Key), query) && !strings.Contains(strings.ToLower(service.Name), query) {
 				continue
 			}
-			views = append(views, map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "enabled": service.Enabled})
+			views = append(views, map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds})
 		}
 		return marshal(map[string]any{"services": views, "count": len(views)})
 	case "get_service":
@@ -178,7 +178,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		for _, event := range events {
 			signals = append(signals, map[string]any{"status": event.Status, "severity": event.Severity, "summary": event.Summary, "source": event.Source, "observed_at": event.ObservedAt})
 		}
-		return marshal(map[string]any{"found": true, "service": map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "description": service.Description, "enabled": service.Enabled}, "open_alerts": serviceAlerts, "recent_signals": signals})
+		return marshal(map[string]any{"found": true, "service": map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "description": service.Description, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds}, "open_alerts": serviceAlerts, "recent_signals": signals})
 	case "list_projects":
 		projects, err := r.reader.ListProjects(ctx)
 		if err != nil {

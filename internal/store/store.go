@@ -355,7 +355,7 @@ func (s *Store) GetEnvironment(ctx context.Context, environmentID string) (domai
 }
 
 func (s *Store) ListServices(ctx context.Context, projectID string) ([]domain.Service, error) {
-	query := `SELECT s.id,s.project_id,p.name,s.service_key,s.name,s.service_kind,s.criticality,s.description,s.enabled,s.metadata_json,s.created_at,s.updated_at FROM echo_services s JOIN echo_projects p ON p.id=s.project_id`
+	query := `SELECT s.id,s.project_id,p.name,s.service_key,s.name,s.service_kind,s.criticality,s.description,s.enabled,s.heartbeat_timeout_seconds,s.metadata_json,s.created_at,s.updated_at FROM echo_services s JOIN echo_projects p ON p.id=s.project_id`
 	args := []any{}
 	if projectID != "" {
 		query += ` WHERE s.project_id=?`
@@ -370,7 +370,7 @@ func (s *Store) ListServices(ctx context.Context, projectID string) ([]domain.Se
 	var out []domain.Service
 	for rows.Next() {
 		var item domain.Service
-		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Key, &item.Name, &item.Kind, &item.Criticality, &item.Description, &item.Enabled, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Key, &item.Name, &item.Kind, &item.Criticality, &item.Description, &item.Enabled, &item.HeartbeatTimeoutSeconds, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -391,7 +391,7 @@ func (s *Store) SaveService(ctx context.Context, item domain.Service) (domain.Se
 	if len(item.Metadata) == 0 {
 		item.Metadata = json.RawMessage(`{}`)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_services(id,project_id,service_key,name,service_kind,criticality,description,enabled,metadata_json) VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),service_key=VALUES(service_key),name=VALUES(name),service_kind=VALUES(service_kind),criticality=VALUES(criticality),description=VALUES(description),enabled=VALUES(enabled),metadata_json=VALUES(metadata_json)`, item.ID, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.Metadata)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_services(id,project_id,service_key,name,service_kind,criticality,description,enabled,heartbeat_timeout_seconds,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),service_key=VALUES(service_key),name=VALUES(name),service_kind=VALUES(service_kind),criticality=VALUES(criticality),description=VALUES(description),enabled=VALUES(enabled),heartbeat_timeout_seconds=VALUES(heartbeat_timeout_seconds),metadata_json=VALUES(metadata_json)`, item.ID, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.HeartbeatTimeoutSeconds, item.Metadata)
 	if err != nil {
 		return domain.Service{}, err
 	}
@@ -400,7 +400,7 @@ func (s *Store) SaveService(ctx context.Context, item domain.Service) (domain.Se
 
 func (s *Store) GetService(ctx context.Context, serviceID string) (domain.Service, error) {
 	var item domain.Service
-	err := s.db.QueryRowContext(ctx, `SELECT s.id,s.project_id,p.name,s.service_key,s.name,s.service_kind,s.criticality,s.description,s.enabled,s.metadata_json,s.created_at,s.updated_at FROM echo_services s JOIN echo_projects p ON p.id=s.project_id WHERE s.id=?`, serviceID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Key, &item.Name, &item.Kind, &item.Criticality, &item.Description, &item.Enabled, &item.Metadata, &item.CreatedAt, &item.UpdatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT s.id,s.project_id,p.name,s.service_key,s.name,s.service_kind,s.criticality,s.description,s.enabled,s.heartbeat_timeout_seconds,s.metadata_json,s.created_at,s.updated_at FROM echo_services s JOIN echo_projects p ON p.id=s.project_id WHERE s.id=?`, serviceID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Key, &item.Name, &item.Kind, &item.Criticality, &item.Description, &item.Enabled, &item.HeartbeatTimeoutSeconds, &item.Metadata, &item.CreatedAt, &item.UpdatedAt)
 	return item, notFound(err)
 }
 
@@ -456,7 +456,82 @@ func (s *Store) ListServiceAlerts(ctx context.Context, status string) ([]domain.
 	return out, rows.Err()
 }
 
-func (s *Store) RecordMonitorEvent(ctx context.Context, event domain.MonitorEvent) (domain.MonitorResult, error) {
+func (s *Store) ListStaleServiceHeartbeats(ctx context.Context, now time.Time) ([]domain.StaleServiceHeartbeat, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.name,s.criticality,s.heartbeat_timeout_seconds,COALESCE(e.event_id,''),e.observed_at,s.updated_at,GREATEST(s.updated_at,COALESCE(e.observed_at,'1970-01-01 00:00:00')) AS policy_reference
+      FROM echo_services s
+      LEFT JOIN echo_monitor_events e ON e.id=(
+        SELECT e2.id FROM echo_monitor_events e2
+        WHERE e2.service_id=s.id AND e2.source_name<>'echo-watchdog'
+        ORDER BY e2.observed_at DESC,e2.received_at DESC LIMIT 1
+      )
+      WHERE s.enabled=TRUE AND s.heartbeat_timeout_seconds>0
+      HAVING TIMESTAMPADD(SECOND,heartbeat_timeout_seconds,policy_reference)<=?`, now.UTC())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []domain.StaleServiceHeartbeat
+	for rows.Next() {
+		var item domain.StaleServiceHeartbeat
+		var observed sql.NullTime
+		if err := rows.Scan(&item.ServiceID, &item.ServiceName, &item.Criticality, &item.TimeoutSeconds, &item.LastEventID, &observed, &item.PolicyUpdatedAt, &item.PolicyReference); err != nil {
+			return nil, err
+		}
+		if observed.Valid {
+			value := observed.Time.UTC()
+			item.LastObservedAt = &value
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
+func (s *Store) ResolveInactiveHeartbeatAlerts(ctx context.Context, now time.Time, ownerJID ...string) ([]domain.AlertTransition, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at
+      FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id
+      WHERE a.alert_status='open' AND a.fingerprint='observer-silent' AND (s.enabled=FALSE OR s.heartbeat_timeout_seconds=0)
+      FOR UPDATE`)
+	if err != nil {
+		return nil, err
+	}
+	var transitions []domain.AlertTransition
+	for rows.Next() {
+		var alert domain.ServiceAlert
+		if err := scanServiceAlert(rows, &alert); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		alert.Status = "resolved"
+		alert.LastSeenAt = now.UTC()
+		resolved := now.UTC()
+		alert.ResolvedAt = &resolved
+		alert.LatestEventID = "echo-watchdog:policy-disabled"
+		transitions = append(transitions, domain.AlertTransition{Kind: "resolved", Alert: alert})
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, transition := range transitions {
+		alert := transition.Alert
+		if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET alert_status='resolved',latest_event_id=?,last_seen_at=?,resolved_at=? WHERE id=?`, alert.LatestEventID, alert.LastSeenAt, alert.ResolvedAt, alert.ID); err != nil {
+			return nil, err
+		}
+	}
+	if err := enqueueMonitorTransitions(ctx, tx, firstString(ownerJID), transitions); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return transitions, nil
+}
+
+func (s *Store) RecordMonitorEvent(ctx context.Context, event domain.MonitorEvent, ownerJID ...string) (domain.MonitorResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.MonitorResult{}, err
@@ -489,6 +564,9 @@ func (s *Store) RecordMonitorEvent(ctx context.Context, event domain.MonitorEven
 	if err != nil {
 		return domain.MonitorResult{}, err
 	}
+	if err := enqueueMonitorTransitions(ctx, tx, firstString(ownerJID), transitions); err != nil {
+		return domain.MonitorResult{}, err
+	}
 	if err := tx.QueryRowContext(ctx, `SELECT e.id,e.event_id,e.service_id,s.name,e.source_name,e.health_status,e.severity,e.summary,e.fingerprint,e.details_json,e.observed_at,e.received_at FROM echo_monitor_events e JOIN echo_services s ON s.id=e.service_id WHERE e.id=?`, event.ID).Scan(monitorEventScanArgs(&event)...); err != nil {
 		return domain.MonitorResult{}, err
 	}
@@ -496,6 +574,34 @@ func (s *Store) RecordMonitorEvent(ctx context.Context, event domain.MonitorEven
 		return domain.MonitorResult{}, err
 	}
 	return domain.MonitorResult{Event: event, Transitions: transitions}, nil
+}
+
+func enqueueMonitorTransitions(ctx context.Context, tx *sql.Tx, ownerJID string, transitions []domain.AlertTransition) error {
+	ownerJID = strings.TrimSpace(ownerJID)
+	if ownerJID == "" {
+		return nil
+	}
+	if len(ownerJID) > 255 {
+		return errors.New("owner JID exceeds storage limits")
+	}
+	for _, transition := range transitions {
+		if transition.Kind != "opened" && transition.Kind != "reopened" && transition.Kind != "resolved" {
+			continue
+		}
+		alert := transition.Alert
+		body := fmt.Sprintf("Echo alert %s · %s\n%s (%s)\n%s", strings.ToUpper(transition.Kind), strings.ToUpper(alert.Severity), alert.ServiceName, alert.Fingerprint, alert.Summary)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, body); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 type scanner interface {

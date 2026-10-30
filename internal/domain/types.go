@@ -55,18 +55,30 @@ type Environment struct {
 }
 
 type Service struct {
-	ID          string          `json:"id"`
-	ProjectID   string          `json:"projectId"`
-	ProjectName string          `json:"projectName,omitempty"`
-	Key         string          `json:"key"`
-	Name        string          `json:"name"`
-	Kind        string          `json:"kind"`
-	Criticality string          `json:"criticality"`
-	Description string          `json:"description"`
-	Enabled     bool            `json:"enabled"`
-	Metadata    json.RawMessage `json:"metadata"`
-	CreatedAt   time.Time       `json:"createdAt"`
-	UpdatedAt   time.Time       `json:"updatedAt"`
+	ID                      string          `json:"id"`
+	ProjectID               string          `json:"projectId"`
+	ProjectName             string          `json:"projectName,omitempty"`
+	Key                     string          `json:"key"`
+	Name                    string          `json:"name"`
+	Kind                    string          `json:"kind"`
+	Criticality             string          `json:"criticality"`
+	Description             string          `json:"description"`
+	Enabled                 bool            `json:"enabled"`
+	HeartbeatTimeoutSeconds int             `json:"heartbeatTimeoutSeconds"`
+	Metadata                json.RawMessage `json:"metadata"`
+	CreatedAt               time.Time       `json:"createdAt"`
+	UpdatedAt               time.Time       `json:"updatedAt"`
+}
+
+type StaleServiceHeartbeat struct {
+	ServiceID       string     `json:"serviceId"`
+	ServiceName     string     `json:"serviceName"`
+	Criticality     string     `json:"criticality"`
+	TimeoutSeconds  int        `json:"timeoutSeconds"`
+	LastEventID     string     `json:"lastEventId,omitempty"`
+	LastObservedAt  *time.Time `json:"lastObservedAt,omitempty"`
+	PolicyUpdatedAt time.Time  `json:"policyUpdatedAt"`
+	PolicyReference time.Time  `json:"policyReference"`
 }
 
 type MonitorEvent struct {

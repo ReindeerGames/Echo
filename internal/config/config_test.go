@@ -103,6 +103,17 @@ func TestAssistantRetentionIsBounded(t *testing.T) {
 	}
 }
 
+func TestMonitorWatchdogIntervalIsBounded(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "false")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	t.Setenv("ECHO_MONITOR_WATCHDOG_INTERVAL", "1s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected short watchdog interval to be rejected")
+	}
+}
+
 func TestProductionAllowsOwnerToBeConfiguredInApplication(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "production")

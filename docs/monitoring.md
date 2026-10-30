@@ -6,7 +6,7 @@ Echo includes `echo-observer`, a small health-endpoint probe and signed event fo
 
 ## Configure the catalogue
 
-Open **Monitoring → Add service** and map each runtime workload to its Echo project. Use a stable key such as `nudgie-web`; the returned service ID is the identifier observers send.
+Open **Monitoring → Add service** and map each runtime workload to its Echo project. Use a stable key such as `nudgie-web`; the returned service ID is the identifier observers send. Set **Heartbeat timeout** to at least twice the observer interval (for example, 120 seconds for a 30-second observer). Use `0` only for services where missing signals must not alert.
 
 Set `ECHO_MONITOR_WEBHOOK_SECRET` to a random value of at least 32 characters. Leaving it empty disables the public monitoring endpoint.
 
@@ -36,11 +36,17 @@ Allowed statuses are `healthy`, `degraded`, `unhealthy`, and `unknown`. Allowed 
 
 `eventId` is an idempotency key. Retrying the exact event does not create another signal or notification. A degraded or unhealthy signal opens or updates its fingerprinted alert. A healthy signal resolves all older open alerts for that service; delayed healthy events cannot resolve a newer outage.
 
+## Missing observer detection
+
+Echo's internal watchdog checks heartbeat-enabled services every `ECHO_MONITOR_WATCHDOG_INTERVAL` (30 seconds by default). If no non-watchdog signal arrives within the service's timeout, Echo opens an `observer-silent` alert. High and critical services produce a critical alert; low and medium services produce a warning. A later healthy observer event resolves it, and a second silence period reopens the same alert without notification noise.
+
+The first timeout starts after the service policy is saved, giving a newly configured observer a full grace window. Watchdog events never count as observer heartbeats. Disabling the heartbeat policy or service resolves only the silence alert; it does not clear unrelated application-health alerts.
+
 The body is limited to one MiB. Unknown and disabled services are rejected. Details are retained as evidence and must never contain credentials or unrestricted log dumps.
 
 ## Notification policy
 
-Echo queues a private WhatsApp message to the configured owner when an alert opens, reopens, or resolves. Repeated failing observations update `lastSeenAt` without generating noise. All accepted events and alert state are visible in **Monitoring**.
+Echo queues a private WhatsApp message to the configured owner when an alert opens, reopens, or resolves. The alert transition and durable WhatsApp outbox item commit in the same MariaDB transaction, so a crash cannot preserve one while losing the other. Repeated failing observations update `lastSeenAt` without generating noise. All accepted events and alert state are visible in **Monitoring**.
 
 ## Observer boundary
 

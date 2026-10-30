@@ -12,6 +12,7 @@ import (
 	"github.com/ReindeerGames/echo/internal/config"
 	"github.com/ReindeerGames/echo/internal/githubapp"
 	"github.com/ReindeerGames/echo/internal/httpapi"
+	"github.com/ReindeerGames/echo/internal/monitor"
 	"github.com/ReindeerGames/echo/internal/owner"
 	"github.com/ReindeerGames/echo/internal/policy"
 	runtimestate "github.com/ReindeerGames/echo/internal/runtime"
@@ -80,6 +81,12 @@ func run() error {
 			}
 		}()
 	}
+	heartbeatWatchdog := monitor.NewWatchdog(st, owners, cfg.Monitor.WatchdogInterval)
+	go func() {
+		if err := heartbeatWatchdog.Run(ctx); err != nil {
+			slog.Error("monitor heartbeat watchdog stopped", "error", err)
+		}
+	}()
 
 	select {
 	case <-ctx.Done():

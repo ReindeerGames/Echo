@@ -405,6 +405,10 @@ func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_service", "criticality must be low, medium, high, or critical")
 		return
 	}
+	if item.HeartbeatTimeoutSeconds != 0 && (item.HeartbeatTimeoutSeconds < 60 || item.HeartbeatTimeoutSeconds > 86400) {
+		writeError(w, http.StatusBadRequest, "invalid_service", "heartbeatTimeoutSeconds must be zero (disabled) or between 60 and 86400")
+		return
+	}
 	saved, err := s.store.SaveService(r.Context(), item)
 	if err == nil {
 		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service.saved", "service", saved.ID, "succeeded", map[string]any{"key": saved.Key, "criticality": saved.Criticality})
@@ -640,36 +644,23 @@ func (s *Server) monitorWebhook(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "service_not_found", "enabled service was not found")
 		return
 	}
-	result, err := s.store.RecordMonitorEvent(r.Context(), event)
+	ownerJID := ""
+	if s.owners != nil {
+		ownerJID, err = s.owners.JID(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "monitor_event_failed", "monitor notification owner could not be resolved")
+			return
+		}
+	}
+	result, err := s.store.RecordMonitorEvent(r.Context(), event, ownerJID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "monitor_event_failed", "monitor event could not be recorded")
 		return
 	}
 	if !result.Duplicate {
 		_ = s.store.Audit(r.Context(), "system", event.Source, "monitor.event_recorded", "service", event.ServiceID, "succeeded", map[string]any{"eventId": event.EventID, "status": event.Status, "severity": event.Severity})
-		s.notifyMonitorTransitions(r.Context(), result.Transitions)
 	}
 	writeJSON(w, http.StatusAccepted, result)
-}
-
-func (s *Server) notifyMonitorTransitions(ctx context.Context, transitions []domain.AlertTransition) {
-	if len(transitions) == 0 || s.owners == nil {
-		return
-	}
-	ownerJID, err := s.owners.JID(ctx)
-	if err != nil || ownerJID == "" {
-		return
-	}
-	for _, transition := range transitions {
-		if transition.Kind != "opened" && transition.Kind != "reopened" && transition.Kind != "resolved" {
-			continue
-		}
-		alert := transition.Alert
-		body := fmt.Sprintf("Echo alert %s · %s\n%s (%s)\n%s", strings.ToUpper(transition.Kind), strings.ToUpper(alert.Severity), alert.ServiceName, alert.Fingerprint, alert.Summary)
-		if err := s.store.EnqueueOutbound(ctx, ownerJID, body); err != nil {
-			slog.Error("monitor alert notification could not be queued", "alert", alert.ID, "transition", transition.Kind, "error", err)
-		}
-	}
 }
 
 func oneOf(value string, allowed ...string) bool {

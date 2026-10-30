@@ -77,6 +77,8 @@ make local-observe
 
 The observer probes `/readyz` without reading its body, signs a normalized health event, and submits it to Echo. **Monitoring → Recent signals** should show `Local Echo` as healthy. The local example explicitly permits plaintext HTTP because both endpoints bind to loopback; observer configuration requires HTTPS by default.
 
+The seeded service expects a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens an `observer-silent` warning. Running `make local-observe` records fresh evidence and resolves that alert.
+
 To enable real analysis, open **System → OpenAI connection**, enter the OpenAI API key and model, and save. Echo validates the credentials before encrypting the key in MariaDB. Application settings override the local deterministic mock immediately without restarting the stack.
 
 ## Select the private owner

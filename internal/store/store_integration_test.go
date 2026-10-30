@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/domain"
+	"github.com/ReindeerGames/echo/internal/monitor"
 )
 
 func TestMariaDBIncidentIsIdempotent(t *testing.T) {
@@ -132,22 +134,22 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	}
 	observed := time.Now().UTC().Truncate(time.Microsecond)
 	unhealthy := domain.MonitorEvent{EventID: "monitor-1", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "Health endpoint failed", Fingerprint: "health-endpoint", Details: json.RawMessage(`{}`), ObservedAt: observed}
-	result, err := st.RecordMonitorEvent(ctx, unhealthy)
+	result, err := st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
 	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
 		t.Fatalf("open alert: result=%#v err=%v", result, err)
 	}
-	duplicate, err := st.RecordMonitorEvent(ctx, unhealthy)
+	duplicate, err := st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
 	if err != nil || !duplicate.Duplicate || len(duplicate.Transitions) != 0 {
 		t.Fatalf("deduplicate event: result=%#v err=%v", duplicate, err)
 	}
 	healthy := domain.MonitorEvent{EventID: "monitor-2", ServiceID: service.ID, Source: "integration", Status: "healthy", Severity: "info", Summary: "Health endpoint recovered", Details: json.RawMessage(`{}`), ObservedAt: observed.Add(time.Minute)}
-	result, err = st.RecordMonitorEvent(ctx, healthy)
+	result, err = st.RecordMonitorEvent(ctx, healthy, "owner@s.whatsapp.net")
 	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "resolved" {
 		t.Fatalf("resolve alert: result=%#v err=%v", result, err)
 	}
 	unhealthy.EventID = "monitor-3"
 	unhealthy.ObservedAt = observed.Add(2 * time.Minute)
-	result, err = st.RecordMonitorEvent(ctx, unhealthy)
+	result, err = st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
 	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "reopened" {
 		t.Fatalf("reopen alert: result=%#v err=%v", result, err)
 	}
@@ -158,6 +160,81 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	dashboard, err := st.Dashboard(ctx)
 	if err != nil || dashboard.OpenAlerts != 1 {
 		t.Fatalf("dashboard alert count: item=%#v err=%v", dashboard, err)
+	}
+	var notifications int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&notifications); err != nil || notifications != 3 {
+		t.Fatalf("alert transitions must enqueue atomically and once: count=%d err=%v", notifications, err)
+	}
+	atomicFailure := unhealthy
+	atomicFailure.EventID = "monitor-atomic-failure"
+	atomicFailure.Fingerprint = "atomic-failure"
+	atomicFailure.ObservedAt = observed.Add(3 * time.Minute)
+	if _, err := st.RecordMonitorEvent(ctx, atomicFailure, strings.Repeat("x", 256)); err == nil {
+		t.Fatal("oversized notification owner unexpectedly committed")
+	}
+	var failedEvents int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_monitor_events WHERE event_id=?`, atomicFailure.EventID).Scan(&failedEvents); err != nil || failedEvents != 0 {
+		t.Fatalf("failed notification did not roll back monitor event: count=%d err=%v", failedEvents, err)
+	}
+}
+
+func TestMariaDBHeartbeatWatchdogLifecycle(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "watchdog", Name: "Watchdog", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "api", Name: "API", Kind: "application", Criticality: "high", Enabled: true, HeartbeatTimeoutSeconds: 60, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_services SET updated_at=? WHERE id=?`, now.Add(-2*time.Minute), service.ID); err != nil {
+		t.Fatal(err)
+	}
+	watchdog := monitor.NewWatchdog(st, nil, 5*time.Second)
+	opened, err := watchdog.Sweep(ctx, now)
+	if err != nil || len(opened) != 1 || opened[0].Kind != "opened" || opened[0].Alert.Fingerprint != "observer-silent" {
+		t.Fatalf("open silence alert: transitions=%#v err=%v", opened, err)
+	}
+	duplicate, err := watchdog.Sweep(ctx, now.Add(10*time.Second))
+	if err != nil || len(duplicate) != 0 {
+		t.Fatalf("deduplicate silence alert: transitions=%#v err=%v", duplicate, err)
+	}
+	healthy := domain.MonitorEvent{EventID: "observer-recovered", ServiceID: service.ID, Source: "integration", Status: "healthy", Severity: "info", Summary: "API is healthy", Details: json.RawMessage(`{}`), ObservedAt: now.Add(20 * time.Second)}
+	recovery, err := st.RecordMonitorEvent(ctx, healthy)
+	if err != nil || len(recovery.Transitions) != 1 || recovery.Transitions[0].Kind != "resolved" {
+		t.Fatalf("resolve silence alert: result=%#v err=%v", recovery, err)
+	}
+	reopened, err := watchdog.Sweep(ctx, now.Add(2*time.Minute))
+	if err != nil || len(reopened) != 1 || reopened[0].Kind != "reopened" {
+		t.Fatalf("reopen silence alert: transitions=%#v err=%v", reopened, err)
+	}
+	service.HeartbeatTimeoutSeconds = 0
+	if _, err := st.SaveService(ctx, service); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := watchdog.Sweep(ctx, now.Add(3*time.Minute))
+	if err != nil || len(resolved) != 1 || resolved[0].Kind != "resolved" {
+		t.Fatalf("resolve disabled heartbeat policy: transitions=%#v err=%v", resolved, err)
+	}
+	service.HeartbeatTimeoutSeconds = 60
+	if _, err := st.SaveService(ctx, service); err != nil {
+		t.Fatal(err)
+	}
+	reenabled, err := watchdog.Sweep(ctx, now.Add(5*time.Minute))
+	if err != nil || len(reenabled) != 1 || reenabled[0].Kind != "reopened" {
+		t.Fatalf("reopen re-enabled heartbeat policy: transitions=%#v err=%v", reenabled, err)
 	}
 }
 
