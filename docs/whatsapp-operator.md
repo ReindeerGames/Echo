@@ -2,7 +2,7 @@
 
 The configured owner can message Echo directly for a read-only operational view. Echo authorizes the sender against the selected owner contact, reads only its structured MariaDB state, and audits the interpreted intent without storing the question body in the audit event.
 
-When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only eight function tools: current status, open alerts, service search, service detail, worker queue, project/repository listing, live read-only GitHub repository status, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, general web, code execution, deployment, or mutation tool.
+When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only nine function tools: current status, open alerts, service search, service detail, worker queue, deployment records, project/repository listing, live read-only GitHub repository status, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, general web, code execution, deployment mutation, or other write tool.
 
 Service detail includes observer freshness, evidence age, alert fingerprints and times, plus a strict allowlist of useful operational counters such as disk, memory, load, HTTP latency, container lifecycle, health, restarts, and heartbeat policy. Arbitrary detail keys and free-form failure text are never sent to the model, so a custom observer cannot smuggle credentials or unrestricted logs through monitoring evidence. Evidence objects above 64 KiB are omitted. Tool collections are bounded and declare when results were truncated.
 
@@ -13,6 +13,7 @@ Supported requests include:
 - `services` for the operations catalogue
 - `service <name-or-key>` for a service's open alerts, latest observer evidence, and whether that evidence is fresh
 - `jobs` or “work queue” for queued, running, retrying, and dead worker jobs
+- `deployments` or “what is deployed?” for recent dispatch, rollback, and verification state
 - `projects` for the project and repository map
 - `repo <name>` for the configured default-branch head and up to ten recent GitHub Actions runs
 - `incident <id>` for the incident state and latest diagnosis

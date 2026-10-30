@@ -16,13 +16,14 @@ import (
 )
 
 type fakeReader struct {
-	dashboard domain.Dashboard
-	projects  []domain.Project
-	repos     []domain.Repository
-	services  []domain.Service
-	alerts    []domain.ServiceAlert
-	events    []domain.MonitorEvent
-	jobs      []domain.Job
+	dashboard   domain.Dashboard
+	projects    []domain.Project
+	repos       []domain.Repository
+	services    []domain.Service
+	alerts      []domain.ServiceAlert
+	events      []domain.MonitorEvent
+	jobs        []domain.Job
+	deployments []domain.Deployment
 }
 
 type fakeToolModel struct{}
@@ -43,7 +44,7 @@ func (fakeToolModel) RespondWithTools(ctx context.Context, instructions string, 
 		return "", nil, errors.New("missing safe investigation context")
 	}
 	for _, tool := range tools {
-		if strings.Contains(tool.Name, "restart") || strings.Contains(tool.Name, "deploy") || strings.Contains(tool.Name, "shell") {
+		if strings.Contains(tool.Name, "restart") || strings.Contains(tool.Name, "dispatch") || strings.Contains(tool.Name, "shell") || strings.Contains(tool.Name, "merge") || strings.Contains(tool.Name, "approve") || strings.Contains(tool.Name, "write") {
 			return "", nil, errors.New("mutation tool exposed")
 		}
 	}
@@ -73,6 +74,9 @@ func (f fakeReader) ListMonitorEvents(context.Context, string, int) ([]domain.Mo
 	return f.events, nil
 }
 func (f fakeReader) ListJobs(context.Context, string, int) ([]domain.Job, error) { return f.jobs, nil }
+func (f fakeReader) ListDeployments(context.Context, string) ([]domain.Deployment, error) {
+	return f.deployments, nil
+}
 func (f fakeReader) GetIncident(context.Context, string) (domain.Incident, error) {
 	return domain.Incident{}, store.ErrNotFound
 }
@@ -90,6 +94,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"incident inc_123456": "incident",
 		"failed jobs":         "jobs",
 		"repo invoices":       "repository",
+		"what is deployed?":   "deployments",
 	}
 	for input, expected := range tests {
 		got, _ := classify(input)
@@ -291,6 +296,24 @@ func TestRepositoryStatusReportsAmbiguousConfiguredMatchesWithoutGitHubCall(t *t
 	answer, intent, err := NewOperator(reader, nil, nil, inspector).Answer(context.Background(), "repo site")
 	if err != nil || intent != "repository" || !containsAll(answer, "ambiguous", "One/site", "Two/site") || inspector.repo.ID != "" {
 		t.Fatalf("unexpected ambiguous answer intent=%s body=%s repo=%#v err=%v", intent, answer, inspector.repo, err)
+	}
+}
+
+func TestDeploymentAnswersExposeBoundedVerificationState(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{deployments: []domain.Deployment{
+		{ID: "dep_verified", IncidentID: "inc_1", ProjectID: "prj_1", Environment: "production", Operation: "deploy", ArtifactRef: "a75cdbdaad7917a104299753c32f8358b90a50e6", Status: "verified", Repository: "ReindeerGames/invoices", Workflow: "deploy.yml", ExternalRunID: 42, CreatedAt: now.Add(-time.Hour)},
+		{ID: "dep_failed", IncidentID: "inc_2", ProjectID: "prj_1", Environment: "staging", Operation: "rollback", ArtifactRef: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", Status: "failed", Repository: "ReindeerGames/invoices", WorkflowURL: "https://example.test/private", CreatedAt: now.Add(-2 * time.Hour)},
+	}}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "deployments")
+	if err != nil || intent != "deployments" || !containsAll(answer, "Recent Echo deployments (2)", "VERIFIED · deploy · production", "FAILED · rollback · staging", "a75cdbdaad79") {
+		t.Fatalf("unexpected deployment answer intent=%s body=%s err=%v", intent, answer, err)
+	}
+	output, err := responder.executeTool(context.Background(), "get_deployments", json.RawMessage(`{"status":"failed"}`))
+	if err != nil || !containsAll(output, `"count":1`, `"id":"dep_failed"`, `"status":"failed"`) || strings.Contains(output, "private") || strings.Contains(output, "dep_verified") {
+		t.Fatalf("unexpected deployment tool output=%s err=%v", output, err)
 	}
 }
 

@@ -25,6 +25,7 @@ type Reader interface {
 	ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error)
 	ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error)
 	ListJobs(context.Context, string, int) ([]domain.Job, error)
+	ListDeployments(context.Context, string) ([]domain.Deployment, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
 }
@@ -97,6 +98,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("list_services", "List services. Use an empty query for all services or a name/key fragment to filter.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Service name or key fragment, or empty string."}}, []string{"query"})),
 		ai.FunctionTool("get_service", "Get one service with its open alerts and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
 		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
+		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_repository_status", "Inspect the configured repository default-branch head and its ten most recent GitHub Actions runs. This tool is read-only.", schema(map[string]any{"repository": map[string]string{"type": "string", "description": "Configured repository ID, name, or owner/name."}}, []string{"repository"})),
 		ai.FunctionTool("get_incident", "Get an incident and its latest evidence-backed diagnosis by exact incident ID.", schema(map[string]any{"incident_id": map[string]string{"type": "string"}}, []string{"incident_id"})),
@@ -344,6 +346,31 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			views = append(views, view)
 		}
 		return marshal(map[string]any{"jobs": views, "count": active, "truncated": active > len(views)})
+	case "get_deployments":
+		var arguments struct {
+			Status string `json:"status"`
+		}
+		if err := decodeArguments(raw, &arguments); err != nil {
+			return "", err
+		}
+		deployments, err := r.reader.ListDeployments(ctx, "")
+		if err != nil {
+			return "", err
+		}
+		status := strings.ToLower(strings.TrimSpace(arguments.Status))
+		views := make([]map[string]any, 0, min(len(deployments), 50))
+		matched := 0
+		for _, deployment := range deployments {
+			if status != "" && strings.ToLower(deployment.Status) != status {
+				continue
+			}
+			matched++
+			if len(views) == 50 {
+				continue
+			}
+			views = append(views, deploymentView(deployment))
+		}
+		return marshal(map[string]any{"deployments": views, "count": matched, "truncated": matched > len(views)})
 	case "get_incident":
 		var arguments struct {
 			IncidentID string `json:"incident_id"`
@@ -554,6 +581,8 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.services(ctx)
 	case "jobs":
 		answer, err = r.jobs(ctx)
+	case "deployments":
+		answer, err = r.deployments(ctx)
 	case "projects":
 		answer, err = r.projects(ctx)
 	case "repository":
@@ -564,7 +593,7 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “projects”, “repo <name>”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “repo <name>”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -596,6 +625,9 @@ func classify(text string) (string, string) {
 	}
 	if value == "jobs" || value == "work queue" || value == "queue" || value == "failed jobs" || value == "worker jobs" {
 		return "jobs", ""
+	}
+	if value == "deployments" || value == "deploys" || value == "deployment status" || strings.Contains(value, "what is deployed") || strings.Contains(value, "what's deploying") || strings.Contains(value, "what is deploying") {
+		return "deployments", ""
 	}
 	if value == "projects" || value == "repos" || value == "repositories" || value == "list projects" {
 		return "projects", ""
@@ -845,6 +877,48 @@ func (r *Responder) jobs(ctx context.Context) (string, error) {
 	return fmt.Sprintf("Echo work queue (%d active)\n\n%s", len(active), strings.Join(lines, "\n")), nil
 }
 
+func (r *Responder) deployments(ctx context.Context) (string, error) {
+	deployments, err := r.reader.ListDeployments(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	if len(deployments) == 0 {
+		return "No Echo deployment records are available yet.", nil
+	}
+	lines := make([]string, 0, min(len(deployments), 10))
+	for index, deployment := range deployments {
+		if index == 10 {
+			lines = append(lines, fmt.Sprintf("…and %d more in the control plane.", len(deployments)-index))
+			break
+		}
+		target := deployment.Environment
+		if deployment.Repository != "" {
+			target += " · " + truncateRunes(deployment.Repository, 160)
+		}
+		artifact := truncateRunes(deployment.ArtifactRef, 12)
+		lines = append(lines, fmt.Sprintf("• %s · %s · %s · %s · %s ago", strings.ToUpper(deployment.Status), strings.ReplaceAll(deployment.Operation, "_", " "), target, artifact, formatAge(r.now(), deployment.CreatedAt)))
+	}
+	return fmt.Sprintf("Recent Echo deployments (%d)\n\n%s", len(deployments), strings.Join(lines, "\n")), nil
+}
+
+func deploymentView(deployment domain.Deployment) map[string]any {
+	return map[string]any{
+		"id":              deployment.ID,
+		"incident_id":     deployment.IncidentID,
+		"project_id":      deployment.ProjectID,
+		"environment":     deployment.Environment,
+		"operation":       deployment.Operation,
+		"artifact_ref":    truncateRunes(deployment.ArtifactRef, 64),
+		"status":          deployment.Status,
+		"repository":      truncateRunes(deployment.Repository, 160),
+		"workflow":        truncateRunes(deployment.Workflow, 160),
+		"external_run_id": deployment.ExternalRunID,
+		"started_at":      deployment.StartedAt,
+		"finished_at":     deployment.FinishedAt,
+		"created_at":      deployment.CreatedAt,
+	}
+}
+
 func (r *Responder) service(ctx context.Context, query string) (string, error) {
 	if query == "" {
 		return "Please name the service, for example “service nudgie-web”.", nil
@@ -1024,7 +1098,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• projects — project and repository map\n• repo <name> — live default-branch and GitHub Actions status\n• incident <id> — incident and diagnosis\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• repo <name> — live default-branch and GitHub Actions status\n• incident <id> — incident and diagnosis\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {
