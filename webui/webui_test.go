@@ -204,6 +204,18 @@ func TestMonitoringSupportsServiceOperationalRunbooks(t *testing.T) {
 	}
 }
 
+func TestMonitoringSupportsExplicitServiceRepositoryOwnership(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/service-repositories", "service-repository-form", "Link repository", "Owned repositories", "Investigation scope becomes explicit", "data-delete-service-repository", "compatibility fallback", "Service repository linked"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("service repository workflow is missing %q", expected)
+		}
+	}
+}
+
 func TestRepositoriesExposeProactiveWorkflowAlerts(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

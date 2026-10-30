@@ -84,6 +84,20 @@ type ServiceDependency struct {
 	CreatedAt            time.Time `json:"createdAt"`
 }
 
+type ServiceRepository struct {
+	ID                string    `json:"id"`
+	ProjectID         string    `json:"projectId"`
+	ServiceID         string    `json:"serviceId"`
+	ServiceKey        string    `json:"serviceKey"`
+	ServiceName       string    `json:"serviceName"`
+	RepositoryID      string    `json:"repositoryId"`
+	Repository        string    `json:"repository"`
+	RepositoryRole    string    `json:"repositoryRole"`
+	DefaultBranch     string    `json:"defaultBranch"`
+	RepositoryEnabled bool      `json:"repositoryEnabled"`
+	CreatedAt         time.Time `json:"createdAt"`
+}
+
 type ServiceRunbook struct {
 	ID           string    `json:"id"`
 	ProjectID    string    `json:"projectId"`

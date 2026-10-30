@@ -338,22 +338,44 @@ func (s *Store) ListRepositories(ctx context.Context, projectID string) ([]domai
 }
 
 func (s *Store) SaveRepository(ctx context.Context, item domain.Repository) (domain.Repository, error) {
-	if item.ID == "" {
-		item.ID = id.New("repo")
-	}
 	if item.DefaultBranch == "" {
 		item.DefaultBranch = "main"
 	}
 	if item.Role == "" {
 		item.Role = "application"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_repositories(id,project_id,owner_name,repository_name,repository_role,default_branch,read_only,enabled,test_command) VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),owner_name=VALUES(owner_name),repository_name=VALUES(repository_name),repository_role=VALUES(repository_role),default_branch=VALUES(default_branch),read_only=VALUES(read_only),enabled=VALUES(enabled),test_command=VALUES(test_command)`, item.ID, item.ProjectID, item.Owner, item.Name, item.Role, item.DefaultBranch, item.ReadOnly, item.Enabled, item.TestCommand)
+	if item.ID == "" {
+		item.ID = id.New("repo")
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO echo_repositories(id,project_id,owner_name,repository_name,repository_role,default_branch,read_only,enabled,test_command) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Owner, item.Name, item.Role, item.DefaultBranch, item.ReadOnly, item.Enabled, item.TestCommand); err != nil {
+			return domain.Repository{}, err
+		}
+		return s.GetRepository(ctx, item.ID)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Repository{}, err
 	}
-	var out domain.Repository
-	err = s.db.QueryRowContext(ctx, `SELECT id,project_id,owner_name,repository_name,repository_role,default_branch,read_only,enabled,test_command,created_at,updated_at FROM echo_repositories WHERE id=?`, item.ID).Scan(&out.ID, &out.ProjectID, &out.Owner, &out.Name, &out.Role, &out.DefaultBranch, &out.ReadOnly, &out.Enabled, &out.TestCommand, &out.CreatedAt, &out.UpdatedAt)
-	return out, notFound(err)
+	defer func() { _ = tx.Rollback() }()
+	var currentProjectID string
+	if err := tx.QueryRowContext(ctx, `SELECT project_id FROM echo_repositories WHERE id=? FOR UPDATE`, item.ID).Scan(&currentProjectID); err != nil {
+		return domain.Repository{}, notFound(err)
+	}
+	if currentProjectID != item.ProjectID {
+		var linkCount int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_service_repositories WHERE repository_id=?`, item.ID).Scan(&linkCount); err != nil {
+			return domain.Repository{}, err
+		}
+		if linkCount > 0 {
+			return domain.Repository{}, ErrRepositoryHasServiceLinks
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE echo_repositories SET project_id=?,owner_name=?,repository_name=?,repository_role=?,default_branch=?,read_only=?,enabled=?,test_command=? WHERE id=?`, item.ProjectID, item.Owner, item.Name, item.Role, item.DefaultBranch, item.ReadOnly, item.Enabled, item.TestCommand, item.ID); err != nil {
+		return domain.Repository{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Repository{}, err
+	}
+	return s.GetRepository(ctx, item.ID)
 }
 
 func (s *Store) GetRepository(ctx context.Context, repositoryID string) (domain.Repository, error) {
@@ -458,7 +480,7 @@ func (s *Store) SaveService(ctx context.Context, item domain.Service) (domain.Se
 		}
 		if currentProjectID != item.ProjectID {
 			var dependencyCount int
-			if countErr := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_service_dependencies WHERE service_id=? OR depends_on_service_id=?`, item.ID, item.ID).Scan(&dependencyCount); countErr != nil {
+			if countErr := tx.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM echo_service_dependencies WHERE service_id=? OR depends_on_service_id=?) + (SELECT COUNT(*) FROM echo_service_repositories WHERE service_id=?)`, item.ID, item.ID, item.ID).Scan(&dependencyCount); countErr != nil {
 				return domain.Service{}, countErr
 			}
 			if dependencyCount > 0 {

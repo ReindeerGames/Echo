@@ -1067,6 +1067,77 @@ func TestMariaDBServiceRunbooksAreBoundedAndServiceScoped(t *testing.T) {
 	}
 }
 
+func TestMariaDBServiceRepositoriesStayExplicitAndProjectScoped(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "ownership", Name: "Ownership", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProject, err := st.SaveProject(ctx, domain.Project{Key: "other-ownership", Name: "Other ownership", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "api", Name: "API", Kind: "application", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := st.SaveRepository(ctx, domain.Repository{ProjectID: project.ID, Owner: "ReindeerGames", Name: "api", Role: "application", DefaultBranch: "main", ReadOnly: true, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherRepository, err := st.SaveRepository(ctx, domain.Repository{ProjectID: otherProject.ID, Owner: "ReindeerGames", Name: "other", Role: "application", DefaultBranch: "main", ReadOnly: true, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := st.CreateServiceRepository(ctx, domain.ServiceRepository{ServiceID: service.ID, RepositoryID: repository.ID})
+	if err != nil || link.ProjectID != project.ID || link.Repository != "ReindeerGames/api" || !link.RepositoryEnabled {
+		t.Fatalf("create service repository: item=%#v err=%v", link, err)
+	}
+	if _, err := st.CreateServiceRepository(ctx, domain.ServiceRepository{}); !errors.Is(err, ErrInvalidServiceRepository) {
+		t.Fatalf("invalid service repository accepted: %v", err)
+	}
+	if _, err := st.CreateServiceRepository(ctx, domain.ServiceRepository{ServiceID: service.ID, RepositoryID: repository.ID}); !errors.Is(err, ErrServiceRepositoryExists) {
+		t.Fatalf("duplicate service repository accepted: %v", err)
+	}
+	if _, err := st.CreateServiceRepository(ctx, domain.ServiceRepository{ServiceID: service.ID, RepositoryID: otherRepository.ID}); !errors.Is(err, ErrServiceRepositoryProjectMismatch) {
+		t.Fatalf("cross-project service repository accepted: %v", err)
+	}
+	links, err := st.ListServiceRepositories(ctx, service.ID, 10)
+	if err != nil || len(links) != 1 || links[0].ID != link.ID {
+		t.Fatalf("list service repositories: items=%#v err=%v", links, err)
+	}
+	movedService := service
+	movedService.ProjectID = otherProject.ID
+	if _, err := st.SaveService(ctx, movedService); !errors.Is(err, ErrServiceHasDependencies) {
+		t.Fatalf("linked service moved between projects: %v", err)
+	}
+	movedRepository := repository
+	movedRepository.ProjectID = otherProject.ID
+	if _, err := st.SaveRepository(ctx, movedRepository); !errors.Is(err, ErrRepositoryHasServiceLinks) {
+		t.Fatalf("linked repository moved between projects: %v", err)
+	}
+	deleted, err := st.DeleteServiceRepository(ctx, link.ID)
+	if err != nil || deleted.ID != link.ID {
+		t.Fatalf("delete service repository: item=%#v err=%v", deleted, err)
+	}
+	if _, err := st.SaveService(ctx, movedService); err != nil {
+		t.Fatalf("move unlinked service: %v", err)
+	}
+	if _, err := st.SaveRepository(ctx, movedRepository); err != nil {
+		t.Fatalf("move unlinked repository: %v", err)
+	}
+}
+
 func TestMariaDBRepositoryWorkflowAlertsAreDurableAndDeduplicated(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -1474,7 +1545,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_service_runbooks", "echo_service_dependencies", "echo_services", "echo_environments", "echo_repository_workflow_alerts", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_service_runbooks", "echo_service_dependencies", "echo_service_repositories", "echo_services", "echo_environments", "echo_repository_workflow_alerts", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

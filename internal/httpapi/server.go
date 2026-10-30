@@ -115,6 +115,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("GET /api/v1/service-dependencies", s.serviceDependencies)
 	protected.HandleFunc("POST /api/v1/service-dependencies", s.serviceDependencies)
 	protected.HandleFunc("DELETE /api/v1/service-dependencies/{id}", s.deleteServiceDependency)
+	protected.HandleFunc("GET /api/v1/service-repositories", s.serviceRepositories)
+	protected.HandleFunc("POST /api/v1/service-repositories", s.serviceRepositories)
+	protected.HandleFunc("DELETE /api/v1/service-repositories/{id}", s.deleteServiceRepository)
 	protected.HandleFunc("GET /api/v1/service-runbooks", s.serviceRunbooks)
 	protected.HandleFunc("POST /api/v1/service-runbooks", s.serviceRunbooks)
 	protected.HandleFunc("DELETE /api/v1/service-runbooks/{id}", s.deleteServiceRunbook)
@@ -447,6 +450,10 @@ func (s *Server) repositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved, err := s.store.SaveRepository(r.Context(), item)
+	if errors.Is(err, store.ErrRepositoryHasServiceLinks) {
+		writeError(w, http.StatusConflict, "repository_has_service_links", "remove this repository's service relationships before moving it to another project")
+		return
+	}
 	if err == nil {
 		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "repository.saved", "repository", saved.ID, "succeeded", map[string]any{"repository": saved.Owner + "/" + saved.Name, "readOnly": saved.ReadOnly})
 	}
@@ -524,7 +531,7 @@ func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 	}
 	saved, err := s.store.SaveService(r.Context(), item)
 	if errors.Is(err, store.ErrServiceHasDependencies) {
-		writeError(w, http.StatusConflict, "service_has_dependencies", "remove this service's dependency relationships before moving it to another project")
+		writeError(w, http.StatusConflict, "service_has_relationships", "remove this service's dependency and repository relationships before moving it to another project")
 		return
 	}
 	if err == nil {
@@ -577,6 +584,50 @@ func (s *Server) deleteServiceDependency(w http.ResponseWriter, r *http.Request)
 	}
 	if err == nil {
 		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_dependency.deleted", "service_dependency", deleted.ID, "succeeded", map[string]any{"serviceId": deleted.ServiceID, "dependsOnServiceId": deleted.DependsOnServiceID, "kind": deleted.Kind})
+	}
+	respond(w, deleted, err)
+}
+
+func (s *Server) serviceRepositories(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		items, err := s.store.ListServiceRepositories(r.Context(), r.URL.Query().Get("serviceId"), 500)
+		respond(w, items, err)
+		return
+	}
+	var item domain.ServiceRepository
+	if err := decodeJSON(r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_service_repository", err.Error())
+		return
+	}
+	saved, err := s.store.CreateServiceRepository(r.Context(), item)
+	switch {
+	case errors.Is(err, store.ErrInvalidServiceRepository):
+		writeError(w, http.StatusBadRequest, "invalid_service_repository", "serviceId and repositoryId are required")
+		return
+	case errors.Is(err, store.ErrServiceRepositoryExists):
+		writeError(w, http.StatusConflict, "service_repository_exists", "this repository is already linked to the service")
+		return
+	case errors.Is(err, store.ErrServiceRepositoryProjectMismatch):
+		writeError(w, http.StatusConflict, "service_repository_project_mismatch", "service and repository must belong to the same project")
+		return
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "service_repository_not_found", "service or repository was not found")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_repository.created", "service_repository", saved.ID, "succeeded", map[string]any{"serviceId": saved.ServiceID, "repositoryId": saved.RepositoryID})
+	}
+	respondStatus(w, http.StatusCreated, saved, err)
+}
+
+func (s *Server) deleteServiceRepository(w http.ResponseWriter, r *http.Request) {
+	deleted, err := s.store.DeleteServiceRepository(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "service_repository_not_found", "service repository link was not found")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_repository.deleted", "service_repository", deleted.ID, "succeeded", map[string]any{"serviceId": deleted.ServiceID, "repositoryId": deleted.RepositoryID})
 	}
 	respond(w, deleted, err)
 }

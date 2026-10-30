@@ -16,6 +16,12 @@ Open a service in **Monitoring** to declare what it directly depends on and whic
 
 Keep the graph limited to direct operational dependencies and remove stale relationships promptly. A service with dependency relationships cannot be moved to another project until those relationships are removed, which prevents a project edit from silently leaking another project's catalogue into an investigation.
 
+## Service repository ownership
+
+Open a service in **Monitoring** and select **Link repository** to declare which code repositories directly build or operate that workload. Links are restricted to the service's project. Once at least one link exists, `investigate <service>` inspects only the linked repositories that are enabled; link every application, worker, infrastructure, or deployment repository that is genuinely part of that service.
+
+Services created before this feature remain useful: with no explicit links, Echo visibly falls back to all enabled repositories in the project. Treat that as a compatibility state, not the preferred steady state, because a broad project can introduce unrelated commits or workflow failures into a diagnosis. A linked service or repository cannot move to another project until its links are removed. Disabling a linked repository preserves the ownership record but excludes that repository from live investigation.
+
 ## Service runbooks
 
 Open a service in **Monitoring** and select **Add runbook** to record a concise operational check and, optionally, one HTTPS documentation reference. A service may have at most twenty runbooks. Titles are limited to 120 characters, guidance to 4,000 characters, and references cannot contain credentials, query strings, or fragments. Never store passwords, API tokens, private keys, signed URLs, raw logs, or customer data in a runbook.

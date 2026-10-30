@@ -18,27 +18,28 @@ import (
 )
 
 type fakeReader struct {
-	dashboard        domain.Dashboard
-	projects         []domain.Project
-	groups           []domain.GroupBinding
-	repos            []domain.Repository
-	services         []domain.Service
-	dependencies     []domain.ServiceDependency
-	runbooks         []domain.ServiceRunbook
-	alerts           []domain.ServiceAlert
-	repositoryAlerts []domain.RepositoryWorkflowAlert
-	maintenance      []domain.MaintenanceWindow
-	events           []domain.MonitorEvent
-	jobs             []domain.Job
-	deliveries       []domain.OutboundDelivery
-	deployments      []domain.Deployment
-	changes          []domain.ChangeSet
-	incident         domain.Incident
-	incidents        []domain.Incident
-	analysis         domain.Analysis
-	audit            []domain.AuditEvent
-	attachments      []domain.IncidentAttachment
-	messages         []domain.IncidentMessage
+	dashboard           domain.Dashboard
+	projects            []domain.Project
+	groups              []domain.GroupBinding
+	repos               []domain.Repository
+	services            []domain.Service
+	dependencies        []domain.ServiceDependency
+	serviceRepositories []domain.ServiceRepository
+	runbooks            []domain.ServiceRunbook
+	alerts              []domain.ServiceAlert
+	repositoryAlerts    []domain.RepositoryWorkflowAlert
+	maintenance         []domain.MaintenanceWindow
+	events              []domain.MonitorEvent
+	jobs                []domain.Job
+	deliveries          []domain.OutboundDelivery
+	deployments         []domain.Deployment
+	changes             []domain.ChangeSet
+	incident            domain.Incident
+	incidents           []domain.Incident
+	analysis            domain.Analysis
+	audit               []domain.AuditEvent
+	attachments         []domain.IncidentAttachment
+	messages            []domain.IncidentMessage
 }
 
 type fakeToolModel struct{}
@@ -161,6 +162,19 @@ func (f fakeReader) ListServiceDependencies(_ context.Context, serviceID string,
 			break
 		}
 		out = append(out, dependency)
+	}
+	return out, nil
+}
+func (f fakeReader) ListServiceRepositories(_ context.Context, serviceID string, limit int) ([]domain.ServiceRepository, error) {
+	var out []domain.ServiceRepository
+	for _, link := range f.serviceRepositories {
+		if serviceID != "" && link.ServiceID != serviceID {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, link)
 	}
 	return out, nil
 }
@@ -905,9 +919,10 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 			{ID: "svc_database", ProjectID: "prj_1", ProjectName: "Invoices", Key: "invoices-database", Name: "Invoices database", Kind: "database", Criticality: "critical", Enabled: true, HeartbeatTimeoutSeconds: 120},
 			{ID: "svc_unrelated", ProjectID: "prj_2", ProjectName: "Other", Key: "other-database", Name: "Unrelated database", Kind: "database", Criticality: "critical", Enabled: true},
 		},
-		dependencies: []domain.ServiceDependency{{ID: "sdp_1", ProjectID: "prj_1", ServiceID: "svc_api", ServiceKey: "invoices-api", ServiceName: "Invoices API", DependsOnServiceID: "svc_database", DependsOnServiceKey: "invoices-database", DependsOnServiceName: "Invoices database", Kind: "data", Description: "primary relational store"}},
-		runbooks:     []domain.ServiceRunbook{{ServiceID: "svc_api", Title: "Invoice API recovery", Guidance: "Confirm database reachability. password=must-not-leak", ReferenceURL: "https://docs.example.com/runbooks/invoices"}},
-		events:       []domain.MonitorEvent{{ServiceID: "svc_api", Status: "unhealthy", Severity: "critical", Summary: "Readiness returned HTTP 503", Source: "observer-01", Fingerprint: "http-health", ObservedAt: now.Add(-2 * time.Minute), Details: json.RawMessage(`{"statusCode":503,"latencyMs":42,"secret":"must-not-leak"}`)}},
+		dependencies:        []domain.ServiceDependency{{ID: "sdp_1", ProjectID: "prj_1", ServiceID: "svc_api", ServiceKey: "invoices-api", ServiceName: "Invoices API", DependsOnServiceID: "svc_database", DependsOnServiceKey: "invoices-database", DependsOnServiceName: "Invoices database", Kind: "data", Description: "primary relational store"}},
+		serviceRepositories: []domain.ServiceRepository{{ID: "srl_1", ProjectID: "prj_1", ServiceID: "svc_api", RepositoryID: "repo_1", Repository: "ReindeerGames/invoices", RepositoryRole: "application", DefaultBranch: "main", RepositoryEnabled: true}},
+		runbooks:            []domain.ServiceRunbook{{ServiceID: "svc_api", Title: "Invoice API recovery", Guidance: "Confirm database reachability. password=must-not-leak", ReferenceURL: "https://docs.example.com/runbooks/invoices"}},
+		events:              []domain.MonitorEvent{{ServiceID: "svc_api", Status: "unhealthy", Severity: "critical", Summary: "Readiness returned HTTP 503", Source: "observer-01", Fingerprint: "http-health", ObservedAt: now.Add(-2 * time.Minute), Details: json.RawMessage(`{"statusCode":503,"latencyMs":42,"secret":"must-not-leak"}`)}},
 		alerts: []domain.ServiceAlert{
 			{ServiceID: "svc_api", ServiceName: "Invoices API", ProjectID: "prj_1", Status: "open", Severity: "critical", Summary: "Readiness returned HTTP 503", Fingerprint: "http-health", OpenedAt: now.Add(-2 * time.Minute), LastSeenAt: now.Add(-time.Minute)},
 			{ServiceID: "svc_database", ServiceName: "Invoices database", ProjectID: "prj_1", Status: "open", Severity: "warning", Summary: "Database backup is stale", Fingerprint: "artifact-freshness", OpenedAt: now.Add(-time.Hour), LastSeenAt: now.Add(-5 * time.Minute)},
@@ -917,6 +932,7 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 		incidents:   []domain.Incident{{ID: "inc_1", ProjectID: "prj_1", ProjectName: "Invoices", Status: "triaging", Severity: "high", Summary: "Checkout failures", CreatedAt: now.Add(-3 * time.Minute), UpdatedAt: now.Add(-time.Minute)}},
 		repos: []domain.Repository{
 			{ID: "repo_1", ProjectID: "prj_1", Owner: "ReindeerGames", Name: "invoices", DefaultBranch: "main", Enabled: true},
+			{ID: "repo_sibling", ProjectID: "prj_1", Owner: "ReindeerGames", Name: "billing-worker", DefaultBranch: "main", Enabled: true},
 			{ID: "repo_disabled", ProjectID: "prj_1", Owner: "ReindeerGames", Name: "old-invoices", DefaultBranch: "main", Enabled: false},
 			{ID: "repo_other", ProjectID: "prj_2", Owner: "Other", Name: "other", DefaultBranch: "main", Enabled: true},
 		},
@@ -934,10 +950,10 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`, `"summary":"Reduce checkout database timeout"`, `"commits_truncated":false`, `"name":"Invoices database"`, `"state":"attention"`, `"open_alert_count":1`, `"direction":"depends_on"`, `"kind":"data"`, `"description":"primary relational store"`, `"dependency_relations"`, `"related_services_truncated":false`, `"title":"Invoice API recovery"`, `password=\u003credacted\u003e`, `"reference_url":"https://docs.example.com/runbooks/invoices"`) {
+	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"repository_scope":"explicit_service_links"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`, `"summary":"Reduce checkout database timeout"`, `"commits_truncated":false`, `"name":"Invoices database"`, `"state":"attention"`, `"open_alert_count":1`, `"direction":"depends_on"`, `"kind":"data"`, `"description":"primary relational store"`, `"dependency_relations"`, `"related_services_truncated":false`, `"title":"Invoice API recovery"`, `password=\u003credacted\u003e`, `"reference_url":"https://docs.example.com/runbooks/invoices"`) {
 		t.Fatalf("incomplete service investigation output: %s", output)
 	}
-	for _, forbidden := range []string{"must-not-leak", "must-not-appear", "old-invoices", "Other/other", "Unrelated database"} {
+	for _, forbidden := range []string{"must-not-leak", "must-not-appear", "billing-worker", "old-invoices", "Other/other", "Unrelated database"} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("service investigation leaked unrelated or unsafe evidence %q: %s", forbidden, output)
 		}
@@ -1036,13 +1052,14 @@ func TestServiceInvestigationCollectionsAreBounded(t *testing.T) {
 		IncidentsTruncated    bool              `json:"incidents_truncated"`
 		Repositories          []json.RawMessage `json:"repositories"`
 		RepositoriesTruncated bool              `json:"repositories_truncated"`
+		RepositoryScope       string            `json:"repository_scope"`
 		Runbooks              []json.RawMessage `json:"runbooks"`
 		RunbooksTruncated     bool              `json:"runbooks_truncated"`
 	}
 	if err := json.Unmarshal([]byte(output), &view); err != nil {
 		t.Fatal(err)
 	}
-	if len(view.Signals) != 12 || !view.SignalsTruncated || len(view.OpenAlerts) != 10 || !view.AlertsTruncated || len(view.Deployments) != 10 || !view.DeploymentsTruncated || len(view.Incidents) != 10 || !view.IncidentsTruncated || len(view.Repositories) != 8 || !view.RepositoriesTruncated || len(view.Runbooks) != 10 || !view.RunbooksTruncated {
+	if len(view.Signals) != 12 || !view.SignalsTruncated || len(view.OpenAlerts) != 10 || !view.AlertsTruncated || len(view.Deployments) != 10 || !view.DeploymentsTruncated || len(view.Incidents) != 10 || !view.IncidentsTruncated || len(view.Repositories) != 8 || !view.RepositoriesTruncated || view.RepositoryScope != "project_fallback_no_service_links" || len(view.Runbooks) != 10 || !view.RunbooksTruncated {
 		t.Fatalf("unbounded service investigation: %#v", view)
 	}
 }
