@@ -465,9 +465,78 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	}
 }
 
+func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	jobID := id.New("job")
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json,available_at,created_at) VALUES(?,?,?,?,?)`, jobID, "analyze_incident", `{"token":"must-not-leak"}`, now.Add(-10*time.Minute), now.Add(-10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	lockedJobID := id.New("job")
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json,available_at,locked_until,created_at) VALUES(?,?,?,?,?,?)`, lockedJobID, "analyze_incident", `{}`, now.Add(-10*time.Minute), now.Add(time.Hour), now.Add(-10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.RecordWorkerHeartbeat(ctx, "worker-old", now.Add(-8*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	health, transition, err := st.ReconcileWorkerQueueHealth(ctx, now, time.Minute, 5*time.Minute, true, "owner@s.whatsapp.net")
+	if err != nil || !health.QueueStalled || transition == nil || transition.Kind != "opened" || health.ReadyJobs != 1 {
+		t.Fatalf("worker stall did not open: health=%#v transition=%#v err=%v", health, transition, err)
+	}
+	_, duplicate, err := st.ReconcileWorkerQueueHealth(ctx, now.Add(30*time.Second), time.Minute, 5*time.Minute, true, "owner@s.whatsapp.net")
+	if err != nil || duplicate != nil {
+		t.Fatalf("unchanged worker stall emitted another transition: transition=%#v err=%v", duplicate, err)
+	}
+	var notifications int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE chat_jid='owner@s.whatsapp.net'`).Scan(&notifications); err != nil || notifications != 1 {
+		t.Fatalf("worker stall notification was not exactly once: count=%d err=%v", notifications, err)
+	}
+	dashboard, err := st.Dashboard(ctx)
+	if err != nil || !dashboard.WorkerQueueStalled || dashboard.OpenAlerts != 1 || dashboard.WorkerLastSeenAt == nil || !strings.Contains(dashboard.WorkerHealthSummary, "oldest waiting") {
+		t.Fatalf("worker stall missing from dashboard: dashboard=%#v err=%v", dashboard, err)
+	}
+
+	if err := st.RecordWorkerHeartbeat(ctx, "worker-new", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	health, transition, err = st.ReconcileWorkerQueueHealth(ctx, now.Add(time.Minute), time.Minute, 5*time.Minute, true, "owner@s.whatsapp.net")
+	if err != nil || health.QueueStalled || transition == nil || transition.Kind != "resolved" {
+		t.Fatalf("worker stall did not resolve: health=%#v transition=%#v err=%v", health, transition, err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE chat_jid='owner@s.whatsapp.net'`).Scan(&notifications); err != nil || notifications != 2 {
+		t.Fatalf("worker recovery notification was not exactly once: count=%d err=%v", notifications, err)
+	}
+	var leaked int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE body LIKE '%must-not-leak%'`).Scan(&leaked); err != nil || leaked != 0 {
+		t.Fatalf("job payload leaked into worker health notification: count=%d err=%v", leaked, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_worker_heartbeats SET last_seen_at=?`, now); err != nil {
+		t.Fatal(err)
+	}
+	_, transition, err = st.ReconcileWorkerQueueHealth(ctx, now.Add(10*time.Minute), time.Minute, 5*time.Minute, true, "owner@s.whatsapp.net")
+	if err != nil || transition == nil || transition.Kind != "opened" {
+		t.Fatalf("stale worker queue did not reopen: transition=%#v err=%v", transition, err)
+	}
+	health, transition, err = st.ReconcileWorkerQueueHealth(ctx, now.Add(10*time.Minute+time.Second), time.Minute, 5*time.Minute, false, "owner@s.whatsapp.net")
+	if err != nil || health.Status != "disabled" || health.QueueStalled || transition == nil || transition.Kind != "resolved" {
+		t.Fatalf("disabling worker did not clear stall policy: health=%#v transition=%#v err=%v", health, transition, err)
+	}
+}
+
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

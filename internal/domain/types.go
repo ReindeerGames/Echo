@@ -248,17 +248,35 @@ type AuditEvent struct {
 }
 
 type Dashboard struct {
-	OpenIncidents           int `json:"openIncidents"`
-	OpenAlerts              int `json:"openAlerts"`
-	PendingApprovals        int `json:"pendingApprovals"`
-	QueuedJobs              int `json:"queuedJobs"`
-	RunningJobs             int `json:"runningJobs"`
-	RetryingJobs            int `json:"retryingJobs"`
-	DeadJobs                int `json:"deadJobs"`
-	FailedDeployments       int `json:"failedDeployments"`
-	EnabledProjects         int `json:"enabledProjects"`
-	PendingWhatsAppMessages int `json:"pendingWhatsAppMessages"`
-	DeadWhatsAppMessages    int `json:"deadWhatsAppMessages"`
+	OpenIncidents           int        `json:"openIncidents"`
+	OpenAlerts              int        `json:"openAlerts"`
+	PendingApprovals        int        `json:"pendingApprovals"`
+	QueuedJobs              int        `json:"queuedJobs"`
+	RunningJobs             int        `json:"runningJobs"`
+	RetryingJobs            int        `json:"retryingJobs"`
+	DeadJobs                int        `json:"deadJobs"`
+	FailedDeployments       int        `json:"failedDeployments"`
+	EnabledProjects         int        `json:"enabledProjects"`
+	PendingWhatsAppMessages int        `json:"pendingWhatsAppMessages"`
+	DeadWhatsAppMessages    int        `json:"deadWhatsAppMessages"`
+	WorkerLastSeenAt        *time.Time `json:"workerLastSeenAt,omitempty"`
+	WorkerQueueStalled      bool       `json:"workerQueueStalled"`
+	WorkerHealthSummary     string     `json:"workerHealthSummary,omitempty"`
+}
+
+type WorkerHealth struct {
+	Status        string     `json:"status"`
+	WorkerID      string     `json:"workerId,omitempty"`
+	LastSeenAt    *time.Time `json:"lastSeenAt,omitempty"`
+	ReadyJobs     int        `json:"readyJobs"`
+	OldestReadyAt *time.Time `json:"oldestReadyAt,omitempty"`
+	QueueStalled  bool       `json:"queueStalled"`
+	Summary       string     `json:"summary"`
+}
+
+type WorkerHealthTransition struct {
+	Kind   string       `json:"kind"`
+	Health WorkerHealth `json:"health"`
 }
 
 type InboundMessage struct {

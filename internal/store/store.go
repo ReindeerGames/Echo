@@ -169,7 +169,8 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
 	var out domain.Dashboard
 	err := s.db.QueryRowContext(ctx, `SELECT
       (SELECT COUNT(*) FROM echo_incidents WHERE status NOT IN ('resolved','closed')),
-      (SELECT COUNT(*) FROM echo_service_alerts WHERE alert_status='open'),
+      ((SELECT COUNT(*) FROM echo_service_alerts WHERE alert_status='open') +
+       (SELECT COUNT(*) FROM echo_worker_health_alerts WHERE alert_status='open')),
       (SELECT COUNT(*) FROM echo_approvals WHERE status='pending' AND expires_at > NOW(6)),
 	  (SELECT COUNT(*) FROM echo_jobs WHERE status='queued'),
       (SELECT COUNT(*) FROM echo_jobs WHERE status='running'),
@@ -178,8 +179,11 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
       (SELECT COUNT(*) FROM echo_deployments WHERE status='failed'),
 	  (SELECT COUNT(*) FROM echo_projects WHERE enabled=TRUE),
 	  (SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE status IN ('queued','sending','failed')),
-	  (SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE status='dead')`).Scan(
-		&out.OpenIncidents, &out.OpenAlerts, &out.PendingApprovals, &out.QueuedJobs, &out.RunningJobs, &out.RetryingJobs, &out.DeadJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages,
+	  (SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE status='dead'),
+	  (SELECT MAX(last_seen_at) FROM echo_worker_heartbeats),
+	  EXISTS(SELECT 1 FROM echo_worker_health_alerts WHERE alert_status='open'),
+	  COALESCE((SELECT summary FROM echo_worker_health_alerts WHERE alert_status='open' ORDER BY updated_at DESC LIMIT 1),'')`).Scan(
+		&out.OpenIncidents, &out.OpenAlerts, &out.PendingApprovals, &out.QueuedJobs, &out.RunningJobs, &out.RetryingJobs, &out.DeadJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages, &out.WorkerLastSeenAt, &out.WorkerQueueStalled, &out.WorkerHealthSummary,
 	)
 	return out, err
 }
@@ -1210,12 +1214,28 @@ func (s *Store) RenewJobLease(ctx context.Context, jobID string, attempt int, wo
 	if lease <= 0 {
 		return false, errors.New("job lease must be positive")
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET locked_until=? WHERE id=? AND status='running' AND attempts=? AND locked_by=?`, time.Now().UTC().Add(lease), jobID, attempt, worker)
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE echo_jobs SET locked_until=? WHERE id=? AND status='running' AND attempts=? AND locked_by=?`, now.Add(lease), jobID, attempt, worker)
 	if err != nil {
 		return false, err
 	}
 	affected, err := result.RowsAffected()
-	return affected == 1, err
+	if err != nil || affected != 1 {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO echo_worker_heartbeats(worker_id,started_at,last_seen_at) VALUES(?,?,?)
+      ON DUPLICATE KEY UPDATE last_seen_at=GREATEST(last_seen_at,VALUES(last_seen_at))`, worker, now, now); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, worker string, jobErr error, terminalNotification *domain.OutboundMessage) error {

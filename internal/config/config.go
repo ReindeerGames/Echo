@@ -70,12 +70,15 @@ type Assistant struct {
 }
 
 type Worker struct {
-	Enabled       bool
-	PollInterval  time.Duration
-	JobLease      time.Duration
-	WorkspaceRoot string
-	MaxRepoBytes  int64
-	MaxFileBytes  int64
+	Enabled           bool
+	PollInterval      time.Duration
+	JobLease          time.Duration
+	HeartbeatInterval time.Duration
+	HeartbeatTimeout  time.Duration
+	QueueStallTimeout time.Duration
+	WorkspaceRoot     string
+	MaxRepoBytes      int64
+	MaxFileBytes      int64
 }
 
 type Security struct {
@@ -129,12 +132,15 @@ func Load() (Config, error) {
 			Retention:    duration("ECHO_ASSISTANT_RETENTION", 30*24*time.Hour),
 		},
 		Worker: Worker{
-			Enabled:       boolean("ECHO_WORKER_ENABLED", true),
-			PollInterval:  duration("ECHO_WORKER_POLL_INTERVAL", 2*time.Second),
-			JobLease:      duration("ECHO_WORKER_JOB_LEASE", 10*time.Minute),
-			WorkspaceRoot: env("ECHO_WORKSPACE_ROOT", "/tmp/echo-workers"),
-			MaxRepoBytes:  int64(integer("ECHO_MAX_REPO_MIB", 256)) * 1024 * 1024,
-			MaxFileBytes:  int64(integer("ECHO_MAX_FILE_KIB", 256)) * 1024,
+			Enabled:           boolean("ECHO_WORKER_ENABLED", true),
+			PollInterval:      duration("ECHO_WORKER_POLL_INTERVAL", 2*time.Second),
+			JobLease:          duration("ECHO_WORKER_JOB_LEASE", 10*time.Minute),
+			HeartbeatInterval: duration("ECHO_WORKER_HEARTBEAT_INTERVAL", 15*time.Second),
+			HeartbeatTimeout:  duration("ECHO_WORKER_HEARTBEAT_TIMEOUT", time.Minute),
+			QueueStallTimeout: duration("ECHO_WORKER_QUEUE_STALL_TIMEOUT", 5*time.Minute),
+			WorkspaceRoot:     env("ECHO_WORKSPACE_ROOT", "/tmp/echo-workers"),
+			MaxRepoBytes:      int64(integer("ECHO_MAX_REPO_MIB", 256)) * 1024 * 1024,
+			MaxFileBytes:      int64(integer("ECHO_MAX_FILE_KIB", 256)) * 1024,
 		},
 		Security: Security{
 			AdminToken:    strings.TrimSpace(os.Getenv("ECHO_ADMIN_TOKEN")),
@@ -174,6 +180,19 @@ func Load() (Config, error) {
 	}
 	if cfg.Worker.JobLease < 5*time.Second || cfg.Worker.JobLease > time.Hour {
 		return Config{}, errors.New("ECHO_WORKER_JOB_LEASE must be between 5s and 1h")
+	}
+	if cfg.Worker.HeartbeatInterval < 5*time.Second || cfg.Worker.HeartbeatInterval > time.Minute {
+		return Config{}, errors.New("ECHO_WORKER_HEARTBEAT_INTERVAL must be between 5s and 1m")
+	}
+	minimumHeartbeatTimeout := 2 * cfg.Worker.HeartbeatInterval
+	if pollMinimum := 2 * cfg.Worker.PollInterval; pollMinimum > minimumHeartbeatTimeout {
+		minimumHeartbeatTimeout = pollMinimum
+	}
+	if cfg.Worker.HeartbeatTimeout < minimumHeartbeatTimeout || cfg.Worker.HeartbeatTimeout > 10*time.Minute {
+		return Config{}, errors.New("ECHO_WORKER_HEARTBEAT_TIMEOUT must be at least twice the worker heartbeat and poll intervals, and no more than 10m")
+	}
+	if cfg.Worker.QueueStallTimeout < cfg.Worker.HeartbeatTimeout || cfg.Worker.QueueStallTimeout > time.Hour {
+		return Config{}, errors.New("ECHO_WORKER_QUEUE_STALL_TIMEOUT must be at least the heartbeat timeout and no more than 1h")
 	}
 	publicURL, err := url.ParseRequestURI(cfg.HTTP.PublicBaseURL)
 	if err != nil {

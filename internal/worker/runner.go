@@ -30,12 +30,13 @@ type Runner struct {
 	workspace    string
 	poll         time.Duration
 	lease        time.Duration
+	heartbeat    time.Duration
 	maxFileBytes int64
 	workerID     string
 }
 
-func New(st *store.Store, github *githubapp.Client, aiClient *ai.Client, owners *owner.Service, workspace string, poll, lease time.Duration, maxFileBytes int64) *Runner {
-	return &Runner{store: st, github: github, ai: aiClient, owners: owners, workspace: workspace, poll: poll, lease: lease, maxFileBytes: maxFileBytes, workerID: id.New("worker")}
+func New(st *store.Store, github *githubapp.Client, aiClient *ai.Client, owners *owner.Service, workspace string, poll, lease, heartbeat time.Duration, maxFileBytes int64) *Runner {
+	return &Runner{store: st, github: github, ai: aiClient, owners: owners, workspace: workspace, poll: poll, lease: lease, heartbeat: heartbeat, maxFileBytes: maxFileBytes, workerID: id.New("worker")}
 }
 
 func (r *Runner) Run(ctx context.Context) error {
@@ -44,6 +45,17 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 	ticker := time.NewTicker(r.poll)
 	defer ticker.Stop()
+	nextHeartbeat := time.Time{}
+	recordHeartbeat := func() {
+		now := time.Now().UTC()
+		if now.Before(nextHeartbeat) {
+			return
+		}
+		if r.recordHeartbeat(ctx, now) {
+			nextHeartbeat = now.Add(r.heartbeat)
+		}
+	}
+	recordHeartbeat()
 	for {
 		select {
 		case <-ctx.Done():
@@ -51,12 +63,14 @@ func (r *Runner) Run(ctx context.Context) error {
 		case <-ticker.C:
 			job, err := r.store.ClaimJob(ctx, r.workerID, r.lease)
 			if errors.Is(err, store.ErrNotFound) {
+				recordHeartbeat()
 				continue
 			}
 			if err != nil {
 				slog.Error("claim worker job", "error", err)
 				continue
 			}
+			recordHeartbeat()
 			jobErr := r.executeWithLease(ctx, job)
 			notification := r.terminalFailureNotification(ctx, job, jobErr)
 			if err := r.store.CompleteJob(ctx, job.ID, job.Attempts, r.workerID, jobErr, notification); err != nil {
@@ -67,6 +81,17 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (r *Runner) recordHeartbeat(ctx context.Context, now time.Time) bool {
+	if err := r.store.RecordWorkerHeartbeat(ctx, r.workerID, now); err != nil {
+		if ctx.Err() != nil {
+			return false
+		}
+		slog.Error("record worker heartbeat", "worker_id", r.workerID, "error", err)
+		return false
+	}
+	return true
 }
 
 func (r *Runner) executeWithLease(ctx context.Context, job domain.Job) error {

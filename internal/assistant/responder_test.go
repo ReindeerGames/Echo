@@ -198,6 +198,26 @@ func TestWorkQueueAnswersDoNotExposeRawErrorsOrPayloads(t *testing.T) {
 	}
 }
 
+func TestWorkerStallIsVisibleInStatusAndAlerts(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	lastSeen := now.Add(-10 * time.Minute)
+	reader := fakeReader{dashboard: domain.Dashboard{OpenAlerts: 1, QueuedJobs: 3, WorkerLastSeenAt: &lastSeen, WorkerQueueStalled: true, WorkerHealthSummary: "3 ready jobs; oldest waiting 12m0s; worker heartbeat last seen 10m0s ago"}}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	status, _, err := responder.Answer(context.Background(), "status")
+	if err != nil || !containsAll(status, "Worker: STALLED", "3 ready jobs") {
+		t.Fatalf("worker stall missing from status: %s err=%v", status, err)
+	}
+	alerts, _, err := responder.Answer(context.Background(), "alerts")
+	if err != nil || !containsAll(alerts, "Open operational alerts (1)", "CRITICAL · Echo worker", "oldest waiting") {
+		t.Fatalf("worker stall missing from alerts: %s err=%v", alerts, err)
+	}
+	toolOutput, err := responder.executeTool(context.Background(), "get_open_alerts", json.RawMessage(`{}`))
+	if err != nil || !containsAll(toolOutput, `"service":"Echo worker"`, `"fingerprint":"worker-queue-stalled"`, `"count":1`) {
+		t.Fatalf("worker stall missing from alert tool: %s err=%v", toolOutput, err)
+	}
+}
+
 func containsAll(value string, expected ...string) bool {
 	for _, item := range expected {
 		if !strings.Contains(value, item) {

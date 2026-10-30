@@ -128,6 +128,22 @@ func TestWorkerTimingIsBounded(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("expected unsafe short worker lease to be rejected")
 	}
+	t.Setenv("ECHO_WORKER_JOB_LEASE", "1m")
+	t.Setenv("ECHO_WORKER_HEARTBEAT_INTERVAL", "20s")
+	t.Setenv("ECHO_WORKER_HEARTBEAT_TIMEOUT", "30s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected heartbeat timeout shorter than two intervals to be rejected")
+	}
+	t.Setenv("ECHO_WORKER_HEARTBEAT_TIMEOUT", "1m")
+	t.Setenv("ECHO_WORKER_QUEUE_STALL_TIMEOUT", "30s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected queue stall timeout shorter than heartbeat timeout to be rejected")
+	}
+	t.Setenv("ECHO_WORKER_QUEUE_STALL_TIMEOUT", "5m")
+	t.Setenv("ECHO_WORKER_POLL_INTERVAL", "1m")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected heartbeat timeout shorter than two poll intervals to be rejected")
+	}
 }
 
 func TestProductionAllowsOwnerToBeConfiguredInApplication(t *testing.T) {

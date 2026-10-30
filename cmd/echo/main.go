@@ -74,13 +74,19 @@ func run() error {
 		go runGatewayLoop(ctx, gateway, state)
 	}
 	if cfg.Worker.Enabled {
-		runner := worker.New(st, githubClient, aiClient, owners, cfg.Worker.WorkspaceRoot, cfg.Worker.PollInterval, cfg.Worker.JobLease, cfg.Worker.MaxFileBytes)
+		runner := worker.New(st, githubClient, aiClient, owners, cfg.Worker.WorkspaceRoot, cfg.Worker.PollInterval, cfg.Worker.JobLease, cfg.Worker.HeartbeatInterval, cfg.Worker.MaxFileBytes)
 		go func() {
 			if err := runner.Run(ctx); err != nil {
 				slog.Error("worker stopped", "error", err)
 			}
 		}()
 	}
+	workerWatchdog := worker.NewHealthWatchdog(st, owners, cfg.Monitor.WatchdogInterval, cfg.Worker.HeartbeatTimeout, cfg.Worker.QueueStallTimeout, cfg.Worker.Enabled)
+	go func() {
+		if err := workerWatchdog.Run(ctx); err != nil {
+			slog.Error("worker health watchdog stopped", "error", err)
+		}
+	}()
 	heartbeatWatchdog := monitor.NewWatchdog(st, owners, cfg.Monitor.WatchdogInterval)
 	go func() {
 		if err := heartbeatWatchdog.Run(ctx); err != nil {

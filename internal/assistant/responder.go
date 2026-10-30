@@ -105,28 +105,40 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 				enabled++
 			}
 		}
-		return marshal(map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages})
+		return marshal(map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages})
 	case "get_open_alerts":
 		alerts, err := r.reader.ListServiceAlerts(ctx, "open")
 		if err != nil {
 			return "", err
 		}
 		type alertView struct {
-			Service     string    `json:"service"`
-			Severity    string    `json:"severity"`
-			Summary     string    `json:"summary"`
-			Fingerprint string    `json:"fingerprint"`
-			OpenedAt    time.Time `json:"opened_at"`
-			LastSeen    time.Time `json:"last_seen"`
+			Service     string     `json:"service"`
+			Severity    string     `json:"severity"`
+			Summary     string     `json:"summary"`
+			Fingerprint string     `json:"fingerprint"`
+			OpenedAt    *time.Time `json:"opened_at,omitempty"`
+			LastSeen    *time.Time `json:"last_seen,omitempty"`
 		}
 		views := make([]alertView, 0, min(len(alerts), 50))
 		for index, alert := range alerts {
 			if index == 50 {
 				break
 			}
-			views = append(views, alertView{Service: alert.ServiceName, Severity: alert.Severity, Summary: alert.Summary, Fingerprint: alert.Fingerprint, OpenedAt: alert.OpenedAt, LastSeen: alert.LastSeenAt})
+			openedAt, lastSeen := alert.OpenedAt, alert.LastSeenAt
+			views = append(views, alertView{Service: alert.ServiceName, Severity: alert.Severity, Summary: alert.Summary, Fingerprint: alert.Fingerprint, OpenedAt: &openedAt, LastSeen: &lastSeen})
 		}
-		return marshal(map[string]any{"alerts": views, "count": len(alerts), "truncated": len(alerts) > len(views)})
+		dashboard, err := r.reader.Dashboard(ctx)
+		if err != nil {
+			return "", err
+		}
+		total := len(alerts)
+		if dashboard.WorkerQueueStalled {
+			total++
+			if len(views) < 50 {
+				views = append(views, alertView{Service: "Echo worker", Severity: "critical", Summary: dashboard.WorkerHealthSummary, Fingerprint: "worker-queue-stalled", LastSeen: dashboard.WorkerLastSeenAt})
+			}
+		}
+		return marshal(map[string]any{"alerts": views, "count": total, "truncated": total > len(views)})
 	case "list_services":
 		var arguments struct {
 			Query string `json:"query"`
@@ -539,7 +551,7 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 	if dashboard.DeadWhatsAppMessages > 0 {
 		delivery += " · needs attention in the control plane"
 	}
-	return fmt.Sprintf("Echo operational status\n%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\nFailed deployments: %d\n%s", state, enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, dashboard.FailedDeployments, delivery), nil
+	return fmt.Sprintf("Echo operational status\n%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
 }
 
 func (r *Responder) alerts(ctx context.Context) (string, error) {
@@ -547,10 +559,17 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(alerts) == 0 {
+	dashboard, err := r.reader.Dashboard(ctx)
+	if err != nil {
+		return "", err
+	}
+	if len(alerts) == 0 && !dashboard.WorkerQueueStalled {
 		return "No open service alerts. Echo will message you when a monitored condition opens, reopens, or resolves.", nil
 	}
 	var lines []string
+	if dashboard.WorkerQueueStalled {
+		lines = append(lines, "• CRITICAL · Echo worker\n  "+dashboard.WorkerHealthSummary)
+	}
 	for i, alert := range alerts {
 		if i == 10 {
 			lines = append(lines, fmt.Sprintf("…and %d more in the control plane.", len(alerts)-i))
@@ -558,7 +577,17 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 		}
 		lines = append(lines, fmt.Sprintf("• %s · %s\n  %s", strings.ToUpper(alert.Severity), alert.ServiceName, alert.Summary))
 	}
-	return fmt.Sprintf("Open service alerts (%d)\n\n%s", len(alerts), strings.Join(lines, "\n")), nil
+	return fmt.Sprintf("Open operational alerts (%d)\n\n%s", len(alerts)+map[bool]int{true: 1}[dashboard.WorkerQueueStalled], strings.Join(lines, "\n")), nil
+}
+
+func workerStatusLine(now time.Time, dashboard domain.Dashboard) string {
+	if dashboard.WorkerQueueStalled {
+		return "Worker: STALLED · " + dashboard.WorkerHealthSummary
+	}
+	if dashboard.WorkerLastSeenAt == nil {
+		return "Worker: no heartbeat recorded"
+	}
+	return "Worker heartbeat: " + formatAge(now, *dashboard.WorkerLastSeenAt) + " ago"
 }
 
 func (r *Responder) services(ctx context.Context) (string, error) {
