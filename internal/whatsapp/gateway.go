@@ -301,7 +301,7 @@ func (g *Gateway) handleEvent(raw any) {
 		if msg.Timestamp.IsZero() {
 			msg.Timestamp = time.Now().UTC()
 		}
-		hasImage := hasIncidentImageCandidate(evt.Message)
+		hasImage := shouldQueueIncidentImage(msg.IsGroup, evt.Message)
 		if msg.IsGroup && strings.TrimSpace(msg.Body) == "" && !hasImage {
 			return
 		}
@@ -328,18 +328,21 @@ func (g *Gateway) consumeInbound(ctx context.Context) error {
 			return nil
 		case envelope := <-g.messages:
 			msg := envelope.message
-			if envelope.media != nil {
-				attachment, err := g.downloadIncidentImage(ctx, msg.MessageID, envelope.media)
-				if err != nil {
-					slog.Warn("discard WhatsApp incident image", "error", err, "message_id", msg.MessageID)
-					msg.Body += " The attached image could not be retained safely."
-					_ = g.core.Audit(ctx, "system", "gateway", "attachment.rejected", "whatsapp_message", msg.MessageID, "denied", map[string]any{"reason": attachmentErrorCategory(err)})
-				} else {
-					msg.Attachments = append(msg.Attachments, attachment)
-				}
-			}
 			if msg.IsGroup {
-				incident, created, err := g.workflows.ReceiveGroupReport(ctx, g.deviceJIDs(), msg)
+				var enrich func(context.Context, *domain.InboundMessage)
+				if envelope.media != nil {
+					enrich = func(enrichCtx context.Context, accepted *domain.InboundMessage) {
+						attachment, err := g.downloadIncidentImage(enrichCtx, accepted.MessageID, envelope.media)
+						if err != nil {
+							slog.Warn("discard WhatsApp incident image", "error", err, "message_id", accepted.MessageID)
+							accepted.Body += " The attached image could not be retained safely."
+							_ = g.core.Audit(enrichCtx, "system", "gateway", "attachment.rejected", "whatsapp_message", accepted.MessageID, "denied", map[string]any{"reason": attachmentErrorCategory(err)})
+							return
+						}
+						accepted.Attachments = append(accepted.Attachments, attachment)
+					}
+				}
+				incident, created, err := g.workflows.ReceiveGroupReportWithEnricher(ctx, g.deviceJIDs(), msg, enrich)
 				if err != nil {
 					slog.Error("process WhatsApp report", "error", err, "message_id", msg.MessageID)
 				} else if created {
@@ -435,6 +438,10 @@ func hasIncidentImageCandidate(msg *waE2E.Message) bool {
 		return true
 	}
 	return false
+}
+
+func shouldQueueIncidentImage(isGroup bool, msg *waE2E.Message) bool {
+	return isGroup && hasIncidentImageCandidate(msg)
 }
 
 func incidentImageMetadata(msg *waE2E.Message) (string, string, int64, bool) {

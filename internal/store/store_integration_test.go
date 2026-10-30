@@ -269,6 +269,10 @@ func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	if first.ID != second.ID {
 		t.Fatalf("idempotency failed: %s != %s", first.ID, second.ID)
 	}
+	bySource, err := st.FindIncidentBySource(ctx, message.ChatJID, message.MessageID)
+	if err != nil || bySource.ID != first.ID {
+		t.Fatalf("find incident by source: incident=%#v err=%v", bySource, err)
+	}
 	if _, err := st.db.ExecContext(ctx, `UPDATE echo_incident_attachments SET created_at=? WHERE incident_id=?`, time.Now().UTC().Add(-48*time.Hour), first.ID); err != nil {
 		t.Fatal(err)
 	}

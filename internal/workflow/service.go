@@ -49,6 +49,10 @@ func (s *Service) DailyBrief(ctx context.Context) (string, error) {
 }
 
 func (s *Service) ReceiveGroupReport(ctx context.Context, selfJIDs []string, msg domain.InboundMessage) (domain.Incident, bool, error) {
+	return s.ReceiveGroupReportWithEnricher(ctx, selfJIDs, msg, nil)
+}
+
+func (s *Service) ReceiveGroupReportWithEnricher(ctx context.Context, selfJIDs []string, msg domain.InboundMessage, enrich func(context.Context, *domain.InboundMessage)) (domain.Incident, bool, error) {
 	binding, err := s.store.FindGroupBinding(ctx, msg.ChatJID)
 	if errors.Is(err, store.ErrNotFound) {
 		slog.Info("ignored WhatsApp group message", "reason", "group_not_bound", "group_jid", msg.ChatJID, "message_id", msg.MessageID)
@@ -68,6 +72,16 @@ func (s *Service) ReceiveGroupReport(ctx context.Context, selfJIDs []string, msg
 			slog.Error("audit ignored WhatsApp message", "error", auditErr, "message_id", msg.MessageID)
 		}
 		return domain.Incident{}, false, nil
+	}
+	existing, err := s.store.FindIncidentBySource(ctx, msg.ChatJID, msg.MessageID)
+	if err == nil {
+		return existing, false, nil
+	}
+	if !errors.Is(err, store.ErrNotFound) {
+		return domain.Incident{}, false, err
+	}
+	if enrich != nil {
+		enrich(ctx, &msg)
 	}
 	incident, created, err := s.store.CreateIncident(ctx, binding, msg)
 	if err != nil || !created {

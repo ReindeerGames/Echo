@@ -1081,6 +1081,14 @@ func (s *Store) GetIncident(ctx context.Context, incidentID string) (domain.Inci
 	return item, notFound(err)
 }
 
+func (s *Store) FindIncidentBySource(ctx context.Context, groupJID, messageID string) (domain.Incident, error) {
+	var incidentID string
+	if err := s.db.QueryRowContext(ctx, `SELECT id FROM echo_incidents WHERE group_jid=? AND source_message_id=?`, groupJID, messageID).Scan(&incidentID); err != nil {
+		return domain.Incident{}, notFound(err)
+	}
+	return s.GetIncident(ctx, incidentID)
+}
+
 func (s *Store) CreateIncident(ctx context.Context, binding domain.GroupBinding, msg domain.InboundMessage) (domain.Incident, bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

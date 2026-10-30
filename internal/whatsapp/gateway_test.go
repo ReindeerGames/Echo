@@ -40,6 +40,9 @@ func TestIncidentImageMetadataIsStrictAndBounded(t *testing.T) {
 	if !hasIncidentImageCandidate(image) {
 		t.Fatal("bounded PNG image was not recognized")
 	}
+	if shouldQueueIncidentImage(false, image) || !shouldQueueIncidentImage(true, image) {
+		t.Fatal("incident screenshots must be queued only for group messages")
+	}
 	gotMIME, gotName, gotSize, ok := incidentImageMetadata(image)
 	if !ok || gotMIME != mimeType || gotName != "" || gotSize != int64(length) {
 		t.Fatalf("unexpected image metadata mime=%q name=%q size=%d ok=%v", gotMIME, gotName, gotSize, ok)

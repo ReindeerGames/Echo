@@ -12,7 +12,7 @@ The gateway owns the sole active HyperMeow client and `mdbstore` connection. A M
 
 The gateway does not receive decrypted GitHub credentials or AI keys in a split deployment. The all-in-one binary supports small deployments, while package boundaries allow later process separation.
 
-WhatsApp callbacks enqueue only a cloned media descriptor and normalized metadata. The bounded consumer streams candidate screenshots through a hard-limited temporary file with a 30-second deadline, rejects declared or actual payloads above 5 MiB, and accepts only byte-detected PNG, JPEG, or WEBP content matching the declared MIME type. SVG, video, audio, PDFs, archives, and arbitrary documents are not retained. Accepted bytes, hash, and incident are committed together before analysis is queued.
+WhatsApp callbacks enqueue only normalized metadata and, for group images, a cloned media descriptor. The consumer first applies the bound-group and protocol-mention policy; private, unbound, disabled, and unmentioned messages never trigger a media download. After acceptance it streams the candidate screenshot through a hard-limited temporary file with a 30-second deadline, rejects declared or actual payloads above 5 MiB, and accepts only byte-detected PNG, JPEG, or WEBP content matching the declared MIME type. SVG, video, audio, PDFs, archives, and arbitrary documents are not retained. Accepted bytes, hash, and incident are committed together before analysis is queued.
 
 ### Control plane
 
