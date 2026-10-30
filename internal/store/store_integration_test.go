@@ -528,6 +528,37 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	if err != nil || len(outside) != 0 {
 		t.Fatalf("latest observer evidence escaped project scope: items=%#v err=%v", outside, err)
 	}
+	retentionService, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "retention", Name: "Retention", Kind: "application", Criticality: "medium", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	retentionEvent := domain.MonitorEvent{EventID: "monitor-retention-latest", ServiceID: retentionService.ID, Source: "integration", Status: "healthy", Severity: "info", Summary: "Retention service is healthy", Details: json.RawMessage(`{}`), ObservedAt: observed.Add(-100 * 24 * time.Hour)}
+	if _, err := st.RecordMonitorEvent(ctx, retentionEvent); err != nil {
+		t.Fatal(err)
+	}
+	oldReceivedAt := time.Now().UTC().Add(-100 * 24 * time.Hour)
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_monitor_events SET received_at=? WHERE event_id IN ('monitor-1','monitor-2','monitor-retention-latest')`, oldReceivedAt); err != nil {
+		t.Fatal(err)
+	}
+	prunedEvents, err := st.PruneMonitorEvents(ctx, time.Now().UTC().Add(-30*24*time.Hour))
+	if err != nil || prunedEvents != 2 {
+		t.Fatalf("prune superseded monitoring history: count=%d err=%v", prunedEvents, err)
+	}
+	retainedLatest, err := st.ListLatestMonitorEvents(ctx, project.ID)
+	if err != nil || len(retainedLatest) != 2 {
+		t.Fatalf("retention removed latest service evidence: items=%#v err=%v", retainedLatest, err)
+	}
+	retainedIDs := map[string]bool{}
+	for _, event := range retainedLatest {
+		retainedIDs[event.EventID] = true
+	}
+	if !retainedIDs["monitor-3"] || !retainedIDs["monitor-retention-latest"] {
+		t.Fatalf("retention did not preserve latest non-watchdog evidence: %v", retainedIDs)
+	}
+	var referencedEventCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_monitor_events WHERE event_id='monitor-watchdog-later'`).Scan(&referencedEventCount); err != nil || referencedEventCount != 1 {
+		t.Fatalf("retention removed alert-referenced event: count=%d err=%v", referencedEventCount, err)
+	}
 	atomicFailure := unhealthy
 	atomicFailure.EventID = "monitor-atomic-failure"
 	atomicFailure.Fingerprint = "atomic-failure"

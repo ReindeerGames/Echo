@@ -39,7 +39,7 @@ To add evidence, reply in WhatsApp to the original report or any follow-up alrea
 
 Duplicate WhatsApp message IDs are idempotent and do not run tools or send another reply. Stateless Responses tool loops are capped at six rounds and eight calls. Echo preserves typed response items within the current loop, sanitizes tool errors before returning them to the model, and falls back to deterministic guidance when the Responses endpoint is unavailable.
 
-Local owner messages and replies are retained for `ECHO_ASSISTANT_RETENTION` (30 days by default). `ECHO_ASSISTANT_HISTORY_LIMIT` controls how many recent messages, from 4 to 50, are supplied as conversational context. Expired messages and their tool evidence are pruned during startup.
+Local owner messages and replies are retained for `ECHO_ASSISTANT_RETENTION` (30 days by default). `ECHO_ASSISTANT_HISTORY_LIMIT` controls how many recent messages, from 4 to 50, are supplied as conversational context. A supervised retention component prunes expired messages and their tool evidence at startup and daily.
 
 Questions never authorize mutation. Approval commands remain deliberately narrow: `approve <code>` or `reject <code>` resolves only the pending immutable action bound to that one-time code. An unrecognized request cannot run a shell command, contact a production host, execute repository code, or infer permission to change infrastructure.
 

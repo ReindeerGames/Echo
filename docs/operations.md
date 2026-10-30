@@ -23,6 +23,8 @@ Container-state probes use the bundled `echo-docker-proxy`, bound to numeric loo
 
 Back up `echo_whatsapp` and `echo_core` independently using encrypted storage. The session database contains cryptographic key material and must receive the stricter retention and access policy.
 
+Set `ECHO_MONITOR_RETENTION` to the operational history window you actually need (90 days by default, 24 hours to 365 days allowed). Echo's supervised retention component prunes only superseded monitoring events at startup and daily, preserves current freshness evidence and alert-referenced events, and participates in readiness. Database backups remain the recovery boundary for history beyond the live retention window.
+
 At least quarterly, restore both databases to an isolated MariaDB server, start Echo without external egress, and verify schema validation and incident history.
 
 ## WhatsApp recovery

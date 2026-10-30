@@ -44,6 +44,10 @@ The first timeout starts after the service policy is saved, giving a newly confi
 
 The body is limited to one MiB. Unknown and disabled services are rejected. Details are retained as evidence and must never contain credentials or unrestricted log dumps.
 
+## Retention
+
+`ECHO_MONITOR_RETENTION` controls retained superseded signal history and defaults to 90 days. It accepts a Go duration between 24 hours and 365 days. Echo prunes in batches at startup and daily, but always preserves the newest non-watchdog observation for every service and every event currently referenced by an open or resolved alert. Freshness checks and alert evidence therefore remain valid even when the rest of a service's older timeline expires. Retention uses the time Echo received the signed event, so a delayed observation still receives the configured local retention period. Maintenance is a supervised readiness component: repeated failures open one deduplicated owner alert instead of silently allowing unbounded growth.
+
 ## Notification policy
 
 Echo queues a private WhatsApp message to the configured owner when an alert opens, reopens, or resolves. Opening and reopening messages include copyable `service <name>` and `investigate <name>` replies for immediate evidence or bounded cross-source correlation; the latter requires configured AI tools. The alert transition and durable WhatsApp outbox item commit in the same MariaDB transaction, so a crash cannot preserve one while losing the other. Repeated failing observations update `lastSeenAt` without generating noise. All accepted events and alert state are visible in **Monitoring**.

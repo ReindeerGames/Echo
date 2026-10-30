@@ -14,6 +14,7 @@ import (
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/githubapp"
 	"github.com/ReindeerGames/echo/internal/httpapi"
+	"github.com/ReindeerGames/echo/internal/maintenance"
 	"github.com/ReindeerGames/echo/internal/monitor"
 	"github.com/ReindeerGames/echo/internal/owner"
 	"github.com/ReindeerGames/echo/internal/policy"
@@ -49,22 +50,8 @@ func run() error {
 		return err
 	}
 	defer st.Close()
-	pruned, err := st.PruneConversationHistory(ctx, time.Now().UTC().Add(-cfg.Assistant.Retention))
-	if err != nil {
-		return err
-	}
-	if pruned > 0 {
-		slog.Info("pruned expired assistant conversation messages", "count", pruned)
-	}
-	prunedAttachments, err := st.PruneIncidentAttachments(ctx, time.Now().UTC().Add(-cfg.Assistant.AttachmentRetention))
-	if err != nil {
-		return err
-	}
-	if prunedAttachments > 0 {
-		slog.Info("pruned expired incident attachments", "count", prunedAttachments)
-	}
 	state := runtimestate.New()
-	expectedComponents := []string{"monitor-watchdog", "worker-watchdog"}
+	expectedComponents := []string{"monitor-watchdog", "retention-maintenance", "worker-watchdog"}
 	if cfg.Worker.Enabled {
 		expectedComponents = append(expectedComponents, "worker")
 	}
@@ -75,6 +62,8 @@ func run() error {
 	owners := owner.New(st, cfg.WhatsApp.OwnerJID)
 	reporter := &runtimeComponentReporter{store: st, owners: owners, recoveryWindow: 30 * time.Second}
 	resolveDisabledComponentAlerts(ctx, st, owners, cfg.Worker.Enabled, cfg.WhatsApp.Enabled)
+	retention := maintenance.NewRetention(st, cfg.Assistant.Retention, cfg.Assistant.AttachmentRetention, cfg.Monitor.Retention, 24*time.Hour)
+	go superviseComponent(ctx, state, "retention-maintenance", func() error { return retention.Run(ctx) }, reporter)
 
 	vault, err := security.NewVault(st, cfg.Security.EncryptionKey)
 	if err != nil {

@@ -55,6 +55,7 @@ type GitHub struct {
 type Monitor struct {
 	WebhookSecret    string
 	WatchdogInterval time.Duration
+	Retention        time.Duration
 }
 
 type AI struct {
@@ -121,6 +122,7 @@ func Load() (Config, error) {
 		Monitor: Monitor{
 			WebhookSecret:    strings.TrimSpace(os.Getenv("ECHO_MONITOR_WEBHOOK_SECRET")),
 			WatchdogInterval: duration("ECHO_MONITOR_WATCHDOG_INTERVAL", 30*time.Second),
+			Retention:        duration("ECHO_MONITOR_RETENTION", 90*24*time.Hour),
 		},
 		AI: AI{
 			Enabled: boolean("ECHO_AI_ENABLED", false),
@@ -179,6 +181,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Monitor.WatchdogInterval < 5*time.Second || cfg.Monitor.WatchdogInterval > 5*time.Minute {
 		return Config{}, errors.New("ECHO_MONITOR_WATCHDOG_INTERVAL must be between 5s and 5m")
+	}
+	if cfg.Monitor.Retention < 24*time.Hour || cfg.Monitor.Retention > 365*24*time.Hour {
+		return Config{}, errors.New("ECHO_MONITOR_RETENTION must be between 24h and 8760h")
 	}
 	if cfg.Worker.PollInterval < 100*time.Millisecond || cfg.Worker.PollInterval > time.Minute {
 		return Config{}, errors.New("ECHO_WORKER_POLL_INTERVAL must be between 100ms and 1m")
