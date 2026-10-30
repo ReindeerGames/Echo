@@ -96,6 +96,27 @@ type ServiceRunbook struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
+type RepositoryWorkflowAlert struct {
+	ID              string     `json:"id"`
+	ProjectID       string     `json:"projectId"`
+	ProjectName     string     `json:"projectName"`
+	RepositoryID    string     `json:"repositoryId"`
+	Repository      string     `json:"repository"`
+	DefaultBranch   string     `json:"defaultBranch"`
+	Status          string     `json:"status"`
+	Summary         string     `json:"summary"`
+	HeadSHA         string     `json:"headSha"`
+	FailedWorkflows []string   `json:"failedWorkflows"`
+	OpenedAt        time.Time  `json:"openedAt"`
+	LastSeenAt      time.Time  `json:"lastSeenAt"`
+	ResolvedAt      *time.Time `json:"resolvedAt,omitempty"`
+}
+
+type RepositoryWorkflowTransition struct {
+	Kind  string                  `json:"kind"`
+	Alert RepositoryWorkflowAlert `json:"alert"`
+}
+
 type StaleServiceHeartbeat struct {
 	ServiceID       string     `json:"serviceId"`
 	ServiceName     string     `json:"serviceName"`

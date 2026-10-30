@@ -178,6 +178,21 @@ func TestMonitorRetentionIsBounded(t *testing.T) {
 	}
 }
 
+func TestGitHubMonitorIntervalIsBounded(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "false")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	t.Setenv("ECHO_GITHUB_MONITOR_INTERVAL", "30s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected short GitHub monitor interval to be rejected")
+	}
+	t.Setenv("ECHO_GITHUB_MONITOR_INTERVAL", "61m")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected oversized GitHub monitor interval to be rejected")
+	}
+}
+
 func TestWorkerTimingIsBounded(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "development")

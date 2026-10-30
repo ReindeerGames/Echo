@@ -18,26 +18,27 @@ import (
 )
 
 type fakeReader struct {
-	dashboard    domain.Dashboard
-	projects     []domain.Project
-	groups       []domain.GroupBinding
-	repos        []domain.Repository
-	services     []domain.Service
-	dependencies []domain.ServiceDependency
-	runbooks     []domain.ServiceRunbook
-	alerts       []domain.ServiceAlert
-	maintenance  []domain.MaintenanceWindow
-	events       []domain.MonitorEvent
-	jobs         []domain.Job
-	deliveries   []domain.OutboundDelivery
-	deployments  []domain.Deployment
-	changes      []domain.ChangeSet
-	incident     domain.Incident
-	incidents    []domain.Incident
-	analysis     domain.Analysis
-	audit        []domain.AuditEvent
-	attachments  []domain.IncidentAttachment
-	messages     []domain.IncidentMessage
+	dashboard        domain.Dashboard
+	projects         []domain.Project
+	groups           []domain.GroupBinding
+	repos            []domain.Repository
+	services         []domain.Service
+	dependencies     []domain.ServiceDependency
+	runbooks         []domain.ServiceRunbook
+	alerts           []domain.ServiceAlert
+	repositoryAlerts []domain.RepositoryWorkflowAlert
+	maintenance      []domain.MaintenanceWindow
+	events           []domain.MonitorEvent
+	jobs             []domain.Job
+	deliveries       []domain.OutboundDelivery
+	deployments      []domain.Deployment
+	changes          []domain.ChangeSet
+	incident         domain.Incident
+	incidents        []domain.Incident
+	analysis         domain.Analysis
+	audit            []domain.AuditEvent
+	attachments      []domain.IncidentAttachment
+	messages         []domain.IncidentMessage
 }
 
 type fakeToolModel struct{}
@@ -178,6 +179,15 @@ func (f fakeReader) ListServiceRunbooks(_ context.Context, serviceID string, lim
 }
 func (f fakeReader) ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error) {
 	return f.alerts, nil
+}
+func (f fakeReader) ListRepositoryWorkflowAlerts(_ context.Context, status string) ([]domain.RepositoryWorkflowAlert, error) {
+	var out []domain.RepositoryWorkflowAlert
+	for _, alert := range f.repositoryAlerts {
+		if status == "" || alert.Status == status {
+			out = append(out, alert)
+		}
+	}
+	return out, nil
 }
 func (f fakeReader) ListServiceAlertsForService(_ context.Context, serviceID, status string, limit int) ([]domain.ServiceAlert, error) {
 	var out []domain.ServiceAlert
@@ -357,6 +367,28 @@ func TestStatusAndServiceAnswersUseStoredEvidence(t *testing.T) {
 	service, intent, err := responder.Answer(context.Background(), "service nudgie-web")
 	if err != nil || intent != "service" || !containsAll(service, "Nudgie web", "CRITICAL", "Latest signal: unhealthy") {
 		t.Fatalf("unexpected service answer intent=%s err=%v body=%s", intent, err, service)
+	}
+}
+
+func TestRepositoryWorkflowAlertsAppearInStatusAlertsAndAITools(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{repositoryAlerts: []domain.RepositoryWorkflowAlert{{ID: "rwa_0123456789abcdef01234567", Repository: "ReindeerGames/echo", DefaultBranch: "main", Status: "open", Summary: "1 latest workflow(s) failed; 0 running; 1 healthy", FailedWorkflows: []string{"Deploy"}, OpenedAt: now.Add(-time.Hour), LastSeenAt: now}}}
+	responder := New(reader)
+	status, intent, err := responder.Answer(context.Background(), "status")
+	if err != nil || intent != "status" || !containsAll(status, "1 runtime alert", "GitHub workflow alerts: 1 open") {
+		t.Fatalf("workflow alert missing from status intent=%s body=%s err=%v", intent, status, err)
+	}
+	alerts, intent, err := responder.Answer(context.Background(), "alerts")
+	if err != nil || intent != "alerts" || !containsAll(alerts, "Open operational alerts (1)", "CRITICAL · ReindeerGames/echo", "failed: Deploy") {
+		t.Fatalf("workflow alert missing from alerts intent=%s body=%s err=%v", intent, alerts, err)
+	}
+	statusTool, err := responder.executeTool(context.Background(), "get_status", json.RawMessage(`{}`))
+	if err != nil || !strings.Contains(statusTool, `"open_repository_workflow_alerts":1`) {
+		t.Fatalf("workflow alert missing from status tool output=%s err=%v", statusTool, err)
+	}
+	alertTool, err := responder.executeTool(context.Background(), "get_open_alerts", json.RawMessage(`{}`))
+	if err != nil || !containsAll(alertTool, `"service":"ReindeerGames/echo"`, `"fingerprint":"github-default-branch-workflow"`, `"count":1`) {
+		t.Fatalf("workflow alert missing from alert tool output=%s err=%v", alertTool, err)
 	}
 }
 

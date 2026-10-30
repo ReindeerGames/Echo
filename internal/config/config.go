@@ -49,8 +49,9 @@ type WhatsApp struct {
 }
 
 type GitHub struct {
-	APIBaseURL    string
-	WebhookSecret string
+	APIBaseURL      string
+	WebhookSecret   string
+	MonitorInterval time.Duration
 }
 
 type Monitor struct {
@@ -119,8 +120,9 @@ func Load() (Config, error) {
 			OutboxRetention: duration("ECHO_WHATSAPP_OUTBOX_RETENTION", 30*24*time.Hour),
 		},
 		GitHub: GitHub{
-			APIBaseURL:    strings.TrimRight(env("ECHO_GITHUB_API_URL", "https://api.github.com"), "/"),
-			WebhookSecret: strings.TrimSpace(os.Getenv("ECHO_GITHUB_WEBHOOK_SECRET")),
+			APIBaseURL:      strings.TrimRight(env("ECHO_GITHUB_API_URL", "https://api.github.com"), "/"),
+			WebhookSecret:   strings.TrimSpace(os.Getenv("ECHO_GITHUB_WEBHOOK_SECRET")),
+			MonitorInterval: duration("ECHO_GITHUB_MONITOR_INTERVAL", 15*time.Minute),
 		},
 		Monitor: Monitor{
 			WebhookSecret:         strings.TrimSpace(os.Getenv("ECHO_MONITOR_WEBHOOK_SECRET")),
@@ -194,6 +196,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Monitor.Retention < 24*time.Hour || cfg.Monitor.Retention > 365*24*time.Hour {
 		return Config{}, errors.New("ECHO_MONITOR_RETENTION must be between 24h and 8760h")
+	}
+	if cfg.GitHub.MonitorInterval < time.Minute || cfg.GitHub.MonitorInterval > time.Hour {
+		return Config{}, errors.New("ECHO_GITHUB_MONITOR_INTERVAL must be between 1m and 1h")
 	}
 	if cfg.Worker.PollInterval < 100*time.Millisecond || cfg.Worker.PollInterval > time.Minute {
 		return Config{}, errors.New("ECHO_WORKER_POLL_INTERVAL must be between 100ms and 1m")

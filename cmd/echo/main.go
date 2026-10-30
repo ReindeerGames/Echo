@@ -13,6 +13,7 @@ import (
 	"github.com/ReindeerGames/echo/internal/config"
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/githubapp"
+	"github.com/ReindeerGames/echo/internal/githubmonitor"
 	"github.com/ReindeerGames/echo/internal/httpapi"
 	"github.com/ReindeerGames/echo/internal/maintenance"
 	"github.com/ReindeerGames/echo/internal/monitor"
@@ -51,7 +52,7 @@ func run() error {
 	}
 	defer st.Close()
 	state := runtimestate.New()
-	expectedComponents := []string{"monitor-watchdog", "retention-maintenance", "worker-watchdog"}
+	expectedComponents := []string{"github-watchdog", "monitor-watchdog", "retention-maintenance", "worker-watchdog"}
 	if cfg.Worker.Enabled {
 		expectedComponents = append(expectedComponents, "worker")
 	}
@@ -70,6 +71,8 @@ func run() error {
 		return err
 	}
 	githubClient := githubapp.New(vault, cfg.GitHub.APIBaseURL, cfg.Worker.MaxRepoBytes)
+	githubWatchdog := githubmonitor.New(st, githubClient, owners, cfg.GitHub.MonitorInterval)
+	go superviseComponent(ctx, state, "github-watchdog", func() error { return githubWatchdog.Run(ctx) }, reporter)
 	aiClient := ai.NewManaged(vault, cfg.AI.Enabled, cfg.AI.BaseURL, cfg.AI.APIKey, cfg.AI.Model)
 	workflows := workflow.New(st, policies, owners, aiClient, githubClient, state, expectedComponents, cfg.Assistant.HistoryLimit, cfg.Security.ApprovalTTL)
 

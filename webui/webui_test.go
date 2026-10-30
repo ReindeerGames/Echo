@@ -204,6 +204,18 @@ func TestMonitoringSupportsServiceOperationalRunbooks(t *testing.T) {
 	}
 }
 
+func TestRepositoriesExposeProactiveWorkflowAlerts(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/github/workflow-alerts?status=open", "repositoryWorkflowAlertPanel", "Default-branch workflow attention", "supervised read-only GitHub watchdog", "failedWorkflows"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("repository workflow alert UI is missing %q", expected)
+		}
+	}
+}
+
 func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

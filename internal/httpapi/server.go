@@ -93,6 +93,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("PUT /api/v1/settings/github", s.githubSettings)
 	protected.HandleFunc("DELETE /api/v1/settings/github", s.githubSettings)
 	protected.HandleFunc("GET /api/v1/github/repositories", s.githubRepositories)
+	protected.HandleFunc("GET /api/v1/github/workflow-alerts", s.repositoryWorkflowAlerts)
 	protected.HandleFunc("GET /api/v1/settings/ai", s.aiSettings)
 	protected.HandleFunc("PUT /api/v1/settings/ai", s.aiSettings)
 	protected.HandleFunc("DELETE /api/v1/settings/ai", s.aiSettings)
@@ -185,7 +186,7 @@ func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) expectedComponents() []string {
-	expected := []string{"monitor-watchdog", "worker-watchdog"}
+	expected := []string{"github-watchdog", "monitor-watchdog", "worker-watchdog"}
 	if s.cfg.Worker.Enabled {
 		expected = append(expected, "worker")
 	}
@@ -653,6 +654,15 @@ func monitorEventLimit(raw string) (int, error) {
 
 func (s *Server) serviceAlerts(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListServiceAlerts(r.Context(), r.URL.Query().Get("status"))
+	respond(w, items, err)
+}
+
+func (s *Server) repositoryWorkflowAlerts(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListRepositoryWorkflowAlerts(r.Context(), r.URL.Query().Get("status"))
+	if errors.Is(err, store.ErrInvalidRepositoryWorkflowObservation) {
+		writeError(w, http.StatusBadRequest, "invalid_status", "status must be open or resolved")
+		return
+	}
 	respond(w, items, err)
 }
 

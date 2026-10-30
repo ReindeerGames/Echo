@@ -1067,6 +1067,59 @@ func TestMariaDBServiceRunbooksAreBoundedAndServiceScoped(t *testing.T) {
 	}
 }
 
+func TestMariaDBRepositoryWorkflowAlertsAreDurableAndDeduplicated(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "workflow-alerts", Name: "Workflow alerts", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := st.SaveRepository(ctx, domain.Repository{ProjectID: project.ID, Owner: "ReindeerGames", Name: "echo", Role: "application", DefaultBranch: "main", ReadOnly: true, Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	transition, err := st.ReconcileRepositoryWorkflowAlert(ctx, repository.ID, "attention", strings.Repeat("a", 40), "1 latest workflow(s) failed; 0 running; 1 healthy", []string{"Deploy"}, now, "owner@s.whatsapp.net")
+	if err != nil || transition == nil || transition.Kind != "opened" || transition.Alert.Repository != "ReindeerGames/echo" || len(transition.Alert.FailedWorkflows) != 1 {
+		t.Fatalf("open workflow alert: transition=%#v err=%v", transition, err)
+	}
+	if repeated, err := st.ReconcileRepositoryWorkflowAlert(ctx, repository.ID, "attention", strings.Repeat("a", 40), "1 latest workflow(s) failed; 0 running; 1 healthy", []string{"Deploy"}, now.Add(time.Minute), "owner@s.whatsapp.net"); err != nil || repeated != nil {
+		t.Fatalf("repeat workflow alert was not deduplicated: transition=%#v err=%v", repeated, err)
+	}
+	if running, err := st.ReconcileRepositoryWorkflowAlert(ctx, repository.ID, "running", strings.Repeat("b", 40), "1 workflow(s) running; 1 healthy", nil, now.Add(2*time.Minute), "owner@s.whatsapp.net"); err != nil || running != nil {
+		t.Fatalf("inconclusive run changed alert lifecycle: transition=%#v err=%v", running, err)
+	}
+	resolved, err := st.ReconcileRepositoryWorkflowAlert(ctx, repository.ID, "healthy", strings.Repeat("b", 40), "2 latest workflow(s) healthy", nil, now.Add(3*time.Minute), "owner@s.whatsapp.net")
+	if err != nil || resolved == nil || resolved.Kind != "resolved" || resolved.Alert.Status != "resolved" || resolved.Alert.ResolvedAt == nil {
+		t.Fatalf("resolve workflow alert: transition=%#v err=%v", resolved, err)
+	}
+	reopened, err := st.ReconcileRepositoryWorkflowAlert(ctx, repository.ID, "attention", strings.Repeat("c", 40), "1 latest workflow(s) failed; 0 running; 0 healthy", []string{"Build"}, now.Add(4*time.Minute), "owner@s.whatsapp.net")
+	if err != nil || reopened == nil || reopened.Kind != "reopened" || reopened.Alert.OpenedAt != now.Add(4*time.Minute) {
+		t.Fatalf("reopen workflow alert: transition=%#v err=%v", reopened, err)
+	}
+	open, err := st.ListRepositoryWorkflowAlerts(ctx, "open")
+	if err != nil || len(open) != 1 || open[0].RepositoryID != repository.ID || open[0].FailedWorkflows[0] != "Build" {
+		t.Fatalf("list open workflow alerts: items=%#v err=%v", open, err)
+	}
+	cleared, err := st.ReconcileRepositoryWorkflowAlert(ctx, repository.ID, "disabled", "", "", nil, now.Add(5*time.Minute), "owner@s.whatsapp.net")
+	if err != nil || cleared == nil || cleared.Kind != "resolved" || cleared.Alert.Summary != "Repository workflow monitoring was disabled" {
+		t.Fatalf("clear disabled workflow alert: transition=%#v err=%v", cleared, err)
+	}
+	var notifications int
+	if err := st.db.QueryRow(`SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&notifications); err != nil || notifications != 4 {
+		t.Fatalf("unexpected workflow notification count: count=%d err=%v", notifications, err)
+	}
+}
+
 func TestMariaDBHeartbeatWatchdogLifecycle(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -1421,7 +1474,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_service_runbooks", "echo_service_dependencies", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_service_runbooks", "echo_service_dependencies", "echo_services", "echo_environments", "echo_repository_workflow_alerts", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

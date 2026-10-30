@@ -24,6 +24,8 @@ Reading checks and monitoring repository-native production workflows requires:
 
 - Actions: read
 
+The same read-only permission powers Echo's supervised default-branch workflow watchdog. It polls at `ECHO_GITHUB_MONITOR_INTERVAL` (15 minutes by default), deduplicates repeated failures, and never reruns or cancels a workflow.
+
 GitHub Actions workflow dispatch additionally requires:
 
 - Actions: write

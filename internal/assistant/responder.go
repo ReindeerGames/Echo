@@ -28,6 +28,7 @@ type Reader interface {
 	ListServiceDependencies(context.Context, string, int) ([]domain.ServiceDependency, error)
 	ListServiceRunbooks(context.Context, string, int) ([]domain.ServiceRunbook, error)
 	ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error)
+	ListRepositoryWorkflowAlerts(context.Context, string) ([]domain.RepositoryWorkflowAlert, error)
 	ListServiceAlertsForService(context.Context, string, string, int) ([]domain.ServiceAlert, error)
 	ListMaintenanceWindows(context.Context, string, int) ([]domain.MaintenanceWindow, error)
 	ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error)
@@ -117,12 +118,12 @@ Prefer the smallest set of tools that answers the question. When a service name 
 
 func operatorTools() []ai.ToolDefinition {
 	return []ai.ToolDefinition{
-		ai.FunctionTool("get_status", "Get current Echo runtime-component state, operational counts, and monitoring freshness coverage.", schema(nil, nil)),
-		ai.FunctionTool("get_open_alerts", "List current Echo component and service alerts with severity and last observed time.", schema(nil, nil)),
+		ai.FunctionTool("get_status", "Get current Echo runtime-component state, operational counts, monitoring freshness coverage, and open default-branch workflow alert count.", schema(nil, nil)),
+		ai.FunctionTool("get_open_alerts", "List current Echo component, service, and default-branch GitHub workflow alerts with severity and last observed time.", schema(nil, nil)),
 		ai.FunctionTool("get_maintenance_windows", "List active and upcoming service maintenance windows. This tool is read-only and cannot schedule, extend, or cancel suppression.", schema(nil, nil)),
 		ai.FunctionTool("list_services", "List services. Use an empty query for all services or a name/key fragment to filter.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Service name or key fragment, or empty string."}}, []string{"query"})),
-		ai.FunctionTool("get_service", "Get one service with its open alerts and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
-		ai.FunctionTool("investigate_service", "Correlate one service's bounded monitoring timeline, open alerts, project incidents, deployments, recent default-branch commit summaries, and configured repository workflow state. Use for diagnosis or 'why is this failing?' questions. This tool is read-only and has no log, shell, SSH, or mutation access.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
+		ai.FunctionTool("get_service", "Get one service with its open alerts, operator runbooks, and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
+		ai.FunctionTool("investigate_service", "Correlate one service's bounded monitoring timeline, operator runbooks, open alerts, project incidents, deployments, recent default-branch commit summaries, and configured repository workflow state. Use for diagnosis or 'why is this failing?' questions. This tool is read-only and has no log, shell, SSH, or mutation access.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
 		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
 		ai.FunctionTool("get_delivery_queue", "List the active queued, sending, retrying, and terminally failed WhatsApp delivery queue with channel type, attempt timing, and safe failure categories. An empty result does not prove a specific message was delivered. Message content, destinations, IDs, and raw errors are omitted.", schema(nil, nil)),
 		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
@@ -171,6 +172,11 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			return "", err
 		}
 		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "maintenance_suppressed_alerts": dashboard.SuppressedAlerts, "acknowledged_alerts": dashboard.AcknowledgedAlerts, "active_maintenance_windows": dashboard.ActiveMaintenanceWindows, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "monitoring": coverage, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
+		repositoryAlerts, err := r.reader.ListRepositoryWorkflowAlerts(ctx, "open")
+		if err != nil {
+			return "", err
+		}
+		view["open_repository_workflow_alerts"] = len(repositoryAlerts)
 		windows, err := r.reader.ListMaintenanceWindows(ctx, "", 101)
 		if err != nil {
 			return "", err
@@ -184,6 +190,10 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		return marshal(view)
 	case "get_open_alerts":
 		alerts, err := r.reader.ListServiceAlerts(ctx, "open")
+		if err != nil {
+			return "", err
+		}
+		repositoryAlerts, err := r.reader.ListRepositoryWorkflowAlerts(ctx, "open")
 		if err != nil {
 			return "", err
 		}
@@ -215,11 +225,18 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			}
 			views = append(views, alertView{Service: alert.ServiceName, Severity: alert.Severity, Summary: alert.Summary, Fingerprint: alert.Fingerprint, OpenedAt: &openedAt, LastSeen: &lastSeen, MaintenanceUntil: alertMaintenanceUntil(r.now().UTC(), alert, windows), AcknowledgedAt: alert.AcknowledgedAt, Acknowledgement: code, ReminderCount: alert.ReminderCount})
 		}
+		for _, alert := range repositoryAlerts {
+			if len(views) == 50 {
+				break
+			}
+			openedAt, lastSeen := alert.OpenedAt, alert.LastSeenAt
+			views = append(views, alertView{Service: alert.Repository, Severity: "critical", Summary: alert.Summary + "; failed workflows: " + strings.Join(alert.FailedWorkflows, ", "), Fingerprint: "github-default-branch-workflow", OpenedAt: &openedAt, LastSeen: &lastSeen})
+		}
 		dashboard, err := r.reader.Dashboard(ctx)
 		if err != nil {
 			return "", err
 		}
-		total := len(alerts)
+		total := len(alerts) + len(repositoryAlerts)
 		if r.runtime != nil {
 			_, components := r.runtime.ComponentReadiness(r.expectedComponents)
 			for _, name := range sortedUnreadyComponents(components) {
@@ -1599,6 +1616,10 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 		return "", err
 	}
 	maintenanceState := maintenanceSummary(r.now().UTC(), windows)
+	repositoryAlerts, err := r.reader.ListRepositoryWorkflowAlerts(ctx, "open")
+	if err != nil {
+		return "", err
+	}
 	runtimeAlerts := 0
 	runtimeLine := ""
 	if r.runtime != nil {
@@ -1616,7 +1637,7 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 		}
 	}
 	state := "No open runtime alerts."
-	if total := max(0, dashboard.OpenAlerts-dashboard.SuppressedAlerts-dashboard.AcknowledgedAlerts) + runtimeAlerts; total > 0 {
+	if total := max(0, dashboard.OpenAlerts-dashboard.SuppressedAlerts-dashboard.AcknowledgedAlerts) + runtimeAlerts + len(repositoryAlerts); total > 0 {
 		state = fmt.Sprintf("%d runtime alert(s) need attention.", total)
 	} else if dashboard.SuppressedAlerts > 0 || dashboard.AcknowledgedAlerts > 0 {
 		state = fmt.Sprintf("No unacknowledged alerts need attention · %d in maintenance · %d acknowledged.", dashboard.SuppressedAlerts, dashboard.AcknowledgedAlerts)
@@ -1627,7 +1648,7 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 	}
 	monitoring := fmt.Sprintf("Monitoring: %d fresh · %d stale · %d missing · %d without heartbeat policy", coverage.Fresh, coverage.Stale, coverage.Missing, coverage.WithoutHeartbeatPolicy)
 	maintenanceLine := fmt.Sprintf("Maintenance: %d active · %d upcoming", maintenanceState["active"], maintenanceState["upcoming"])
-	return fmt.Sprintf("Echo operational status\n%s%s\n\nServices: %d enabled\n%s\n%s\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, prefixLine(runtimeLine), enabled, monitoring, maintenanceLine, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
+	return fmt.Sprintf("Echo operational status\n%s%s\n\nServices: %d enabled\n%s\n%s\nGitHub workflow alerts: %d open\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, prefixLine(runtimeLine), enabled, monitoring, maintenanceLine, len(repositoryAlerts), dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
 }
 
 func (r *Responder) brief(ctx context.Context) (string, error) {
@@ -1795,6 +1816,10 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	repositoryAlerts, err := r.reader.ListRepositoryWorkflowAlerts(ctx, "open")
+	if err != nil {
+		return "", err
+	}
 	windows, err := r.reader.ListMaintenanceWindows(ctx, "", 101)
 	if err != nil {
 		return "", err
@@ -1809,8 +1834,8 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 		_, componentStates = r.runtime.ComponentReadiness(r.expectedComponents)
 		unreadyComponents = sortedUnreadyComponents(componentStates)
 	}
-	if len(alerts) == 0 && !dashboard.WorkerQueueStalled && len(unreadyComponents) == 0 {
-		return "No open service alerts. Echo will message you when a monitored condition opens, reopens, or resolves.", nil
+	if len(alerts) == 0 && len(repositoryAlerts) == 0 && !dashboard.WorkerQueueStalled && len(unreadyComponents) == 0 {
+		return "No open operational alerts. Echo will message you when a monitored service, default-branch workflow, or runtime condition opens, reopens, or resolves.", nil
 	}
 	var lines []string
 	for _, name := range unreadyComponents {
@@ -1818,6 +1843,14 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 	}
 	if dashboard.WorkerQueueStalled {
 		lines = append(lines, "• CRITICAL · Echo worker\n  "+dashboard.WorkerHealthSummary)
+	}
+	for i, alert := range repositoryAlerts {
+		if i == 10 {
+			lines = append(lines, fmt.Sprintf("…and %d more GitHub workflow alerts in the control plane.", len(repositoryAlerts)-i))
+			break
+		}
+		failed := strings.Join(alert.FailedWorkflows, ", ")
+		lines = append(lines, fmt.Sprintf("• CRITICAL · %s · default branch %s\n  %s · failed: %s", alert.Repository, alert.DefaultBranch, alert.Summary, failed))
 	}
 	for i, alert := range alerts {
 		if i == 10 {
@@ -1836,7 +1869,7 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 		}
 		lines = append(lines, line)
 	}
-	return fmt.Sprintf("Open operational alerts (%d)\n\n%s", len(alerts)+len(unreadyComponents)+map[bool]int{true: 1}[dashboard.WorkerQueueStalled], strings.Join(lines, "\n")), nil
+	return fmt.Sprintf("Open operational alerts (%d)\n\n%s", len(alerts)+len(repositoryAlerts)+len(unreadyComponents)+map[bool]int{true: 1}[dashboard.WorkerQueueStalled], strings.Join(lines, "\n")), nil
 }
 
 func (r *Responder) maintenance(ctx context.Context) (string, error) {
@@ -2082,39 +2115,8 @@ func (r *Responder) inspectRepositorySubset(ctx context.Context, repositories []
 }
 
 func repositoryWorkflowHealth(status githubapp.RepositoryStatus) (string, string) {
-	if len(status.WorkflowRuns) == 0 {
-		return "unknown", "no recent default-branch workflows returned"
-	}
-	latest := map[string]githubapp.RepositoryWorkflowRun{}
-	for _, run := range status.WorkflowRuns {
-		name := strings.TrimSpace(run.Name)
-		if name == "" {
-			name = "unnamed workflow"
-		}
-		previous, ok := latest[name]
-		if !ok || run.UpdatedAt.After(previous.UpdatedAt) {
-			latest[name] = run
-		}
-	}
-	running, failed, healthy := 0, 0, 0
-	for _, run := range latest {
-		if run.Status != "completed" {
-			running++
-			continue
-		}
-		if stringIn(run.Conclusion, "success", "neutral", "skipped") {
-			healthy++
-		} else {
-			failed++
-		}
-	}
-	if failed > 0 {
-		return "attention", fmt.Sprintf("%d latest workflow(s) failed; %d running; %d healthy", failed, running, healthy)
-	}
-	if running > 0 {
-		return "running", fmt.Sprintf("%d workflow(s) running; %d healthy", running, healthy)
-	}
-	return "healthy", fmt.Sprintf("%d latest workflow(s) healthy", healthy)
+	health := githubapp.AssessWorkflowHealth(status)
+	return health.State, health.Summary
 }
 
 func repositoryEstateView(entries []repositoryInspection, total int, truncated bool) map[string]any {
@@ -2972,7 +2974,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• coverage / what isn't monitored — project relationship and monitoring gaps\n• activity / what happened — recent safe audit events\n• alerts — open runtime conditions and acknowledgement codes\n• ack <code> — acknowledge one exact open alert and pause its reminders\n• maintenance — active and upcoming service maintenance\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• investigate <service> — correlate signals, incidents, deployments and workflows (AI configured)\n• jobs — queued, running, retrying and dead work\n• deliveries — WhatsApp delivery attempts and safe failure categories\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• github inventory — compare token-visible and configured repositories (AI configured)\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions and AI tools are read-only. Only an exact owner command can acknowledge an alert; production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary, workflow alerts and monitoring coverage\n• coverage / what isn't monitored — project relationship and monitoring gaps\n• activity / what happened — recent safe audit events\n• alerts — open runtime, service and default-branch workflow conditions\n• ack <code> — acknowledge one exact service alert and pause its reminders\n• maintenance — active and upcoming service maintenance\n• services — monitored service catalogue\n• service <name> — alerts, runbooks and latest evidence\n• investigate <service> — correlate signals, runbooks, incidents, deployments and workflows (AI configured)\n• jobs — queued, running, retrying and dead work\n• deliveries — WhatsApp delivery attempts and safe failure categories\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• github inventory — compare token-visible and configured repositories (AI configured)\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions and AI tools are read-only. Only an exact owner command can acknowledge an alert; production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {
