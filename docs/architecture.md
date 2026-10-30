@@ -33,6 +33,7 @@ The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commi
 - `echo_jobs`: leased, retryable background work.
 - `echo_whatsapp_outbox`: retryable outbound messages with expiring leases and stable WhatsApp message IDs across crash recovery.
 - `echo_runtime_component_alerts`: one durable open-or-resolved lifecycle per supervised Echo component, used to deduplicate failure and recovery notifications across retries and process restarts.
+- `echo_briefing_settings`: the opt-in local schedule and last successfully queued local date for the owner's daily operational briefing.
 - `echo_approvals`: expiring one-action authorization.
 - `echo_audit_events`: append-only operational evidence.
 - `echo_encrypted_settings`: AES-GCM ciphertext and non-secret connection metadata; the encryption key remains outside MariaDB.
@@ -41,7 +42,9 @@ MariaDB deadlocks and connection failure are allowed to surface to job retry log
 
 ## Runtime supervision and readiness
 
-The all-in-one process supervises every required long-running loop. The worker, worker-health watchdog, monitor-heartbeat watchdog, and enabled WhatsApp gateway publish a small in-memory state machine and restart with bounded exponential backoff after an unexpected return. The supervisor reconciles each fixed component name with a durable alert lifecycle: the first unexpected exit opens or reopens the alert, repeated failures only refresh it, and 30 seconds of stable execution resolves it. Each lifecycle transition, audit event, and optional owner notification is one MariaDB transaction. On process startup the same stability window clears stale open alerts left by a previous crash; disabling a component clears its stale alert without pretending that it is running. Raw errors remain in structured server logs; persistence, the authenticated runtime API, and WhatsApp expose only fixed safe status and summary values.
+The all-in-one process supervises every required long-running loop. The worker, worker-health watchdog, monitor-heartbeat watchdog, enabled WhatsApp gateway, and daily-brief scheduler publish a small in-memory state machine and restart with bounded exponential backoff after an unexpected return. The supervisor reconciles each fixed component name with a durable alert lifecycle: the first unexpected exit opens or reopens the alert, repeated failures only refresh it, and 30 seconds of stable execution resolves it. Each lifecycle transition, audit event, and optional owner notification is one MariaDB transaction. On process startup the same stability window clears stale open alerts left by a previous crash; disabling a component clears its stale alert without pretending that it is running. Raw errors remain in structured server logs; persistence, the authenticated runtime API, and WhatsApp expose only fixed safe status and summary values.
+
+The daily-brief scheduler evaluates an explicit IANA timezone and local time. It does no AI work before a briefing is due or when no owner exists. After rendering the deterministic operational brief, a locked settings row makes the outbox insert, last-sent local date, and audit event one transaction, preventing duplicates across retries and restarts.
 
 `/healthz` proves only that the HTTP process can answer. `/readyz` additionally requires core MariaDB reachability, agreement between applied and embedded migrations, and a `running` state from every component enabled by configuration. Container orchestration therefore stops routing traffic when Echo is alive but operationally incomplete.
 

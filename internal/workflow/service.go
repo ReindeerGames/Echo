@@ -34,6 +34,20 @@ func New(st *store.Store, policies *policy.Engine, owners *owner.Service, aiClie
 	return &Service{store: st, policy: policies, owners: owners, assistant: assistant.NewOperator(st, runtime, expectedComponents, github, aiClient), historyLimit: historyLimit, approvalTTL: approvalTTL}
 }
 
+func (s *Service) DailyBrief(ctx context.Context) (string, error) {
+	if s.assistant == nil {
+		return "", errors.New("operator assistant is unavailable")
+	}
+	answer, intent, err := s.assistant.Answer(ctx, "brief")
+	if err != nil {
+		return "", err
+	}
+	if intent != "brief" {
+		return "", errors.New("operator assistant returned an unexpected briefing intent")
+	}
+	return answer, nil
+}
+
 func (s *Service) ReceiveGroupReport(ctx context.Context, selfJIDs []string, msg domain.InboundMessage) (domain.Incident, bool, error) {
 	binding, err := s.store.FindGroupBinding(ctx, msg.ChatJID)
 	if errors.Is(err, store.ErrNotFound) {

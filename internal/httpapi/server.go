@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/ai"
+	"github.com/ReindeerGames/echo/internal/briefing"
 	"github.com/ReindeerGames/echo/internal/config"
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/githubapp"
@@ -98,6 +99,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("GET /api/v1/settings/owner", s.ownerSettings)
 	protected.HandleFunc("PUT /api/v1/settings/owner", s.ownerSettings)
 	protected.HandleFunc("DELETE /api/v1/settings/owner", s.ownerSettings)
+	protected.HandleFunc("GET /api/v1/settings/briefing", s.briefingSettings)
+	protected.HandleFunc("PUT /api/v1/settings/briefing", s.briefingSettings)
 	protected.HandleFunc("GET /api/v1/projects", s.projects)
 	protected.HandleFunc("POST /api/v1/projects", s.projects)
 	protected.HandleFunc("GET /api/v1/groups", s.groups)
@@ -175,7 +178,7 @@ func (s *Server) expectedComponents() []string {
 		expected = append(expected, "worker")
 	}
 	if s.cfg.WhatsApp.Enabled {
-		expected = append(expected, "whatsapp-gateway")
+		expected = append(expected, "whatsapp-gateway", "daily-brief-scheduler")
 	}
 	return expected
 }
@@ -346,6 +349,29 @@ func (s *Server) ownerSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func (s *Server) briefingSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.store.GetBriefingSettings(r.Context())
+		respond(w, settings, err)
+	case http.MethodPut:
+		var input domain.BriefingSettings
+		if err := decodeJSON(r, &input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_briefing_settings", err.Error())
+			return
+		}
+		if err := briefing.Validate(input); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_briefing_settings", err.Error())
+			return
+		}
+		settings, err := s.store.SaveBriefingSettings(r.Context(), input)
+		if err == nil {
+			_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "briefing.settings_saved", "setting", "daily_brief", "succeeded", map[string]any{"enabled": settings.Enabled, "localTime": settings.LocalTime, "timezone": settings.Timezone})
+		}
+		respond(w, settings, err)
 	}
 }
 

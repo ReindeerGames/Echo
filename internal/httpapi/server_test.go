@@ -29,7 +29,7 @@ func (f fakeReadinessStore) SchemaStatus(context.Context) (domain.SchemaStatus, 
 
 func TestReadinessRequiresDatabaseSchemaAndComponents(t *testing.T) {
 	state := runtimestate.New()
-	for _, component := range []string{"monitor-watchdog", "worker-watchdog", "worker", "whatsapp-gateway"} {
+	for _, component := range []string{"monitor-watchdog", "worker-watchdog", "worker", "whatsapp-gateway", "daily-brief-scheduler"} {
 		state.UpdateComponent(component, "running", "")
 	}
 	server := &Server{

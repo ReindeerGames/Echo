@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/ai"
+	"github.com/ReindeerGames/echo/internal/briefing"
 	"github.com/ReindeerGames/echo/internal/config"
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/githubapp"
@@ -61,7 +62,7 @@ func run() error {
 		expectedComponents = append(expectedComponents, "worker")
 	}
 	if cfg.WhatsApp.Enabled {
-		expectedComponents = append(expectedComponents, "whatsapp-gateway")
+		expectedComponents = append(expectedComponents, "whatsapp-gateway", "daily-brief-scheduler")
 	}
 	policies := policy.New()
 	owners := owner.New(st, cfg.WhatsApp.OwnerJID)
@@ -82,6 +83,8 @@ func run() error {
 	go func() { serverErr <- server.Run() }()
 	if cfg.WhatsApp.Enabled {
 		go superviseComponent(ctx, state, "whatsapp-gateway", func() error { return runGatewayOnce(ctx, gateway, state) }, reporter)
+		dailyBriefs := briefing.New(st, owners, workflows, time.Minute)
+		go superviseComponent(ctx, state, "daily-brief-scheduler", func() error { return dailyBriefs.Run(ctx) }, reporter)
 	}
 	if cfg.Worker.Enabled {
 		runner := worker.New(st, githubClient, aiClient, owners, cfg.Worker.WorkspaceRoot, cfg.Worker.PollInterval, cfg.Worker.JobLease, cfg.Worker.HeartbeatInterval, cfg.Worker.MaxFileBytes)
@@ -151,7 +154,7 @@ func resolveDisabledComponentAlerts(ctx context.Context, st componentHealthStore
 		disabled = append(disabled, "worker")
 	}
 	if !whatsappEnabled {
-		disabled = append(disabled, "whatsapp-gateway")
+		disabled = append(disabled, "whatsapp-gateway", "daily-brief-scheduler")
 	}
 	if len(disabled) == 0 {
 		return

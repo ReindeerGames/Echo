@@ -134,7 +134,7 @@ func TestResolveDisabledComponentAlertsDoesNotAddressDisabledWhatsApp(t *testing
 	if owner.calls.Load() != 0 {
 		t.Fatalf("owner was looked up while WhatsApp was disabled: calls=%d", owner.calls.Load())
 	}
-	if len(store.calls) != 2 {
+	if len(store.calls) != 3 {
 		t.Fatalf("unexpected reconciliation calls: %#v", store.calls)
 	}
 	for _, call := range store.calls {

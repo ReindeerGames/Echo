@@ -332,6 +332,15 @@ type OwnerSettings struct {
 	UpdatedAt   time.Time `json:"updatedAt,omitempty"`
 }
 
+type BriefingSettings struct {
+	Enabled           bool       `json:"enabled"`
+	LocalTime         string     `json:"localTime"`
+	Timezone          string     `json:"timezone"`
+	LastSentLocalDate string     `json:"lastSentLocalDate,omitempty"`
+	LastSentAt        *time.Time `json:"lastSentAt,omitempty"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+}
+
 type OutboundMessage struct {
 	ID        string
 	ChatJID   string

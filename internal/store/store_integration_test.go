@@ -169,6 +169,51 @@ func TestMariaDBOwnerSelectionQueuesConfirmationAtomically(t *testing.T) {
 	}
 }
 
+func TestMariaDBDailyBriefingIsQueuedExactlyOncePerLocalDay(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+
+	settings, err := st.SaveBriefingSettings(ctx, domain.BriefingSettings{Enabled: true, LocalTime: "08:00", Timezone: "Africa/Johannesburg"})
+	if err != nil || !settings.Enabled || settings.LocalTime != "08:00" || settings.Timezone != "Africa/Johannesburg" {
+		t.Fatalf("save briefing settings: settings=%#v err=%v", settings, err)
+	}
+	before := time.Date(2026, 10, 30, 5, 59, 0, 0, time.UTC)
+	if queued, err := st.EnqueueDailyBriefIfDue(ctx, "owner@s.whatsapp.net", "Echo daily brief", before); err != nil || queued {
+		t.Fatalf("brief queued before local schedule: queued=%v err=%v", queued, err)
+	}
+	due := before.Add(time.Minute)
+	if queued, err := st.EnqueueDailyBriefIfDue(ctx, "owner@s.whatsapp.net", "Echo daily brief", due); err != nil || !queued {
+		t.Fatalf("due brief not queued: queued=%v err=%v", queued, err)
+	}
+	if queued, err := st.EnqueueDailyBriefIfDue(ctx, "owner@s.whatsapp.net", "duplicate", due.Add(time.Hour)); err != nil || queued {
+		t.Fatalf("duplicate brief queued: queued=%v err=%v", queued, err)
+	}
+
+	settings, err = st.GetBriefingSettings(ctx)
+	if err != nil || settings.LastSentLocalDate != "2026-10-30" || settings.LastSentAt == nil || !settings.LastSentAt.Equal(due) {
+		t.Fatalf("unexpected sent state: settings=%#v err=%v", settings, err)
+	}
+	var outbox, audits, duplicates int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE chat_jid='owner@s.whatsapp.net' AND body='Echo daily brief'`).Scan(&outbox); err != nil || outbox != 1 {
+		t.Fatalf("daily briefing outbox count=%d err=%v", outbox, err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE body='duplicate'`).Scan(&duplicates); err != nil || duplicates != 0 {
+		t.Fatalf("duplicate briefing outbox count=%d err=%v", duplicates, err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_audit_events WHERE action_name='briefing.queued' AND resource_id='daily_brief'`).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("daily briefing audit count=%d err=%v", audits, err)
+	}
+}
+
 func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -715,10 +760,13 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if _, err := st.db.Exec(`INSERT INTO echo_briefing_settings(singleton_id) VALUES(1)`); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -62,6 +62,18 @@ func TestWhatsAppOwnerDiscoveryUIIsExposed(t *testing.T) {
 	}
 }
 
+func TestDailyBriefingScheduleIsVisibleAndTimezoneAware(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"Daily briefing", "/api/v1/settings/briefing", "IANA timezone", "At most once per local date", "resolvedOptions().timeZone"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("daily briefing UI is missing %q", expected)
+		}
+	}
+}
+
 func TestOpenAISettingsUIIsExposed(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()
