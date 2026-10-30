@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/go-sql-driver/mysql"
@@ -80,6 +81,7 @@ func TestDevelopmentAllowsPairingBeforeOwnerIsConfigured(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "development")
 	t.Setenv("ECHO_WHATSAPP_ENABLED", "true")
+	t.Setenv("ECHO_WHATSAPP_LIVE_DELIVERY_CONFIRMED", "true")
 	t.Setenv("ECHO_OWNER_JID", "")
 	t.Setenv("ECHO_DEV_MODE", "true")
 	if _, err := Load(); err != nil {
@@ -91,6 +93,7 @@ func TestProactiveNotificationsCanBeMutedIndependently(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "development")
 	t.Setenv("ECHO_WHATSAPP_ENABLED", "true")
+	t.Setenv("ECHO_WHATSAPP_LIVE_DELIVERY_CONFIRMED", "true")
 	t.Setenv("ECHO_PROACTIVE_NOTIFICATIONS_ENABLED", "false")
 	t.Setenv("ECHO_OWNER_JID", "")
 	t.Setenv("ECHO_DEV_MODE", "true")
@@ -100,6 +103,26 @@ func TestProactiveNotificationsCanBeMutedIndependently(t *testing.T) {
 	}
 	if !cfg.WhatsApp.Enabled || cfg.WhatsApp.ProactiveNotifications {
 		t.Fatalf("unexpected WhatsApp delivery posture: %#v", cfg.WhatsApp)
+	}
+}
+
+func TestNonProductionWhatsAppRequiresExplicitLiveDeliveryConfirmation(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "true")
+	t.Setenv("ECHO_WHATSAPP_LIVE_DELIVERY_CONFIRMED", "")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "ECHO_WHATSAPP_LIVE_DELIVERY_CONFIRMED=true") {
+		t.Fatalf("expected non-production live-delivery interlock, got %v", err)
+	}
+
+	t.Setenv("ECHO_WHATSAPP_LIVE_DELIVERY_CONFIRMED", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WhatsApp.Enabled || !cfg.WhatsApp.LiveDeliveryConfirmed {
+		t.Fatalf("explicitly confirmed non-production delivery was rejected: %#v", cfg.WhatsApp)
 	}
 }
 

@@ -41,6 +41,7 @@ type Database struct {
 
 type WhatsApp struct {
 	Enabled                bool
+	LiveDeliveryConfirmed  bool
 	ProactiveNotifications bool
 	OwnerJID               string
 	DeviceName             string
@@ -102,8 +103,9 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	environment := env("ECHO_ENV", "production")
 	cfg := Config{
-		Environment: env("ECHO_ENV", "production"),
+		Environment: environment,
 		HTTP: HTTP{
 			Address:       env("ECHO_HTTP_ADDRESS", ":8080"),
 			PublicBaseURL: strings.TrimRight(env("ECHO_PUBLIC_BASE_URL", "http://localhost:8080"), "/"),
@@ -114,6 +116,7 @@ func Load() (Config, error) {
 		Database: database,
 		WhatsApp: WhatsApp{
 			Enabled:                boolean("ECHO_WHATSAPP_ENABLED", true),
+			LiveDeliveryConfirmed:  boolean("ECHO_WHATSAPP_LIVE_DELIVERY_CONFIRMED", environment == "production"),
 			ProactiveNotifications: boolean("ECHO_PROACTIVE_NOTIFICATIONS_ENABLED", true),
 			OwnerJID:               strings.TrimSpace(os.Getenv("ECHO_OWNER_JID")),
 			DeviceName:             env("ECHO_WHATSAPP_DEVICE_NAME", "Echo"),
@@ -189,6 +192,9 @@ func Load() (Config, error) {
 	}
 	if cfg.WhatsApp.OutboxRetention < 24*time.Hour || cfg.WhatsApp.OutboxRetention > 365*24*time.Hour {
 		return Config{}, errors.New("ECHO_WHATSAPP_OUTBOX_RETENTION must be between 24h and 8760h")
+	}
+	if cfg.Environment != "production" && cfg.WhatsApp.Enabled && !cfg.WhatsApp.LiveDeliveryConfirmed {
+		return Config{}, errors.New("non-production live WhatsApp requires ECHO_WHATSAPP_LIVE_DELIVERY_CONFIRMED=true")
 	}
 	if cfg.Monitor.WatchdogInterval < 5*time.Second || cfg.Monitor.WatchdogInterval > 5*time.Minute {
 		return Config{}, errors.New("ECHO_MONITOR_WATCHDOG_INTERVAL must be between 5s and 5m")
