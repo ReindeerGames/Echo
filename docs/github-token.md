@@ -13,6 +13,8 @@ Start with:
 - Contents: read
 - Metadata: read
 
+`Contents: read` also allows an authenticated owner question to search the current configured default branch. Echo downloads that branch only for the bounded request, never executes it, sends only capped redacted excerpts to the configured AI provider, and removes the temporary workspace afterward. Do not enable repositories whose source must not be submitted to that provider.
+
 Patch preparation additionally requires:
 
 - Contents: write

@@ -44,6 +44,14 @@ type fakeRepositoryInspector struct {
 	err    error
 }
 
+type fakeRepositorySearchInspector struct {
+	fakeRepositoryInspector
+	searchResult githubapp.RepositorySearchResult
+	searchRepo   domain.Repository
+	searchQuery  string
+	searchErr    error
+}
+
 type estateRepositoryInspector struct {
 	mu       sync.Mutex
 	statuses map[string]githubapp.RepositoryStatus
@@ -63,6 +71,12 @@ func (f *estateRepositoryInspector) InspectRepository(_ context.Context, repo do
 func (f *fakeRepositoryInspector) InspectRepository(_ context.Context, repo domain.Repository) (githubapp.RepositoryStatus, error) {
 	f.repo = repo
 	return f.status, f.err
+}
+
+func (f *fakeRepositorySearchInspector) SearchRepository(_ context.Context, repo domain.Repository, query string) (githubapp.RepositorySearchResult, error) {
+	f.searchRepo = repo
+	f.searchQuery = query
+	return f.searchResult, f.searchErr
 }
 
 func (fakeToolModel) RespondWithTools(ctx context.Context, instructions string, history []ai.ConversationMessage, tools []ai.ToolDefinition, execute ai.ToolExecutor) (string, []ai.ToolExecution, error) {
@@ -170,8 +184,9 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"incident inc_123456":   "incident",
 		"failed jobs":           "jobs",
 		"repo invoices":         "repository",
-		"what is deployed?":     "deployments",
-		"open incidents":        "incidents",
+		"repo invoices how does authentication work": "unknown",
+		"what is deployed?":                          "deployments",
+		"open incidents":                             "incidents",
 	}
 	for input, expected := range tests {
 		got, _ := classify(input)
@@ -528,6 +543,37 @@ func TestRepositoryStatusUsesOnlyConfiguredEnabledRepository(t *testing.T) {
 	output, err := responder.executeTool(context.Background(), "get_repository_status", json.RawMessage(`{"repository":"ReindeerGames/invoices"}`))
 	if err != nil || !containsAll(output, `"available":true`, `"conclusion":"success"`, `"head_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`) {
 		t.Fatalf("unexpected repository tool output=%s err=%v", output, err)
+	}
+}
+
+func TestRepositorySearchUsesOnlyConfiguredEnabledRepositoryAndLabelsEvidence(t *testing.T) {
+	reader := fakeReader{repos: []domain.Repository{
+		{ID: "repo_enabled", Owner: "ReindeerGames", Name: "invoices", DefaultBranch: "main", Enabled: true},
+		{ID: "repo_disabled", Owner: "Other", Name: "invoices", DefaultBranch: "main", Enabled: false},
+	}}
+	inspector := &fakeRepositorySearchInspector{searchResult: githubapp.RepositorySearchResult{
+		Repository: "ReindeerGames/invoices", DefaultBranch: "main", Query: "how are session tokens validated",
+		Matches:         []githubapp.RepositorySearchMatch{{Path: "internal/auth/session.go", LineStart: 41, LineEnd: 45, Snippet: "41: func ValidateSessionToken(token string) bool {"}},
+		FilesConsidered: 28, FilesScanned: 28, BytesScanned: 4096,
+	}}
+	responder := NewOperator(reader, nil, nil, inspector)
+	output, err := responder.executeTool(context.Background(), "search_repository", json.RawMessage(`{"repository":"invoices","query":"how are session tokens validated"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(output, `"available":true`, `"untrusted_evidence":true`, `"path":"internal/auth/session.go"`, `"line_start":41`, `"files_scanned":28`) {
+		t.Fatalf("unexpected repository search output: %s", output)
+	}
+	if inspector.searchRepo.ID != "repo_enabled" || inspector.searchQuery != "how are session tokens validated" {
+		t.Fatalf("repository search escaped configured scope: repo=%#v query=%q", inspector.searchRepo, inspector.searchQuery)
+	}
+}
+
+func TestRepositorySearchReportsUnavailableWithoutSearchCapability(t *testing.T) {
+	reader := fakeReader{repos: []domain.Repository{{ID: "repo_1", Owner: "Org", Name: "app", DefaultBranch: "main", Enabled: true}}}
+	output, err := NewOperator(reader, nil, nil, &fakeRepositoryInspector{}).executeTool(context.Background(), "search_repository", json.RawMessage(`{"repository":"Org/app","query":"where is authentication configured"}`))
+	if err != nil || !containsAll(output, `"found":true`, `"available":false`, `"reason":"repository search is unavailable"`) {
+		t.Fatalf("unexpected unavailable repository search: output=%s err=%v", output, err)
 	}
 }
 

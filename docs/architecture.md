@@ -26,6 +26,8 @@ Approval state is durable. Approval JSON is hashed before storage, and the one-t
 
 Workers claim jobs with MariaDB row locks and expiring leases. Active operations renew their lease and persistent worker heartbeat using the exact worker ID and attempt fence. A watchdog opens one durable `queue-stalled` alert only when ready work has exceeded its grace period without a fresh heartbeat; open and resolve notifications commit atomically with that lifecycle. Repository archives are downloaded with an application-managed fine-grained token, extracted without links, bounded by size, and removed after work. The token is decrypted only when a GitHub operation requires it. Repository code is read as untrusted text; it is never executed on the Echo host.
 
+Owner-initiated code investigations use the same safe default-branch archive path in an exact temporary workspace. Search applies file-count, byte, entry, per-file, result-count, and request-time limits; skips credential/key paths, dependencies, generated trees, binaries, and oversized files; redacts common secret literals; and sends only small line-numbered excerpts to the tool model. The workspace is deleted at the end of the request. A search result is explicitly incomplete and untrusted and cannot create an approval or invoke any mutation path.
+
 The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commit on an `echo/` branch and opens a draft PR. Protected and generated paths are rejected before any GitHub mutation. A separate repository-native production job may revalidate successful checks and merge only the exact approved PR head, then monitor the existing default-branch workflow; it cannot inherit patch approval.
 
 ## Persistence

@@ -24,7 +24,7 @@
 
 ### Untrusted content
 
-Message text and repository contents are labelled as evidence in AI prompts. Model output is parsed into bounded structures and is never interpreted as an authorization. Patch output is restricted to eight text files, one MiB each, with traversal, secret, workflow, lockfile, and deployment-path rejection.
+Message text and repository contents are labelled as evidence in AI prompts. Model output is parsed into bounded structures and is never interpreted as an authorization. Owner-initiated repository search is restricted to enabled repositories and the configured default branch, never executes source, excludes credential/key/dependency/generated paths, and returns only capped line-numbered excerpts after common-secret redaction. Search traversal, files, bytes, per-file size, matches, output, and wall time are bounded and truncation is explicit. Patch output is restricted to eight text files, one MiB each, with traversal, secret, workflow, lockfile, and deployment-path rejection.
 
 ### Authorization
 
@@ -50,6 +50,7 @@ Inbound incidents are unique by group JID and source message ID. Jobs and outbox
 
 - HyperMeow is unofficial and the dedicated WhatsApp account may be logged out or restricted.
 - AI can produce incorrect diagnoses or unsafe patches despite constraints; human review and CI remain mandatory.
+- Repository search can miss relevant code because it is deliberately bounded, and redaction cannot guarantee detection of every novel secret format. Restrict GitHub access to the required repositories and review AI-provider data handling before enabling code-aware questions.
 - A compromised GitHub workflow can falsely report success or misuse environment credentials. Workflows and branch protection remain part of the trusted computing base. Repository-native monitoring confirms GitHub's workflow conclusion, not the correctness of an untrusted deployment script.
 - The current all-in-one deployment places all environment secrets in one process. Split deployment is recommended before broad production access.
 - Owner authorization is anchored to the configured WhatsApp JID and accepts HyperMeow's authenticated primary or alternate PN/LID sender address. Identity changes not covered by that mapping require explicit re-enrolment.
