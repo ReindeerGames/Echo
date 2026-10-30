@@ -14,6 +14,14 @@
       "expectedStatusMax": 299
     }
   ],
+  "tcpProbes": [
+    {
+      "name": "echo-listener",
+      "serviceId": "svc_local_tcp",
+      "host": "127.0.0.1",
+      "port": 8080
+    }
+  ],
   "systemProbes": [
     {
       "name": "local-host",

@@ -30,6 +30,8 @@ Service investigation is correlation over existing normalized evidence, not remo
 
 The signed monitoring webhook rejects Echo's reserved watchdog source. Healthy evidence with a fingerprint can resolve only that older condition, while an empty fingerprint is an explicit aggregate recovery. Any fresh non-watchdog event independently resolves observer silence, so restoring evidence transport cannot either conceal a continuing workload failure or leave a stale silence alert behind.
 
+The bundled observer exposes no inbound API. Its TCP probe performs only a bounded connect-and-close, sends no application bytes, and omits the configured host and raw network error from retained evidence. It establishes listener reachability only and never authenticates to or queries the target protocol.
+
 ### Authorization
 
 The deterministic policy engine checks incident state, repository project membership, read-only status, environment ownership, protected-environment status, and immutable artifact provenance. Every approval has an expiry, action hash, one-time nonce, actor, incident, exact action type, and hashes of the repository and environment configuration snapshots. A configuration change invalidates the queued action instead of silently changing its meaning.

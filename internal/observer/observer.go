@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -84,10 +85,14 @@ func (o *Observer) RunOnce(ctx context.Context) error {
 		serviceID string
 		observe   func(context.Context) domain.MonitorEvent
 	}
-	allJobs := make([]probeJob, 0, len(o.config.Probes)+len(o.config.SystemProbes)+len(o.config.DockerProbes)+len(o.config.FreshnessProbes))
+	allJobs := make([]probeJob, 0, len(o.config.Probes)+len(o.config.TCPProbes)+len(o.config.SystemProbes)+len(o.config.DockerProbes)+len(o.config.FreshnessProbes))
 	for _, configured := range o.config.Probes {
 		probe := configured
 		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observe(ctx, probe) }})
+	}
+	for _, configured := range o.config.TCPProbes {
+		probe := configured
+		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeTCP(ctx, probe) }})
 	}
 	for _, configured := range o.config.SystemProbes {
 		probe := configured
@@ -245,6 +250,10 @@ func classifyProbeError(err error) string {
 	}
 	var urlError *url.Error
 	if errors.As(err, &urlError) && urlError.Timeout() {
+		return "timeout"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
 		return "timeout"
 	}
 	return "connection_failed"

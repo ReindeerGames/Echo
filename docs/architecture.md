@@ -34,7 +34,7 @@ The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commi
 
 ### Runtime observer
 
-The observer has no database, GitHub, WhatsApp, AI, shell, or SSH access. HTTPS probes discard response bodies and reduce verified certificate state to an expiry timestamp and days remaining. System probes read only bounded host counters, freshness probes inspect metadata for one exact regular file or at most 1,000 direct entries in one exact directory, and Docker probes can reach only the local exact-allowlist proxy. Freshness evidence never contains file contents, paths, or filenames. The proxy never returns logs, environment variables, labels, mounts, image configuration, health output, or raw daemon errors.
+The observer has no database, GitHub, WhatsApp, AI, shell, or SSH access. HTTPS probes discard response bodies and reduce verified certificate state to an expiry timestamp and days remaining. TCP probes complete and immediately close one connection without sending application data, and omit the configured host from evidence. System probes read only bounded host counters, freshness probes inspect metadata for one exact regular file or at most 1,000 direct entries in one exact directory, and Docker probes can reach only the local exact-allowlist proxy. Freshness evidence never contains file contents, paths, or filenames. The proxy never returns logs, environment variables, labels, mounts, image configuration, health output, or raw daemon errors.
 
 ## Persistence
 

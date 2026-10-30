@@ -26,6 +26,7 @@ type Config struct {
 	Timeout           Duration         `json:"timeout"`
 	AllowInsecureHTTP bool             `json:"allowInsecureHttp"`
 	Probes            []HTTPProbe      `json:"probes"`
+	TCPProbes         []TCPProbe       `json:"tcpProbes"`
 	SystemProbes      []SystemProbe    `json:"systemProbes"`
 	DockerProbes      []DockerProbe    `json:"dockerProbes"`
 	FreshnessProbes   []FreshnessProbe `json:"freshnessProbes"`
@@ -40,6 +41,13 @@ type HTTPProbe struct {
 	ExpectedMax     int    `json:"expectedStatusMax"`
 	TLSWarningDays  int    `json:"tlsWarningDays"`
 	TLSCriticalDays int    `json:"tlsCriticalDays"`
+}
+
+type TCPProbe struct {
+	Name      string `json:"name"`
+	ServiceID string `json:"serviceId"`
+	Host      string `json:"host"`
+	Port      int    `json:"port"`
 }
 
 type SystemProbe struct {
@@ -133,7 +141,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("invalid echoUrl: %w", err)
 	}
 	cfg.EchoURL = strings.TrimRight(echoURL.String(), "/")
-	totalProbes := len(cfg.Probes) + len(cfg.SystemProbes) + len(cfg.DockerProbes) + len(cfg.FreshnessProbes)
+	totalProbes := len(cfg.Probes) + len(cfg.TCPProbes) + len(cfg.SystemProbes) + len(cfg.DockerProbes) + len(cfg.FreshnessProbes)
 	if totalProbes == 0 || totalProbes > 100 {
 		return Config{}, errors.New("between 1 and 100 probes are required")
 	}
@@ -175,6 +183,21 @@ func normalizeConfig(cfg Config) (Config, error) {
 		}
 		if probe.TLSWarningDays < 2 || probe.TLSWarningDays > 365 || probe.TLSCriticalDays < 1 || probe.TLSCriticalDays >= probe.TLSWarningDays {
 			return Config{}, fmt.Errorf("probe %q TLS expiry thresholds must be between 1 and 365 days with critical below warning", probe.Name)
+		}
+	}
+	for index := range cfg.TCPProbes {
+		probe := &cfg.TCPProbes[index]
+		probe.Name = strings.ToLower(strings.TrimSpace(probe.Name))
+		probe.ServiceID = strings.TrimSpace(probe.ServiceID)
+		probe.Host = strings.ToLower(strings.TrimSpace(probe.Host))
+		if err := registerProbe(probe.Name, probe.ServiceID, fmt.Sprintf("TCP probe %d", index+1), seenNames, seenServices); err != nil {
+			return Config{}, err
+		}
+		if !validTCPHost(probe.Host) {
+			return Config{}, fmt.Errorf("TCP probe %q has an invalid host", probe.Name)
+		}
+		if probe.Port < 1 || probe.Port > 65535 {
+			return Config{}, fmt.Errorf("TCP probe %q port must be between 1 and 65535", probe.Name)
 		}
 	}
 	for index := range cfg.SystemProbes {
@@ -356,6 +379,31 @@ func safeContainerName(value string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+func validTCPHost(value string) bool {
+	if value == "" || len(value) > 253 || strings.ContainsAny(value, "[]%\x00") {
+		return false
+	}
+	if net.ParseIP(value) != nil {
+		return true
+	}
+	value = strings.TrimSuffix(value, ".")
+	if value == "" {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+				continue
+			}
+			return false
+		}
 	}
 	return true
 }

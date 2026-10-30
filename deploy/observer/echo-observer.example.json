@@ -6,7 +6,7 @@
   "probes": [
     {
       "name": "application-ready",
-      "serviceId": "svc_replace_with_echo_service_id",
+      "serviceId": "svc_000000000000000000000001",
       "url": "https://application.example.com/readyz",
       "method": "GET",
       "expectedStatusMin": 200,
@@ -15,10 +15,18 @@
       "tlsCriticalDays": 7
     }
   ],
+  "tcpProbes": [
+    {
+      "name": "primary-database",
+      "serviceId": "svc_000000000000000000000002",
+      "host": "database.internal.example",
+      "port": 3306
+    }
+  ],
   "systemProbes": [
     {
       "name": "primary-host",
-      "serviceId": "svc_replace_with_host_service_id",
+      "serviceId": "svc_000000000000000000000003",
       "diskPath": "/",
       "diskWarningPercent": 85,
       "diskCriticalPercent": 95,
@@ -31,7 +39,7 @@
   "dockerProbes": [
     {
       "name": "application-container",
-      "serviceId": "svc_replace_with_container_service_id",
+      "serviceId": "svc_000000000000000000000004",
       "proxyUrl": "http://127.0.0.1:23750",
       "container": "application"
     }
@@ -39,7 +47,7 @@
   "freshnessProbes": [
     {
       "name": "database-backup",
-      "serviceId": "svc_replace_with_backup_service_id",
+      "serviceId": "svc_000000000000000000000005",
       "path": "/var/backups/application",
       "matchSuffix": ".sql.gz",
       "warningAge": "26h",

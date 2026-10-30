@@ -496,7 +496,7 @@ func TestServiceToolProvidesFreshSanitizedOperationalEvidence(t *testing.T) {
 		alerts:   []domain.ServiceAlert{{ServiceID: "svc_1", ServiceName: "Primary host", Fingerprint: "host-resources", Severity: "critical", Summary: "memory threshold exceeded", OpenedAt: now.Add(-time.Minute), LastSeenAt: now.Add(-30 * time.Second)}},
 		events: []domain.MonitorEvent{{
 			ServiceID: "svc_1", Status: "unhealthy", Severity: "critical", Source: "primary-observer", Summary: "memory threshold exceeded", ObservedAt: now.Add(-90 * time.Second),
-			Details: json.RawMessage(`{"tls":{"expiresAt":"2026-11-05T12:00:00Z","daysRemaining":6,"issuer":"must-not-leak"},"modifiedAt":"2026-10-29T10:00:00Z","ageSeconds":93600,"matchedFiles":2,"snapshot":{"diskUsedPercent":72.5,"memoryUsedPercent":96.2,"load1PerCpu":0.8,"secret":"must-not-leak"},"thresholds":{"memoryCriticalPercent":95,"tlsWarningDays":30,"tlsCriticalDays":7,"warningAgeSeconds":93600,"criticalAgeSeconds":180000},"password":"must-not-leak","failure":"token-must-not-leak"}`),
+			Details: json.RawMessage(`{"port":3306,"host":"db.internal.example","tls":{"expiresAt":"2026-11-05T12:00:00Z","daysRemaining":6,"issuer":"must-not-leak"},"modifiedAt":"2026-10-29T10:00:00Z","ageSeconds":93600,"matchedFiles":2,"snapshot":{"diskUsedPercent":72.5,"memoryUsedPercent":96.2,"load1PerCpu":0.8,"secret":"must-not-leak"},"thresholds":{"memoryCriticalPercent":95,"tlsWarningDays":30,"tlsCriticalDays":7,"warningAgeSeconds":93600,"criticalAgeSeconds":180000},"password":"must-not-leak","failure":"token-must-not-leak"}`),
 		}},
 	}
 	responder := New(reader)
@@ -505,10 +505,10 @@ func TestServiceToolProvidesFreshSanitizedOperationalEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsAll(output, `"age_seconds":90`, `"stale":true`, `"memoryUsedPercent":96.2`, `"memoryCriticalPercent":95`, `"expiresAt":"2026-11-05T12:00:00Z"`, `"daysRemaining":6`, `"tlsWarningDays":30`, `"tlsCriticalDays":7`, `"modifiedAt":"2026-10-29T10:00:00Z"`, `"matchedFiles":2`, `"warningAgeSeconds":93600`, `"criticalAgeSeconds":180000`, `"fingerprint":"host-resources"`) {
+	if !containsAll(output, `"age_seconds":90`, `"stale":true`, `"port":3306`, `"memoryUsedPercent":96.2`, `"memoryCriticalPercent":95`, `"expiresAt":"2026-11-05T12:00:00Z"`, `"daysRemaining":6`, `"tlsWarningDays":30`, `"tlsCriticalDays":7`, `"modifiedAt":"2026-10-29T10:00:00Z"`, `"matchedFiles":2`, `"warningAgeSeconds":93600`, `"criticalAgeSeconds":180000`, `"fingerprint":"host-resources"`) {
 		t.Fatalf("operational evidence missing: %s", output)
 	}
-	if strings.Contains(output, "must-not-leak") || strings.Contains(output, "password") || strings.Contains(output, "secret") {
+	if strings.Contains(output, "must-not-leak") || strings.Contains(output, "password") || strings.Contains(output, "secret") || strings.Contains(output, "db.internal.example") {
 		t.Fatalf("unallowlisted evidence leaked: %s", output)
 	}
 }

@@ -959,7 +959,7 @@ func marshal(value any) (string, error) {
 const maxEvidenceBytes = 64 << 10
 
 var evidenceFields = map[string]map[string]struct{}{
-	"":           setOf("probe", "method", "statusCode", "latencyMs", "failure", "tls", "snapshot", "thresholds", "modifiedAt", "ageSeconds", "matchedFiles", "container", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
+	"":           setOf("probe", "method", "port", "statusCode", "latencyMs", "failure", "tls", "snapshot", "thresholds", "modifiedAt", "ageSeconds", "matchedFiles", "container", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
 	"tls":        setOf("expiresAt", "daysRemaining"),
 	"snapshot":   setOf("diskPath", "diskTotalBytes", "diskAvailableBytes", "diskUsedPercent", "memoryTotalBytes", "memoryAvailableBytes", "memoryUsedPercent", "load1", "load5", "load15", "cpuCount", "load1PerCpu", "uptimeSeconds"),
 	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu", "tlsWarningDays", "tlsCriticalDays", "warningAgeSeconds", "criticalAgeSeconds"),

@@ -1,6 +1,6 @@
 # Service monitoring
 
-Echo accepts normalized health signals from small, read-only observers. Observers do not receive GitHub, WhatsApp, database, or deployment credentials and do not expose a Docker socket to Echo.
+Echo accepts normalized health signals from small, read-only observers. Observers do not receive GitHub, WhatsApp, database, or deployment credentials and do not expose a Docker socket to Echo. Built-in probes cover HTTPS, TCP listener reachability, bounded host resources, sanitized Docker state, and metadata-only artifact freshness.
 
 Echo includes `echo-observer`, a small health-endpoint and Linux host-resource observer with a signed event forwarder. Build it with `make build`; its only secret is the monitor webhook secret supplied as `ECHO_OBSERVER_WEBHOOK_SECRET`.
 
@@ -80,6 +80,8 @@ Run observers beside workloads with only the narrow read permissions required to
 
 The bundled observer accepts a JSON configuration such as [`deploy/observer/echo-observer.example.json`](../deploy/observer/echo-observer.example.json). HTTP probes permit only `GET` and `HEAD`, reject URL credentials and query strings, refuse redirects, ignore environment HTTP proxies, require HTTPS with TLS 1.2 or newer unless `allowInsecureHttp` is explicitly enabled, never record response bodies, and retry the same signed event ID after delivery failures.
 
+`tcpProbes` verify that one configured hostname or IP address accepts a TCP connection on a port from 1 to 65535. The observer closes immediately after the handshake and never sends a protocol preface, credentials, query, or other application bytes. Evidence contains the safe probe name, port, connection latency, and a fixed `timeout` or `connection_failed` category; it deliberately omits the host and raw network error. Reachability proves only that a listener accepted the connection—not that MariaDB, Redis, SMTP, a queue, or another protocol is authenticated or operational—so use an application health endpoint when deeper semantics are required.
+
 Every successful HTTPS response also checks the verified leaf certificate's expiry time. `tlsWarningDays` defaults to 30 and produces a degraded warning; `tlsCriticalDays` defaults to 7 and produces a critical unhealthy signal. The critical threshold must be lower than the warning threshold, and both are bounded to 1–365 days. Certificate evidence contains only the expiry time, rounded days remaining, and configured thresholds—never certificate subjects, issuers, SANs, or chain material. HTTP response and certificate failures share the probe's aggregate `http-health` fingerprint, preventing overlapping stale alerts; a fully healthy response after renewal resolves it normally.
 
 On Linux, `systemProbes` read only `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`, and filesystem capacity counters for one absolute `diskPath`. They report disk and memory utilization, one/five/fifteen-minute load, load per logical CPU, and uptime—never process arguments, environment variables, file contents, logs, usernames, or network connections. Warning and critical thresholds are explicit in the configuration; defaults are 85/95 percent for disk and memory and 1/2 load per CPU.
@@ -90,7 +92,7 @@ On Linux, `systemProbes` read only `/proc/meminfo`, `/proc/loadavg`, `/proc/upti
 
 Run a system probe as a host service when host metrics are intended. If it runs inside a container, its kernel and filesystem namespace determine what it measures; do not assume containerized readings represent the host. The observer requires no root privileges, shell, Docker socket, or SSH credential.
 
-Each Echo service may have one aggregate probe across the HTTP, system, Docker, and freshness probe classes. Use separate service-catalogue entries for the host, each container, each backup stream, and each application health endpoint. Each built-in probe retains its stable fingerprint on healthy evidence, allowing recovery to resolve that probe's lifecycle only. Expose an aggregate readiness endpoint when one application depends on several internal checks.
+Each Echo service may have one aggregate probe across the HTTP, TCP, system, Docker, and freshness probe classes. Use separate service-catalogue entries for the host, each listener, each container, each backup stream, and each application health endpoint. Each built-in probe retains its stable fingerprint on healthy evidence, allowing recovery to resolve that probe's lifecycle only. Expose an aggregate readiness endpoint when one application depends on several internal checks.
 
 `dockerProbes` inspect the lifecycle of one explicitly named container through the bundled `echo-docker-proxy`. Echo records only the normalized running/paused/restarting/dead/OOM state, exit code, Docker health status and failing streak, restart count, and sanitized timestamps. The proxy discards environment variables, labels, mounts, logs, health-check output, image configuration, and raw daemon errors before the observer sees the response. Both processes cap inspect responses at one MiB and never copy unrecognized state text into alerts.
 

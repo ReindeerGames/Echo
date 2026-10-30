@@ -31,6 +31,24 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	}
 }
 
+func TestBundledObserverConfigsRemainLoadable(t *testing.T) {
+	for _, test := range []struct {
+		path      string
+		tcpProbes int
+	}{
+		{path: "../../deploy/observer/echo-observer.example.json", tcpProbes: 1},
+		{path: "../../deploy/local-test/observer.json", tcpProbes: 1},
+	} {
+		cfg, err := LoadConfig(test.path)
+		if err != nil {
+			t.Fatalf("load %s: %v", test.path, err)
+		}
+		if len(cfg.TCPProbes) != test.tcpProbes {
+			t.Fatalf("%s has %d TCP probes, want %d", test.path, len(cfg.TCPProbes), test.tcpProbes)
+		}
+	}
+}
+
 func TestHTTPProbeRejectsUnsafeTLSExpiryThresholds(t *testing.T) {
 	_, err := normalizeConfig(Config{
 		EchoURL: "https://echo.test", Source: "observer",
@@ -105,6 +123,38 @@ func TestSystemProbeDefaultsAndCrossTypeUniqueness(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "one aggregate probe") {
 		t.Fatalf("cross-type duplicate service was not rejected: %v", err)
+	}
+}
+
+func TestTCPProbeValidationAndCrossTypeUniqueness(t *testing.T) {
+	cfg, err := normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		TCPProbes: []TCPProbe{{Name: "Primary-Database", ServiceID: "svc_database", Host: "DB.INTERNAL.EXAMPLE", Port: 3306}},
+	})
+	if err != nil || cfg.TCPProbes[0].Name != "primary-database" || cfg.TCPProbes[0].Host != "db.internal.example" {
+		t.Fatalf("valid TCP probe rejected: cfg=%#v err=%v", cfg, err)
+	}
+	if _, err := normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", TCPProbes: []TCPProbe{{Name: "ipv6", ServiceID: "svc_ipv6", Host: "::1", Port: 6379}}}); err != nil {
+		t.Fatalf("IPv6 TCP probe rejected: %v", err)
+	}
+	for _, probe := range []TCPProbe{
+		{Name: "missing-host", ServiceID: "svc_tcp", Port: 3306},
+		{Name: "embedded-port", ServiceID: "svc_tcp", Host: "database.internal:3306", Port: 3306},
+		{Name: "credentials", ServiceID: "svc_tcp", Host: "user@database.internal", Port: 3306},
+		{Name: "missing-port", ServiceID: "svc_tcp", Host: "database.internal"},
+		{Name: "oversized-port", ServiceID: "svc_tcp", Host: "database.internal", Port: 65536},
+	} {
+		if _, err := normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", TCPProbes: []TCPProbe{probe}}); err == nil {
+			t.Fatalf("invalid TCP probe was accepted: %#v", probe)
+		}
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		Probes:    []HTTPProbe{{Name: "web", ServiceID: "svc_same", URL: "https://web.test/health"}},
+		TCPProbes: []TCPProbe{{Name: "listener", ServiceID: "svc_same", Host: "database.internal", Port: 3306}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "one aggregate probe") {
+		t.Fatalf("cross-type TCP service duplicate was not rejected: %v", err)
 	}
 }
 
