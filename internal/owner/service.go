@@ -28,6 +28,11 @@ type Lookup interface {
 type notificationLookup struct {
 	source  Lookup
 	enabled bool
+	gate    notificationGate
+}
+
+type notificationGate interface {
+	GetNotificationSettings(context.Context) (domain.NotificationSettings, error)
 }
 
 func New(st contactStore, fallback string) *Service {
@@ -37,13 +42,26 @@ func New(st contactStore, fallback string) *Service {
 // Notifications returns a view of the owner used only by unsolicited
 // background delivery paths. Muting it does not remove the configured owner
 // or prevent replies to owner-initiated conversations.
-func Notifications(source Lookup, enabled bool) Lookup {
-	return &notificationLookup{source: source, enabled: enabled}
+func Notifications(source Lookup, enabled bool, gates ...notificationGate) Lookup {
+	var gate notificationGate
+	if len(gates) > 0 {
+		gate = gates[0]
+	}
+	return &notificationLookup{source: source, enabled: enabled, gate: gate}
 }
 
 func (s *notificationLookup) JID(ctx context.Context) (string, error) {
 	if !s.enabled || s.source == nil {
 		return "", nil
+	}
+	if s.gate != nil {
+		settings, err := s.gate.GetNotificationSettings(ctx)
+		if err != nil {
+			return "", err
+		}
+		if settings.Paused {
+			return "", nil
+		}
 	}
 	return s.source.JID(ctx)
 }

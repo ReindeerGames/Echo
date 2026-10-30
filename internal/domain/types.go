@@ -463,6 +463,13 @@ type BriefingSettings struct {
 	UpdatedAt         time.Time  `json:"updatedAt"`
 }
 
+type NotificationSettings struct {
+	Paused            bool       `json:"paused"`
+	PausedUntil       *time.Time `json:"pausedUntil,omitempty"`
+	SuppressedPending int64      `json:"suppressedPending,omitempty"`
+	UpdatedAt         time.Time  `json:"updatedAt"`
+}
+
 type OutboundMessage struct {
 	ID        string
 	ChatJID   string
@@ -474,6 +481,7 @@ type OutboundMessage struct {
 
 type OutboundDelivery struct {
 	ChannelType     string     `json:"channelType"`
+	DeliveryClass   string     `json:"deliveryClass"`
 	Status          string     `json:"status"`
 	BatchCount      int        `json:"batchCount"`
 	Attempts        int        `json:"attempts"`

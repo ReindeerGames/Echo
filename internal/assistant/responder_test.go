@@ -664,18 +664,18 @@ func TestWorkQueueAnswersDoNotExposeRawErrorsOrPayloads(t *testing.T) {
 
 func TestDeliveryQueueAnswersExposeMechanicsWithoutMessageData(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
-	reader := fakeReader{deliveries: []domain.OutboundDelivery{{ChannelType: "direct", Status: "failed", BatchCount: 4, Attempts: 2, MaxAttempts: 5, AvailableAt: now.Add(time.Minute), FailureCategory: "authorization_failed", CreatedAt: now.Add(-time.Minute)}}}
+	reader := fakeReader{deliveries: []domain.OutboundDelivery{{ChannelType: "direct", DeliveryClass: "proactive", Status: "failed", BatchCount: 4, Attempts: 2, MaxAttempts: 5, AvailableAt: now.Add(time.Minute), FailureCategory: "authorization_failed", CreatedAt: now.Add(-time.Minute)}}}
 	responder := New(reader)
 	responder.now = func() time.Time { return now }
 	output, err := responder.executeTool(context.Background(), "get_delivery_queue", json.RawMessage(`{}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsAll(output, `"channel_type":"direct"`, `"status":"failed"`, `"batch_count":4`, `"failure_category":"authorization_failed"`, `"privacy":"message content, destinations, WhatsApp IDs, coalescing keys, and raw errors omitted"`) {
+	if !containsAll(output, `"channel_type":"direct"`, `"delivery_class":"proactive"`, `"status":"failed"`, `"batch_count":4`, `"failure_category":"authorization_failed"`, `"privacy":"message content, destinations, WhatsApp IDs, coalescing keys, and raw errors omitted"`) {
 		t.Fatalf("unsafe delivery queue output: %s", output)
 	}
 	answer, intent, err := responder.Answer(context.Background(), "why didn't WhatsApp send?")
-	if err != nil || intent != "deliveries" || !containsAll(answer, "WhatsApp delivery queue (1 active)", "RETRYING", "direct", "4 coalesced changes", "attempt 2/5", "next attempt in 1m0s", "authorization_failed", "message content and destinations are omitted") {
+	if err != nil || intent != "deliveries" || !containsAll(answer, "WhatsApp delivery queue (1 active)", "RETRYING", "proactive", "direct", "4 coalesced changes", "attempt 2/5", "next attempt in 1m0s", "authorization_failed", "message content and destinations are omitted") {
 		t.Fatalf("unexpected delivery answer intent=%s err=%v body=%s", intent, err, answer)
 	}
 }

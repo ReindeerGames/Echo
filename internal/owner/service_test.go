@@ -19,6 +19,16 @@ type countingLookup struct {
 	jid   string
 }
 
+type fakeNotificationGate struct {
+	settings domain.NotificationSettings
+	calls    int
+}
+
+func (g *fakeNotificationGate) GetNotificationSettings(context.Context) (domain.NotificationSettings, error) {
+	g.calls++
+	return g.settings, nil
+}
+
 func (l *countingLookup) JID(context.Context) (string, error) {
 	l.calls++
 	return l.jid, nil
@@ -66,5 +76,19 @@ func TestNotificationLookupCanMuteWithoutResolvingOwner(t *testing.T) {
 	jid, err = Notifications(source, true).JID(context.Background())
 	if err != nil || jid != source.jid || source.calls != 1 {
 		t.Fatalf("enabled notification lookup did not delegate: jid=%q calls=%d err=%v", jid, source.calls, err)
+	}
+}
+
+func TestNotificationLookupHonorsDurablePauseWithoutResolvingOwner(t *testing.T) {
+	source := &countingLookup{jid: "27820000000@s.whatsapp.net"}
+	gate := &fakeNotificationGate{settings: domain.NotificationSettings{Paused: true}}
+	jid, err := Notifications(source, true, gate).JID(context.Background())
+	if err != nil || jid != "" || source.calls != 0 || gate.calls != 1 {
+		t.Fatalf("paused notification lookup resolved owner: jid=%q source_calls=%d gate_calls=%d err=%v", jid, source.calls, gate.calls, err)
+	}
+	gate.settings.Paused = false
+	jid, err = Notifications(source, true, gate).JID(context.Background())
+	if err != nil || jid != source.jid || source.calls != 1 || gate.calls != 2 {
+		t.Fatalf("resumed notification lookup did not delegate: jid=%q source_calls=%d gate_calls=%d err=%v", jid, source.calls, gate.calls, err)
 	}
 }

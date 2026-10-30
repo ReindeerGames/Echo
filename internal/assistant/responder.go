@@ -127,7 +127,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_service", "Get one service with its open alerts, explicit repository ownership, operator runbooks, and recent normalized monitoring signals including safe aggregate host, process, container, network, certificate, and artifact counters when observed.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
 		ai.FunctionTool("investigate_service", "Correlate one service's bounded normalized monitoring timeline, including retained safe aggregate process evidence when available, with operator runbooks, open alerts, project incidents, deployments, recent default-branch commit summaries, and repository workflow state. Explicit service repository links determine repository scope; without links, the tool reports its compatibility fallback to enabled project repositories. Use for diagnosis or 'why is this failing?' questions. This tool is read-only and has no live process, log, shell, SSH, or mutation access.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
 		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
-		ai.FunctionTool("get_delivery_queue", "List the active queued, sending, retrying, and terminally failed WhatsApp delivery queue with channel type, coalesced item count, attempt timing, and safe failure categories. An empty result does not prove a specific message was delivered. Message content, destinations, IDs, coalescing keys, and raw errors are omitted.", schema(nil, nil)),
+		ai.FunctionTool("get_delivery_queue", "List the active queued, sending, retrying, and terminally failed WhatsApp delivery queue with interactive/proactive class, channel type, coalesced item count, attempt timing, and safe failure categories. An empty result does not prove a specific message was delivered. Message content, destinations, IDs, coalescing keys, and raw errors are omitted.", schema(nil, nil)),
 		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_estate_coverage", "Find enabled projects missing repository, WhatsApp group, service, explicit usable service repository ownership, heartbeat-policy, or fresh monitoring coverage.", schema(nil, nil)),
@@ -842,13 +842,14 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		views := make([]map[string]any, 0, len(deliveries))
 		for _, delivery := range deliveries {
 			view := map[string]any{
-				"channel_type": delivery.ChannelType,
-				"status":       delivery.Status,
-				"batch_count":  max(1, delivery.BatchCount),
-				"attempts":     delivery.Attempts,
-				"max_attempts": delivery.MaxAttempts,
-				"available_at": delivery.AvailableAt,
-				"created_at":   delivery.CreatedAt,
+				"channel_type":   delivery.ChannelType,
+				"delivery_class": delivery.DeliveryClass,
+				"status":         delivery.Status,
+				"batch_count":    max(1, delivery.BatchCount),
+				"attempts":       delivery.Attempts,
+				"max_attempts":   delivery.MaxAttempts,
+				"available_at":   delivery.AvailableAt,
+				"created_at":     delivery.CreatedAt,
 			}
 			if delivery.LockedUntil != nil {
 				view["locked_until"] = delivery.LockedUntil
@@ -2431,7 +2432,7 @@ func (r *Responder) deliveries(ctx context.Context) (string, error) {
 		if delivery.BatchCount > 1 {
 			batch = fmt.Sprintf(" · %d coalesced changes", delivery.BatchCount)
 		}
-		lines = append(lines, fmt.Sprintf("• %s · %s%s · attempt %d/%d%s%s · queued %s ago", strings.ToUpper(status), delivery.ChannelType, batch, delivery.Attempts, delivery.MaxAttempts, timing, failure, formatAge(now, delivery.CreatedAt)))
+		lines = append(lines, fmt.Sprintf("• %s · %s · %s%s · attempt %d/%d%s%s · queued %s ago", strings.ToUpper(status), delivery.DeliveryClass, delivery.ChannelType, batch, delivery.Attempts, delivery.MaxAttempts, timing, failure, formatAge(now, delivery.CreatedAt)))
 	}
 	return fmt.Sprintf("WhatsApp delivery queue (%d active)\n\n%s\n\nDead messages are not replayed automatically. Review System and gateway health before intervening; message content and destinations are omitted.", len(deliveries), strings.Join(lines, "\n")), nil
 }

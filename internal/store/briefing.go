@@ -9,7 +9,6 @@ import (
 
 	"github.com/ReindeerGames/echo/internal/briefing"
 	"github.com/ReindeerGames/echo/internal/domain"
-	"github.com/ReindeerGames/echo/internal/id"
 )
 
 func (s *Store) GetBriefingSettings(ctx context.Context) (domain.BriefingSettings, error) {
@@ -81,8 +80,12 @@ func (s *Store) EnqueueDailyBriefIfDue(ctx context.Context, ownerJID, body strin
 	}
 	location, _ := time.LoadLocation(settings.Timezone)
 	localDate := now.In(location).Format("2006-01-02")
-	if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, body); err != nil {
+	queued, err := enqueueProactiveOutbound(ctx, tx, ownerJID, body)
+	if err != nil {
 		return false, err
+	}
+	if !queued {
+		return false, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE echo_briefing_settings SET last_sent_local_date=?,last_sent_at=? WHERE singleton_id=1`, localDate, now.UTC()); err != nil {
 		return false, err

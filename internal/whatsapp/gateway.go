@@ -81,19 +81,24 @@ type inboundEnvelope struct {
 }
 
 type Gateway struct {
-	core      *store.Store
-	workflows *workflow.Service
-	runtime   *runtimestate.State
-	dsn       string
-	client    *whatsmeow.Client
-	container *mdbstore.Container
-	messages  chan inboundEnvelope
-	pairing   chan struct{}
-	mu        sync.RWMutex
+	core                   *store.Store
+	workflows              *workflow.Service
+	runtime                *runtimestate.State
+	dsn                    string
+	proactiveNotifications bool
+	client                 *whatsmeow.Client
+	container              *mdbstore.Container
+	messages               chan inboundEnvelope
+	pairing                chan struct{}
+	mu                     sync.RWMutex
 }
 
-func New(core *store.Store, workflows *workflow.Service, state *runtimestate.State, dsn string) *Gateway {
-	return &Gateway{core: core, workflows: workflows, runtime: state, dsn: dsn, messages: make(chan inboundEnvelope, 512), pairing: make(chan struct{}, 1)}
+func New(core *store.Store, workflows *workflow.Service, state *runtimestate.State, dsn string, proactive ...bool) *Gateway {
+	proactiveNotifications := true
+	if len(proactive) > 0 {
+		proactiveNotifications = proactive[0]
+	}
+	return &Gateway{core: core, workflows: workflows, runtime: state, dsn: dsn, proactiveNotifications: proactiveNotifications, messages: make(chan inboundEnvelope, 512), pairing: make(chan struct{}, 1)}
 }
 
 func (g *Gateway) RequestPairing() error {
@@ -517,7 +522,7 @@ func (g *Gateway) sendOutbox(ctx context.Context) error {
 			if !g.connected() {
 				continue
 			}
-			item, err := g.core.ClaimOutbound(ctx, 90*time.Second)
+			item, err := g.core.ClaimOutbound(ctx, 90*time.Second, g.proactiveNotifications)
 			if errors.Is(err, store.ErrNotFound) {
 				continue
 			}

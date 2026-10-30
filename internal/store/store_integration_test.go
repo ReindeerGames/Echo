@@ -1485,14 +1485,15 @@ func TestMariaDBAssistantConversationIsIdempotent(t *testing.T) {
 	if _, err := st.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sent',sent_at=?,created_at=? WHERE id=?`, old, old, outbound.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body,status,created_at,sent_at) VALUES
-      ('out-retention-recent','owner@s.whatsapp.net','recent sent body','sent',?,?),
-      ('out-retention-dead','owner@s.whatsapp.net','dead body','dead',?,NULL),
-      ('out-retention-queued','owner@s.whatsapp.net','queued body','queued',?,NULL)`, now.Add(-time.Hour), now.Add(-time.Hour), old, old); err != nil {
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body,status,created_at,sent_at,suppressed_at) VALUES
+	  ('out-retention-recent','owner@s.whatsapp.net','recent sent body','sent',?,?,NULL),
+	  ('out-retention-suppressed','owner@s.whatsapp.net','suppressed body','suppressed',?,NULL,?),
+	  ('out-retention-dead','owner@s.whatsapp.net','dead body','dead',?,NULL,NULL),
+	  ('out-retention-queued','owner@s.whatsapp.net','queued body','queued',?,NULL,NULL)`, now.Add(-time.Hour), now.Add(-time.Hour), old, old, old, old); err != nil {
 		t.Fatal(err)
 	}
 	prunedOutbox, err := st.PruneSentOutbound(ctx, now.Add(-30*24*time.Hour))
-	if err != nil || prunedOutbox != 1 {
+	if err != nil || prunedOutbox != 2 {
 		t.Fatalf("prune sent outbox: count=%d err=%v", prunedOutbox, err)
 	}
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE id IN ('out-retention-recent','out-retention-dead','out-retention-queued')`).Scan(&outboxCount); err != nil || outboxCount != 3 {
@@ -1647,6 +1648,89 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	}
 }
 
+func TestMariaDBNotificationPauseSuppressesOnlyProactiveDelivery(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+
+	if err := st.EnqueueOutbound(ctx, "owner@s.whatsapp.net", "Explicit owner reply"); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	opened, err := st.ReconcileRuntimeComponent(ctx, "worker", "error", false, now, "owner@s.whatsapp.net")
+	if err != nil || opened == nil || opened.Kind != "opened" {
+		t.Fatalf("open proactive runtime notification: transition=%#v err=%v", opened, err)
+	}
+	settings, err := st.PauseProactiveNotifications(ctx, now.Add(time.Hour), "integration-admin")
+	if err != nil || !settings.Paused || settings.PausedUntil == nil || settings.SuppressedPending != 1 {
+		t.Fatalf("pause proactive notifications: settings=%#v err=%v", settings, err)
+	}
+	var suppressed int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE delivery_class='proactive' AND status='suppressed' AND suppressed_at IS NOT NULL`).Scan(&suppressed); err != nil || suppressed != 1 {
+		t.Fatalf("pending proactive delivery was not suppressed: count=%d err=%v", suppressed, err)
+	}
+	interactive, err := st.ClaimOutbound(ctx, time.Minute, true)
+	if err != nil || interactive.Body != "Explicit owner reply" {
+		t.Fatalf("interactive reply did not remain claimable: item=%#v err=%v", interactive, err)
+	}
+	if err := st.CompleteOutbound(ctx, interactive.ID, interactive.Attempts, "interactive-message-id", nil); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := st.ReconcileRuntimeComponent(ctx, "worker", "running", true, now.Add(time.Minute), "owner@s.whatsapp.net")
+	if err != nil || resolved == nil || resolved.Kind != "resolved" {
+		t.Fatalf("resolve runtime state during pause: transition=%#v err=%v", resolved, err)
+	}
+	if _, err := st.ClaimOutbound(ctx, time.Minute, true); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("paused proactive resolution became claimable: %v", err)
+	}
+	settings, err = st.ResumeProactiveNotifications(ctx, "integration-admin")
+	if err != nil || settings.Paused || settings.PausedUntil != nil {
+		t.Fatalf("resume proactive notifications: settings=%#v err=%v", settings, err)
+	}
+	reopened, err := st.ReconcileRuntimeComponent(ctx, "worker", "error", false, now.Add(2*time.Minute), "owner@s.whatsapp.net")
+	if err != nil || reopened == nil || reopened.Kind != "reopened" {
+		t.Fatalf("reopen runtime state after resume: transition=%#v err=%v", reopened, err)
+	}
+	if _, err := st.ClaimOutbound(ctx, time.Minute, false); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("environment-level proactive mute allowed a claim: %v", err)
+	}
+	var environmentSuppressed int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE delivery_class='proactive' AND status='suppressed'`).Scan(&environmentSuppressed); err != nil || environmentSuppressed != 2 {
+		t.Fatalf("environment-level mute did not suppress pending proactive delivery: count=%d err=%v", environmentSuppressed, err)
+	}
+	resolved, err = st.ReconcileRuntimeComponent(ctx, "worker", "running", true, now.Add(3*time.Minute), "owner@s.whatsapp.net")
+	if err != nil || resolved == nil || resolved.Kind != "resolved" {
+		t.Fatalf("resolve runtime state after environment mute check: transition=%#v err=%v", resolved, err)
+	}
+	proactive, err := st.ClaimOutbound(ctx, time.Minute, true)
+	if err != nil || !strings.Contains(proactive.Body, "Echo runtime alert RESOLVED") {
+		t.Fatalf("resumed proactive delivery was not claimable: item=%#v err=%v", proactive, err)
+	}
+	settings, err = st.PauseProactiveNotifications(ctx, now.Add(2*time.Hour), "integration-admin")
+	if err != nil || !settings.Paused || settings.SuppressedPending != 0 {
+		t.Fatalf("pause with proactive send in flight: settings=%#v err=%v", settings, err)
+	}
+	if err := st.CompleteOutbound(ctx, proactive.ID, proactive.Attempts, "", errors.New("temporary gateway failure")); err != nil {
+		t.Fatal(err)
+	}
+	var failedStatus, failedError string
+	if err := st.db.QueryRowContext(ctx, `SELECT status,last_error FROM echo_whatsapp_outbox WHERE id=?`, proactive.ID).Scan(&failedStatus, &failedError); err != nil || failedStatus != "suppressed" || failedError != "" {
+		t.Fatalf("failed in-flight proactive delivery survived pause: status=%q error=%q err=%v", failedStatus, failedError, err)
+	}
+	var audits int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_audit_events WHERE action_name IN ('notifications.paused','notifications.resumed')`).Scan(&audits); err != nil || audits != 3 {
+		t.Fatalf("notification policy audit count=%d err=%v", audits, err)
+	}
+}
+
 func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -1725,6 +1809,9 @@ func cleanupIntegration(t *testing.T, st *Store) {
 		}
 	}
 	if _, err := st.db.Exec(`INSERT INTO echo_briefing_settings(singleton_id) VALUES(1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.Exec(`UPDATE echo_notification_settings SET paused_until=NULL,updated_by='system' WHERE singleton_id=1`); err != nil {
 		t.Fatal(err)
 	}
 }

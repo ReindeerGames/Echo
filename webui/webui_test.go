@@ -104,7 +104,7 @@ func TestWhatsAppDeliveryDiagnosticsArePrivacySafeAndReadOnly(t *testing.T) {
 	response := httptest.NewRecorder()
 	Handler().ServeHTTP(response, request)
 	body := response.Body.String()
-	for _, expected := range []string{"/api/v1/whatsapp/outbox", "deliveryTable", "WhatsApp delivery queue", "Safe failure category", "batchCount", "Items", "Message bodies and destinations are omitted", "dead messages are never retried blindly"} {
+	for _, expected := range []string{"/api/v1/whatsapp/outbox", "deliveryTable", "WhatsApp delivery queue", "Safe failure category", "deliveryClass", "Class", "batchCount", "Items", "Message bodies and destinations are omitted", "dead messages are never retried blindly"} {
 		if response.Code != 200 || !strings.Contains(body, expected) {
 			t.Fatalf("WhatsApp delivery diagnostics are missing %q", expected)
 		}
@@ -176,6 +176,18 @@ func TestUIShowsProactiveNotificationMute(t *testing.T) {
 	for _, expected := range []string{"proactiveNotifications", "The WhatsApp gateway is offline", "will not reconnect a persisted session", "Proactive WhatsApp notifications are muted", "Monitoring, runtime, worker-health, GitHub-workflow and daily-brief updates remain visible here"} {
 		if response.Code != 200 || !strings.Contains(body, expected) {
 			t.Fatalf("notification mute posture is missing %q", expected)
+		}
+	}
+}
+
+func TestUIProvidesBoundedProactiveNotificationSnooze(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/settings/notifications", "Proactive notification policy", "Snooze proactive notifications", "notification-pause-form", "Queued automatic updates", "suppressed, not released as a stale burst later", "Resume automatic updates", "7 days", "explicitly requested workflows"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("notification snooze UI is missing %q", expected)
 		}
 	}
 }

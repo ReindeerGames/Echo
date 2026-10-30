@@ -60,7 +60,7 @@ type WhatsAppPairer interface {
 }
 
 func New(cfg config.Config, st *store.Store, workflows *workflow.Service, owners *owner.Service, state *runtimestate.State, github *githubapp.Client, aiClient *ai.Client, groups WhatsAppGroupLister) *Server {
-	s := &Server{cfg: cfg, store: st, readiness: st, workflows: workflows, owners: owners, notifications: owner.Notifications(owners, cfg.WhatsApp.Enabled && cfg.WhatsApp.ProactiveNotifications), runtime: state, github: github, ai: aiClient, groupLister: groups, auth: newAuth(cfg.Security.AdminToken, cfg.Security.SessionSecret, cfg.Security.CookieSecure, cfg.Security.DevMode)}
+	s := &Server{cfg: cfg, store: st, readiness: st, workflows: workflows, owners: owners, notifications: owner.Notifications(owners, cfg.WhatsApp.Enabled && cfg.WhatsApp.ProactiveNotifications, st), runtime: state, github: github, ai: aiClient, groupLister: groups, auth: newAuth(cfg.Security.AdminToken, cfg.Security.SessionSecret, cfg.Security.CookieSecure, cfg.Security.DevMode)}
 	if pairer, ok := groups.(WhatsAppPairer); ok {
 		s.pairer = pairer
 	}
@@ -103,6 +103,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("DELETE /api/v1/settings/owner", s.ownerSettings)
 	protected.HandleFunc("GET /api/v1/settings/briefing", s.briefingSettings)
 	protected.HandleFunc("PUT /api/v1/settings/briefing", s.briefingSettings)
+	protected.HandleFunc("GET /api/v1/settings/notifications", s.notificationSettings)
+	protected.HandleFunc("PUT /api/v1/settings/notifications", s.notificationSettings)
+	protected.HandleFunc("DELETE /api/v1/settings/notifications", s.notificationSettings)
 	protected.HandleFunc("GET /api/v1/projects", s.projects)
 	protected.HandleFunc("POST /api/v1/projects", s.projects)
 	protected.HandleFunc("GET /api/v1/groups", s.groups)
@@ -389,6 +392,27 @@ func (s *Server) briefingSettings(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "briefing.settings_saved", "setting", "daily_brief", "succeeded", map[string]any{"enabled": settings.Enabled, "localTime": settings.LocalTime, "timezone": settings.Timezone})
 		}
+		respond(w, settings, err)
+	}
+}
+
+func (s *Server) notificationSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		settings, err := s.store.GetNotificationSettings(r.Context())
+		respond(w, settings, err)
+	case http.MethodPut:
+		var input struct {
+			Minutes int `json:"minutes"`
+		}
+		if err := decodeJSON(r, &input); err != nil || input.Minutes < 15 || input.Minutes > 7*24*60 {
+			writeError(w, http.StatusBadRequest, "invalid_notification_pause", "minutes must be between 15 and 10080")
+			return
+		}
+		settings, err := s.store.PauseProactiveNotifications(r.Context(), time.Now().UTC().Add(time.Duration(input.Minutes)*time.Minute), actorFrom(r.Context()))
+		respond(w, settings, err)
+	case http.MethodDelete:
+		settings, err := s.store.ResumeProactiveNotifications(r.Context(), actorFrom(r.Context()))
 		respond(w, settings, err)
 	}
 }

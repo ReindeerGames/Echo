@@ -123,7 +123,7 @@ func (s *Store) ReconcileRepositoryWorkflowAlert(ctx context.Context, repository
 			return nil, err
 		}
 		if ownerJID != "" {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, repositoryWorkflowNotification(*transition)); err != nil {
+			if _, err := enqueueProactiveOutbound(ctx, tx, ownerJID, repositoryWorkflowNotification(*transition)); err != nil {
 				return nil, err
 			}
 		}

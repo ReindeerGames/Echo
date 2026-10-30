@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/domain"
-	"github.com/ReindeerGames/echo/internal/id"
 )
 
 const workerQueueAlertKey = "queue-stalled"
@@ -80,7 +79,7 @@ func (s *Store) ReconcileWorkerQueueHealth(ctx context.Context, now time.Time, h
 			return domain.WorkerHealth{}, nil, errors.New("owner JID exceeds storage limits")
 		}
 		body := workerHealthNotification(*transition)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), strings.TrimSpace(ownerJID), body); err != nil {
+		if _, err := enqueueProactiveOutbound(ctx, tx, strings.TrimSpace(ownerJID), body); err != nil {
 			return domain.WorkerHealth{}, nil, err
 		}
 	}

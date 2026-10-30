@@ -9,16 +9,17 @@ import (
 
 const sentOutboxPruneBatchSize = 500
 
-// PruneSentOutbound removes only confirmed-sent delivery bodies in bounded
-// batches. Unconfirmed and dead rows remain available for recovery or review.
+// PruneSentOutbound removes confirmed-sent and deliberately suppressed
+// delivery bodies in bounded batches. Unconfirmed and dead rows remain
+// available for recovery or review.
 func (s *Store) PruneSentOutbound(ctx context.Context, before time.Time) (int64, error) {
 	before = before.UTC()
 	var total int64
 	for {
 		rows, err := s.db.QueryContext(ctx, `SELECT id FROM echo_whatsapp_outbox
-          WHERE status='sent' AND sent_at<?
-          ORDER BY sent_at,id
-          LIMIT ?`, before, sentOutboxPruneBatchSize)
+          WHERE (status='sent' AND sent_at<?) OR (status='suppressed' AND suppressed_at<?)
+          ORDER BY COALESCE(sent_at,suppressed_at),id
+          LIMIT ?`, before, before, sentOutboxPruneBatchSize)
 		if err != nil {
 			return total, err
 		}
@@ -38,12 +39,12 @@ func (s *Store) PruneSentOutbound(ctx context.Context, before time.Time) (int64,
 			return total, nil
 		}
 		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(ids)), ",")
-		arguments := make([]any, 0, len(ids)+1)
+		arguments := make([]any, 0, len(ids)+2)
 		for _, outboxID := range ids {
 			arguments = append(arguments, outboxID)
 		}
-		arguments = append(arguments, before)
-		result, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM echo_whatsapp_outbox WHERE id IN (%s) AND status='sent' AND sent_at<?`, placeholders), arguments...)
+		arguments = append(arguments, before, before)
+		result, err := s.db.ExecContext(ctx, fmt.Sprintf(`DELETE FROM echo_whatsapp_outbox WHERE id IN (%s) AND ((status='sent' AND sent_at<?) OR (status='suppressed' AND suppressed_at<?))`, placeholders), arguments...)
 		if err != nil {
 			return total, err
 		}

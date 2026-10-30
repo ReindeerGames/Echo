@@ -818,6 +818,13 @@ func enqueueMonitorTransitionBodies(ctx context.Context, tx *sql.Tx, ownerJID st
 	if ownerJID == "" {
 		return nil
 	}
+	allowed, err := proactiveNotificationsAllowed(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !allowed {
+		return nil
+	}
 	kinds := make(map[string]struct{})
 	for _, transition := range transitions {
 		if !transition.Suppressed && monitorTransitionNotifiable(transition.Kind) {
@@ -867,8 +874,8 @@ func enqueueCoalescedMonitorNotification(ctx context.Context, tx *sql.Tx, ownerJ
 	body := header + "\n\n" + item
 	appendItem := "\n\n" + item
 	key := "monitor-transition:" + kind
-	_, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body,available_at,coalesce_key,coalesce_count)
-      VALUES(?,?,?,DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 8 SECOND),?,1)
+	_, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body,delivery_class,available_at,coalesce_key,coalesce_count)
+		VALUES(?,?,?,'proactive',DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 8 SECOND),?,1)
       ON DUPLICATE KEY UPDATE
         body=CASE
           WHEN coalesce_count<? AND CHAR_LENGTH(body)+CHAR_LENGTH(?)<=? THEN CONCAT(body,?)
@@ -1586,19 +1593,41 @@ func (s *Store) EnqueueOutbound(ctx context.Context, chatJID, body string) error
 	return err
 }
 
-func (s *Store) ClaimOutbound(ctx context.Context, lease time.Duration) (domain.OutboundMessage, error) {
+func (s *Store) ClaimOutbound(ctx context.Context, lease time.Duration, proactive ...bool) (domain.OutboundMessage, error) {
+	allowProactive := true
+	if len(proactive) > 0 {
+		allowProactive = proactive[0]
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.OutboundMessage{}, err
 	}
 	defer tx.Rollback()
+	if !allowProactive {
+		if _, err := tx.ExecContext(ctx, `UPDATE echo_whatsapp_outbox
+		  SET status='suppressed',suppressed_at=UTC_TIMESTAMP(6),locked_until=NULL,coalesce_key=NULL,last_error=''
+		  WHERE delivery_class='proactive' AND (
+		    status IN ('queued','failed') OR (status='sending' AND locked_until<UTC_TIMESTAMP(6))
+		  )`); err != nil {
+			return domain.OutboundMessage{}, err
+		}
+	}
 	var item domain.OutboundMessage
 	err = tx.QueryRowContext(ctx, `SELECT id,chat_jid,body,status,attempts,created_at FROM echo_whatsapp_outbox
       WHERE (((status IN ('queued','failed')) AND available_at<=NOW(6) AND (locked_until IS NULL OR locked_until<NOW(6)))
          OR (status='sending' AND locked_until<NOW(6)))
         AND attempts<=5
-      ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&item.ID, &item.ChatJID, &item.Body, &item.Status, &item.Attempts, &item.CreatedAt)
+		AND (delivery_class='interactive' OR (? AND NOT EXISTS (
+		  SELECT 1 FROM echo_notification_settings WHERE singleton_id=1 AND paused_until>UTC_TIMESTAMP(6)
+		)))
+      ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`, allowProactive).Scan(&item.ID, &item.ChatJID, &item.Body, &item.Status, &item.Attempts, &item.CreatedAt)
 	if err != nil {
+		if !allowProactive && errors.Is(err, sql.ErrNoRows) {
+			if commitErr := tx.Commit(); commitErr != nil {
+				return domain.OutboundMessage{}, commitErr
+			}
+			return domain.OutboundMessage{}, ErrNotFound
+		}
 		return domain.OutboundMessage{}, notFound(err)
 	}
 	if item.Attempts >= 5 {
@@ -1627,8 +1656,25 @@ func (s *Store) CompleteOutbound(ctx context.Context, outboxID string, attempt i
 		_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sent',whatsapp_message_id=?,sent_at=NOW(6),locked_until=NULL WHERE id=? AND status='sending' AND attempts=?`, messageID, outboxID, attempt)
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status=IF(attempts>=5,'dead','failed'),last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,60) SECOND),locked_until=NULL WHERE id=? AND status='sending' AND attempts=?`, truncate(sendErr.Error(), 1000), outboxID, attempt)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	proactiveAllowed, err := proactiveNotificationsAllowed(ctx, tx)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET
+	  status=CASE WHEN delivery_class='proactive' AND NOT ? THEN 'suppressed' WHEN attempts>=5 THEN 'dead' ELSE 'failed' END,
+	  last_error=CASE WHEN delivery_class='proactive' AND NOT ? THEN '' ELSE ? END,
+	  suppressed_at=CASE WHEN delivery_class='proactive' AND NOT ? THEN UTC_TIMESTAMP(6) ELSE suppressed_at END,
+	  available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,60) SECOND),locked_until=NULL
+	  WHERE id=? AND status='sending' AND attempts=?`, proactiveAllowed, proactiveAllowed, truncate(sendErr.Error(), 1000), proactiveAllowed, outboxID, attempt)
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ClaimJob(ctx context.Context, worker string, lease time.Duration) (domain.Job, error) {

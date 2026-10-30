@@ -10,7 +10,6 @@ import (
 	"unicode"
 
 	"github.com/ReindeerGames/echo/internal/domain"
-	"github.com/ReindeerGames/echo/internal/id"
 )
 
 func (s *Store) ReconcileRuntimeComponent(ctx context.Context, component, status string, healthy bool, now time.Time, ownerJID string) (*domain.RuntimeComponentTransition, error) {
@@ -69,7 +68,7 @@ func (s *Store) ReconcileRuntimeComponent(ctx context.Context, component, status
 	}
 	if transition != nil {
 		if ownerJID != "" {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, runtimeComponentNotification(*transition)); err != nil {
+			if _, err := enqueueProactiveOutbound(ctx, tx, ownerJID, runtimeComponentNotification(*transition)); err != nil {
 				return nil, err
 			}
 		}

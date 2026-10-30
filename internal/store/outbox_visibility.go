@@ -18,7 +18,7 @@ func (s *Store) ListOutboundDeliveries(ctx context.Context, status string, limit
 	}
 	status = strings.ToLower(strings.TrimSpace(status))
 	query := `SELECT CASE WHEN chat_jid LIKE '%@g.us' THEN 'group' ELSE 'direct' END,
-	  status,coalesce_count,attempts,available_at,locked_until,last_error,created_at,sent_at
+	  delivery_class,status,coalesce_count,attempts,available_at,locked_until,last_error,created_at,sent_at
       FROM echo_whatsapp_outbox`
 	args := []any{}
 	switch status {
@@ -39,7 +39,7 @@ func (s *Store) ListOutboundDeliveries(ctx context.Context, status string, limit
 	for rows.Next() {
 		var item domain.OutboundDelivery
 		var rawError string
-		if err := rows.Scan(&item.ChannelType, &item.Status, &item.BatchCount, &item.Attempts, &item.AvailableAt, &item.LockedUntil, &rawError, &item.CreatedAt, &item.SentAt); err != nil {
+		if err := rows.Scan(&item.ChannelType, &item.DeliveryClass, &item.Status, &item.BatchCount, &item.Attempts, &item.AvailableAt, &item.LockedUntil, &rawError, &item.CreatedAt, &item.SentAt); err != nil {
 			return nil, err
 		}
 		item.MaxAttempts = outboundDeliveryMaxAttempts

@@ -105,6 +105,18 @@ func TestBootstrapExposesProactiveNotificationPosture(t *testing.T) {
 	}
 }
 
+func TestNotificationPauseRejectsUnboundedDurationsBeforeStorage(t *testing.T) {
+	server := &Server{}
+	for _, body := range []string{`{"minutes":14}`, `{"minutes":10081}`, `{"minutes":"forever"}`} {
+		response := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPut, "/api/v1/settings/notifications", strings.NewReader(body))
+		server.notificationSettings(response, request)
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "invalid_notification_pause") {
+			t.Fatalf("body=%s status=%d response=%s", body, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestVerifyGitHubSignature(t *testing.T) {
 	body := []byte(`{"action":"completed"}`)
 	mac := hmac.New(sha256.New, []byte("secret"))

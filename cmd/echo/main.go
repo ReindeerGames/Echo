@@ -61,7 +61,7 @@ func run() error {
 	}
 	policies := policy.New()
 	owners := owner.New(st, cfg.WhatsApp.OwnerJID)
-	notificationOwners := owner.Notifications(owners, cfg.WhatsApp.Enabled && cfg.WhatsApp.ProactiveNotifications)
+	notificationOwners := owner.Notifications(owners, cfg.WhatsApp.Enabled && cfg.WhatsApp.ProactiveNotifications, st)
 	reporter := &runtimeComponentReporter{store: st, owners: notificationOwners, recoveryWindow: 30 * time.Second}
 	resolveDisabledComponentAlerts(ctx, st, notificationOwners, cfg.Worker.Enabled, cfg.WhatsApp.Enabled)
 	retention := maintenance.NewRetention(st, cfg.Assistant.Retention, cfg.Assistant.AttachmentRetention, cfg.Monitor.Retention, cfg.WhatsApp.OutboxRetention, 24*time.Hour)
@@ -77,7 +77,7 @@ func run() error {
 	aiClient := ai.NewManaged(vault, cfg.AI.Enabled, cfg.AI.BaseURL, cfg.AI.APIKey, cfg.AI.Model)
 	workflows := workflow.New(st, policies, owners, aiClient, githubClient, state, expectedComponents, cfg.Assistant.HistoryLimit, cfg.Security.ApprovalTTL)
 
-	gateway := whatsapp.New(st, workflows, state, cfg.Database.WhatsAppDSN)
+	gateway := whatsapp.New(st, workflows, state, cfg.Database.WhatsAppDSN, cfg.WhatsApp.ProactiveNotifications)
 	server := httpapi.New(cfg, st, workflows, owners, state, githubClient, aiClient, gateway)
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Run() }()
