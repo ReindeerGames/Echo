@@ -12,9 +12,9 @@ Service detail includes observer freshness, evidence age, alert fingerprints and
 
 Supported requests include:
 
-- `brief`, `daily brief`, or “good morning” for runtime health, monitoring coverage, open alerts and incidents, deployments needing attention, and bounded GitHub workflow health
+- `brief`, `daily brief`, or “good morning” for runtime health, monitoring and repository-ownership coverage, open alerts and incidents, deployments needing attention, and bounded GitHub workflow health
 - `status` or “how are things?” for the estate summary
-- `coverage`, `setup status`, or “what isn't monitored?” for projects missing repository, group, service, heartbeat-policy, or fresh observer coverage
+- `coverage`, `setup status`, or “what isn't monitored?” for projects missing repository, group, service, explicit usable service-to-repository ownership, heartbeat-policy, or fresh observer coverage
 - `activity`, `audit`, or “what happened?” for recent action/outcome/resource/time audit fields without actors or metadata
 - `alerts` or “anything wrong?” for open runtime conditions
 - `maintenance` or “planned maintenance” for active and upcoming service windows
@@ -32,7 +32,7 @@ Supported requests include:
 - `repo <name>` for the configured default-branch head and up to ten recent GitHub Actions runs
 - `incidents` for a bounded recent list with IDs, project, severity, status, and summary
 - `incident <id>` for the report, latest diagnosis, bounded change/PR state, and deployment verification that followed
-- `help` for the current command summary
+- `help` for the current command summary, including repository-ownership coverage terminology
 
 Replies are capped for WhatsApp readability. The control plane remains the complete record.
 

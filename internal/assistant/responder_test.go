@@ -178,6 +178,23 @@ func (f fakeReader) ListServiceRepositories(_ context.Context, serviceID string,
 	}
 	return out, nil
 }
+func (f fakeReader) ListServiceRepositoryCoverage(_ context.Context) ([]domain.ServiceRepositoryCoverage, error) {
+	coverage := make([]domain.ServiceRepositoryCoverage, 0, len(f.services))
+	for _, service := range f.services {
+		item := domain.ServiceRepositoryCoverage{ServiceID: service.ID, ProjectID: service.ProjectID, ServiceEnabled: service.Enabled}
+		for _, link := range f.serviceRepositories {
+			if link.ServiceID != service.ID {
+				continue
+			}
+			item.RepositoryCount++
+			if link.RepositoryEnabled {
+				item.EnabledRepositoryCount++
+			}
+		}
+		coverage = append(coverage, item)
+	}
+	return coverage, nil
+}
 func (f fakeReader) ListServiceRunbooks(_ context.Context, serviceID string, limit int) ([]domain.ServiceRunbook, error) {
 	var out []domain.ServiceRunbook
 	for _, runbook := range f.runbooks {
@@ -343,6 +360,10 @@ func TestEstateCoverageFindsRelationshipAndMonitoringGaps(t *testing.T) {
 			{ID: "svc_missing", ProjectID: "prj_gaps", Enabled: true, HeartbeatTimeoutSeconds: 60},
 			{ID: "svc_no_policy", ProjectID: "prj_gaps", Enabled: true},
 		},
+		serviceRepositories: []domain.ServiceRepository{
+			{ServiceID: "svc_ready", RepositoryID: "repo_ready", RepositoryEnabled: true},
+			{ServiceID: "svc_missing", RepositoryID: "repo_disabled", RepositoryEnabled: false},
+		},
 		events: []domain.MonitorEvent{
 			{ServiceID: "svc_ready", Source: "observer", Status: "healthy", ObservedAt: now.Add(-time.Minute)},
 			{ServiceID: "svc_stale", Source: "observer", Status: "healthy", ObservedAt: now.Add(-2 * time.Minute)},
@@ -352,7 +373,7 @@ func TestEstateCoverageFindsRelationshipAndMonitoringGaps(t *testing.T) {
 	responder.now = func() time.Time { return now }
 
 	answer, intent, err := responder.Answer(context.Background(), "what isn't monitored?")
-	if err != nil || intent != "coverage" || !containsAll(answer, "Estate coverage · 2 enabled project(s) · 1 with gaps", "READY · Ready (ready) · 1 repo(s) · 1 group(s) · 1 service(s) · 1 fresh", "GAPS · Gaps (gaps) · no enabled repository; no enabled WhatsApp group; 1 stale service; 1 service without evidence; 1 service without heartbeat policy") {
+	if err != nil || intent != "coverage" || !containsAll(answer, "Estate coverage · 2 enabled project(s) · 1 with gaps", "READY · Ready (ready) · 1 repo(s) · 1 group(s) · 1 service(s) · 1 fresh · 1 explicit repository scope", "GAPS · Gaps (gaps) · no enabled repository; no enabled WhatsApp group; 2 services using project repository fallback; 1 service without an enabled owned repository; 1 stale service; 1 service without evidence; 1 service without heartbeat policy") {
 		t.Fatalf("unexpected coverage answer intent=%s body=%s err=%v", intent, answer, err)
 	}
 	if strings.Contains(answer, "Disabled") {
@@ -360,7 +381,7 @@ func TestEstateCoverageFindsRelationshipAndMonitoringGaps(t *testing.T) {
 	}
 
 	output, err := responder.executeTool(context.Background(), "get_estate_coverage", json.RawMessage(`{}`))
-	if err != nil || !containsAll(output, `"enabled_project_count":2`, `"projects_with_gaps":1`, `"project":"Gaps"`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"no enabled repository"`) || strings.Contains(output, `"Disabled"`) || strings.Contains(output, "Secret client room") || strings.Contains(output, "120363000000") {
+	if err != nil || !containsAll(output, `"enabled_project_count":2`, `"projects_with_gaps":1`, `"project":"Gaps"`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"repository_ownership":{"explicit":0,"project_fallback":2,"without_enabled_repository":1}`, `"no enabled repository"`) || strings.Contains(output, `"Disabled"`) || strings.Contains(output, "Secret client room") || strings.Contains(output, "120363000000") {
 		t.Fatalf("unexpected coverage tool output=%s err=%v", output, err)
 	}
 }
@@ -471,6 +492,10 @@ func TestStatusReportsEstateMonitoringCoverage(t *testing.T) {
 			{ID: "svc_no_policy", Enabled: true},
 			{ID: "svc_disabled", Enabled: false, HeartbeatTimeoutSeconds: 60},
 		},
+		serviceRepositories: []domain.ServiceRepository{
+			{ServiceID: "svc_fresh", RepositoryEnabled: true},
+			{ServiceID: "svc_missing", RepositoryEnabled: false},
+		},
 		events: []domain.MonitorEvent{
 			{ServiceID: "svc_fresh", Source: "observer", Status: "healthy", ObservedAt: now.Add(-30 * time.Second)},
 			{ServiceID: "svc_stale", Source: "observer", Status: "healthy", ObservedAt: now.Add(-2 * time.Minute)},
@@ -479,11 +504,11 @@ func TestStatusReportsEstateMonitoringCoverage(t *testing.T) {
 	responder := New(reader)
 	responder.now = func() time.Time { return now }
 	answer, intent, err := responder.Answer(context.Background(), "status")
-	if err != nil || intent != "status" || !containsAll(answer, "Services: 4 enabled", "Monitoring: 1 fresh · 1 stale · 1 missing · 1 without heartbeat policy") {
+	if err != nil || intent != "status" || !containsAll(answer, "Services: 4 enabled", "Monitoring: 1 fresh · 1 stale · 1 missing · 1 without heartbeat policy", "Repository ownership: 1 explicit · 2 project fallback · 1 unavailable") {
 		t.Fatalf("unexpected monitoring status intent=%s body=%s err=%v", intent, answer, err)
 	}
 	output, err := responder.executeTool(context.Background(), "get_status", json.RawMessage(`{}`))
-	if err != nil || !containsAll(output, `"monitoring":`, `"fresh":1`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"disabled":1`) {
+	if err != nil || !containsAll(output, `"monitoring":`, `"fresh":1`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"disabled":1`, `"repository_ownership":{"explicit":1,"project_fallback":2,"without_enabled_repository":1}`) {
 		t.Fatalf("monitoring coverage missing from status tool: output=%s err=%v", output, err)
 	}
 }
@@ -491,10 +516,11 @@ func TestStatusReportsEstateMonitoringCoverage(t *testing.T) {
 func TestDailyBriefNamesCurrentAttentionItems(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	reader := fakeReader{
-		dashboard: domain.Dashboard{OpenAlerts: 1, OpenIncidents: 1, FailedDeployments: 1},
-		services:  []domain.Service{{ID: "svc_web", ProjectID: "prj_invoices", Name: "Invoice web", Enabled: true, HeartbeatTimeoutSeconds: 60}},
-		events:    []domain.MonitorEvent{{ServiceID: "svc_web", Source: "observer", Status: "unhealthy", ObservedAt: now.Add(-30 * time.Second)}},
-		alerts:    []domain.ServiceAlert{{ServiceID: "svc_web", ServiceName: "Invoice web", ProjectID: "prj_invoices", Severity: "critical", Summary: "readiness endpoint failed"}},
+		dashboard:           domain.Dashboard{OpenAlerts: 1, OpenIncidents: 1, FailedDeployments: 1},
+		services:            []domain.Service{{ID: "svc_web", ProjectID: "prj_invoices", Name: "Invoice web", Enabled: true, HeartbeatTimeoutSeconds: 60}},
+		serviceRepositories: []domain.ServiceRepository{{ServiceID: "svc_web", RepositoryEnabled: true}},
+		events:              []domain.MonitorEvent{{ServiceID: "svc_web", Source: "observer", Status: "unhealthy", ObservedAt: now.Add(-30 * time.Second)}},
+		alerts:              []domain.ServiceAlert{{ServiceID: "svc_web", ServiceName: "Invoice web", ProjectID: "prj_invoices", Severity: "critical", Summary: "readiness endpoint failed"}},
 		incidents: []domain.Incident{
 			{ID: "inc_open", ProjectID: "prj_invoices", ProjectName: "Invoices", Status: "triaging", Severity: "high", Summary: "PDFs are delayed", CreatedAt: now.Add(-time.Hour)},
 			{ID: "inc_resolved", ProjectID: "prj_invoices", ProjectName: "Invoices", Status: "resolved", Severity: "low", Summary: "old resolved item", CreatedAt: now.Add(-2 * time.Hour)},
@@ -507,7 +533,7 @@ func TestDailyBriefNamesCurrentAttentionItems(t *testing.T) {
 	responder := New(reader)
 	responder.now = func() time.Time { return now }
 	answer, intent, err := responder.Answer(context.Background(), "good morning")
-	if err != nil || intent != "brief" || !containsAll(answer, "Echo daily brief", "Monitoring: 1 fresh · 0 stale · 0 missing", "CRITICAL · Invoice web", "TRIAGING · Invoices · inc_open · PDFs are delayed", "FAILED · deploy · production · ReindeerGames/invoices · 20m0s ago") {
+	if err != nil || intent != "brief" || !containsAll(answer, "Echo daily brief", "Monitoring: 1 fresh · 0 stale · 0 missing", "Repository ownership: 1 explicit · 0 project fallback · 0 unavailable", "CRITICAL · Invoice web", "TRIAGING · Invoices · inc_open · PDFs are delayed", "FAILED · deploy · production · ReindeerGames/invoices · 20m0s ago") {
 		t.Fatalf("unexpected daily brief intent=%s body=%s err=%v", intent, answer, err)
 	}
 	if strings.Contains(answer, "old resolved item") || strings.Contains(answer, "dep_verified") {
@@ -1160,14 +1186,14 @@ func TestProjectOverviewJoinsOperationalEvidenceWithoutCrossProjectData(t *testi
 	responder := New(reader)
 	responder.now = func() time.Time { return now }
 	answer, intent, err := responder.Answer(context.Background(), "project invoices")
-	if err != nil || intent != "project" || !containsAll(answer, "Project: Invoices (invoices)", "Repositories: 1/1 enabled · ReindeerGames/invoices", "Services: 4/5 enabled", "Monitoring: 1 fresh · 1 stale · 1 missing · 1 without heartbeat policy · 1 disabled", "Open alerts: 1", "PDFs delayed", "Latest deployment: VERIFIED · deploy · production · 45m0s ago") {
+	if err != nil || intent != "project" || !containsAll(answer, "Project: Invoices (invoices)", "Repositories: 1/1 enabled · ReindeerGames/invoices", "Services: 4/5 enabled", "Monitoring: 1 fresh · 1 stale · 1 missing · 1 without heartbeat policy · 1 disabled", "Repository ownership: 0 explicit · 4 project fallback · 0 unavailable", "Open alerts: 1", "PDFs delayed", "Latest deployment: VERIFIED · deploy · production · 45m0s ago") {
 		t.Fatalf("unexpected project answer intent=%s body=%s err=%v", intent, answer, err)
 	}
 	if strings.Contains(answer, "must not appear") {
 		t.Fatalf("cross-project data leaked into answer: %s", answer)
 	}
 	output, err := responder.executeTool(context.Background(), "get_project", json.RawMessage(`{"project":"Invoices"}`))
-	if err != nil || !containsAll(output, `"found":true`, `"fresh":1`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"open_alert_count":1`, `"id":"inc_invoice"`, `"id":"dep_invoice"`) {
+	if err != nil || !containsAll(output, `"found":true`, `"fresh":1`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"repository_ownership":{"explicit":0,"project_fallback":4,"without_enabled_repository":0}`, `"repository_scope":"project_fallback"`, `"open_alert_count":1`, `"id":"inc_invoice"`, `"id":"dep_invoice"`) {
 		t.Fatalf("unexpected project tool output=%s err=%v", output, err)
 	}
 	if strings.Contains(output, "must not appear") || strings.Contains(output, "inc_other") || strings.Contains(output, "dep_other") || strings.Contains(output, "repo_other") {

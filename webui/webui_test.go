@@ -209,7 +209,7 @@ func TestMonitoringSupportsExplicitServiceRepositoryOwnership(t *testing.T) {
 	response := httptest.NewRecorder()
 	Handler().ServeHTTP(response, request)
 	body := response.Body.String()
-	for _, expected := range []string{"/api/v1/service-repositories", "service-repository-form", "Link repository", "Owned repositories", "Investigation scope becomes explicit", "data-delete-service-repository", "compatibility fallback", "Service repository linked"} {
+	for _, expected := range []string{"/api/v1/service-repositories", "/api/v1/service-repository-coverage", "service-repository-form", "Link repository", "Owned repositories", "Investigation scope becomes explicit", "data-delete-service-repository", "compatibility fallback", "Service repository linked", "Repository ownership needs attention", "Explicit ownership", "Repository scope", "project fallback", "unavailable"} {
 		if response.Code != 200 || !strings.Contains(body, expected) {
 			t.Fatalf("service repository workflow is missing %q", expected)
 		}

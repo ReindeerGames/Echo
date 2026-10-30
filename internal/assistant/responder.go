@@ -27,6 +27,7 @@ type Reader interface {
 	ListServices(context.Context, string) ([]domain.Service, error)
 	ListServiceDependencies(context.Context, string, int) ([]domain.ServiceDependency, error)
 	ListServiceRepositories(context.Context, string, int) ([]domain.ServiceRepository, error)
+	ListServiceRepositoryCoverage(context.Context) ([]domain.ServiceRepositoryCoverage, error)
 	ListServiceRunbooks(context.Context, string, int) ([]domain.ServiceRunbook, error)
 	ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error)
 	ListRepositoryWorkflowAlerts(context.Context, string) ([]domain.RepositoryWorkflowAlert, error)
@@ -119,7 +120,7 @@ Prefer the smallest set of tools that answers the question. When a service name 
 
 func operatorTools() []ai.ToolDefinition {
 	return []ai.ToolDefinition{
-		ai.FunctionTool("get_status", "Get current Echo runtime-component state, operational counts, monitoring freshness coverage, and open default-branch workflow alert count.", schema(nil, nil)),
+		ai.FunctionTool("get_status", "Get current Echo runtime-component state, operational counts, monitoring freshness, explicit service repository ownership coverage, and open default-branch workflow alert count.", schema(nil, nil)),
 		ai.FunctionTool("get_open_alerts", "List current Echo component, service, and default-branch GitHub workflow alerts with severity and last observed time.", schema(nil, nil)),
 		ai.FunctionTool("get_maintenance_windows", "List active and upcoming service maintenance windows. This tool is read-only and cannot schedule, extend, or cancel suppression.", schema(nil, nil)),
 		ai.FunctionTool("list_services", "List services. Use an empty query for all services or a name/key fragment to filter.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Service name or key fragment, or empty string."}}, []string{"query"})),
@@ -129,7 +130,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_delivery_queue", "List the active queued, sending, retrying, and terminally failed WhatsApp delivery queue with channel type, attempt timing, and safe failure categories. An empty result does not prove a specific message was delivered. Message content, destinations, IDs, and raw errors are omitted.", schema(nil, nil)),
 		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
-		ai.FunctionTool("get_estate_coverage", "Find enabled projects missing repository, WhatsApp group, service, heartbeat-policy, or fresh monitoring coverage.", schema(nil, nil)),
+		ai.FunctionTool("get_estate_coverage", "Find enabled projects missing repository, WhatsApp group, service, explicit usable service repository ownership, heartbeat-policy, or fresh monitoring coverage.", schema(nil, nil)),
 		ai.FunctionTool("get_project", "Get one project's configured repositories, monitored services and freshness, open alerts, recent incidents, and deployment state.", schema(map[string]any{"project": map[string]string{"type": "string", "description": "Exact project ID, key, or name."}}, []string{"project"})),
 		ai.FunctionTool("get_repository_overview", "Inspect enabled configured repositories and summarize each default branch's current GitHub Actions health. This tool is read-only and bounded to twenty repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_repository_status", "Inspect the configured repository default-branch head, five recent redacted commit summaries, and ten recent GitHub Actions runs. This tool is read-only.", schema(map[string]any{"repository": map[string]string{"type": "string", "description": "Configured repository ID, name, or owner/name."}}, []string{"repository"})),
@@ -172,7 +173,11 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		if err != nil {
 			return "", err
 		}
-		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "maintenance_suppressed_alerts": dashboard.SuppressedAlerts, "acknowledged_alerts": dashboard.AcknowledgedAlerts, "active_maintenance_windows": dashboard.ActiveMaintenanceWindows, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "monitoring": coverage, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
+		ownership, err := r.repositoryOwnershipCoverage(ctx, services)
+		if err != nil {
+			return "", err
+		}
+		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "maintenance_suppressed_alerts": dashboard.SuppressedAlerts, "acknowledged_alerts": dashboard.AcknowledgedAlerts, "active_maintenance_windows": dashboard.ActiveMaintenanceWindows, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "monitoring": coverage, "repository_ownership": ownership, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
 		repositoryAlerts, err := r.reader.ListRepositoryWorkflowAlerts(ctx, "open")
 		if err != nil {
 			return "", err
@@ -598,7 +603,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			}
 			views = append(views, map[string]any{
 				"project": project.Project.Name, "key": project.Project.Key, "repositories": project.Repositories,
-				"groups": project.Groups, "services": project.Services, "monitoring": project.Monitoring, "gaps": project.Gaps,
+				"groups": project.Groups, "services": project.Services, "monitoring": project.Monitoring, "repository_ownership": project.RepositoryOwnership, "gaps": project.Gaps,
 			})
 		}
 		return marshal(map[string]any{"projects": views, "enabled_project_count": len(coverage.Projects), "projects_with_gaps": coverage.ProjectsWithGaps, "truncated": len(coverage.Projects) > len(views)})
@@ -1479,13 +1484,20 @@ type monitoringCoverageView struct {
 	Disabled               int `json:"disabled"`
 }
 
+type repositoryOwnershipView struct {
+	Explicit    int `json:"explicit"`
+	Fallback    int `json:"project_fallback"`
+	Unavailable int `json:"without_enabled_repository"`
+}
+
 type estateCoverageProject struct {
-	Project      domain.Project
-	Repositories int
-	Groups       int
-	Services     int
-	Monitoring   monitoringCoverageView
-	Gaps         []string
+	Project             domain.Project
+	Repositories        int
+	Groups              int
+	Services            int
+	Monitoring          monitoringCoverageView
+	RepositoryOwnership repositoryOwnershipView
+	Gaps                []string
 }
 
 type estateCoverageResult struct {
@@ -1514,6 +1526,11 @@ func (r *Responder) estateCoverage(ctx context.Context) (estateCoverageResult, e
 	if err != nil {
 		return estateCoverageResult{}, err
 	}
+	repositoryCoverage, err := r.reader.ListServiceRepositoryCoverage(ctx)
+	if err != nil {
+		return estateCoverageResult{}, err
+	}
+	ownershipByService := serviceRepositoryCoverageByID(repositoryCoverage)
 	latest := make(map[string]domain.MonitorEvent, len(events))
 	for _, event := range events {
 		latest[event.ServiceID] = event
@@ -1549,6 +1566,7 @@ func (r *Responder) estateCoverage(ctx context.Context) (estateCoverageResult, e
 		}
 		fresh, stale, missing, noPolicy, disabled := projectMonitoringCounts(r.now().UTC(), overview)
 		item.Monitoring = monitoringCoverageView{Fresh: fresh, Stale: stale, Missing: missing, WithoutHeartbeatPolicy: noPolicy, Disabled: disabled}
+		item.RepositoryOwnership = repositoryOwnershipCounts(overview.Services, ownershipByService)
 		if item.Repositories == 0 {
 			item.Gaps = append(item.Gaps, "no enabled repository")
 		}
@@ -1558,14 +1576,20 @@ func (r *Responder) estateCoverage(ctx context.Context) (estateCoverageResult, e
 		if item.Services == 0 {
 			item.Gaps = append(item.Gaps, "no enabled service")
 		} else {
+			if item.RepositoryOwnership.Fallback > 0 {
+				item.Gaps = append(item.Gaps, coverageGapCount(item.RepositoryOwnership.Fallback, "service using project repository fallback", "services using project repository fallback"))
+			}
+			if item.RepositoryOwnership.Unavailable > 0 {
+				item.Gaps = append(item.Gaps, coverageGapCount(item.RepositoryOwnership.Unavailable, "service without an enabled owned repository", "services without an enabled owned repository"))
+			}
 			if stale > 0 {
-				item.Gaps = append(item.Gaps, fmt.Sprintf("%d stale service", stale))
+				item.Gaps = append(item.Gaps, coverageGapCount(stale, "stale service", "stale services"))
 			}
 			if missing > 0 {
-				item.Gaps = append(item.Gaps, fmt.Sprintf("%d service without evidence", missing))
+				item.Gaps = append(item.Gaps, coverageGapCount(missing, "service without evidence", "services without evidence"))
 			}
 			if noPolicy > 0 {
-				item.Gaps = append(item.Gaps, fmt.Sprintf("%d service without heartbeat policy", noPolicy))
+				item.Gaps = append(item.Gaps, coverageGapCount(noPolicy, "service without heartbeat policy", "services without heartbeat policy"))
 			}
 		}
 		if len(item.Gaps) > 0 {
@@ -1577,6 +1601,14 @@ func (r *Responder) estateCoverage(ctx context.Context) (estateCoverageResult, e
 		return strings.ToLower(result.Projects[i].Project.Name) < strings.ToLower(result.Projects[j].Project.Name)
 	})
 	return result, nil
+}
+
+func coverageGapCount(count int, singular, plural string) string {
+	label := plural
+	if count == 1 {
+		label = singular
+	}
+	return fmt.Sprintf("%d %s", count, label)
 }
 
 func (r *Responder) coverage(ctx context.Context) (string, error) {
@@ -1593,7 +1625,7 @@ func (r *Responder) coverage(ctx context.Context) (string, error) {
 			break
 		}
 		state := "READY"
-		detail := fmt.Sprintf("%d repo(s) · %d group(s) · %d service(s) · %d fresh", project.Repositories, project.Groups, project.Services, project.Monitoring.Fresh)
+		detail := fmt.Sprintf("%d repo(s) · %d group(s) · %d service(s) · %d fresh · %d explicit repository scope", project.Repositories, project.Groups, project.Services, project.Monitoring.Fresh, project.RepositoryOwnership.Explicit)
 		if len(project.Gaps) > 0 {
 			state = "GAPS"
 			detail = strings.Join(project.Gaps, "; ")
@@ -1625,6 +1657,41 @@ func (r *Responder) monitoringCoverage(ctx context.Context, services []domain.Se
 	return monitoringCoverageView{Fresh: fresh, Stale: stale, Missing: missing, WithoutHeartbeatPolicy: noPolicy, Disabled: disabled}, nil
 }
 
+func serviceRepositoryCoverageByID(items []domain.ServiceRepositoryCoverage) map[string]domain.ServiceRepositoryCoverage {
+	byService := make(map[string]domain.ServiceRepositoryCoverage, len(items))
+	for _, item := range items {
+		byService[item.ServiceID] = item
+	}
+	return byService
+}
+
+func repositoryOwnershipCounts(services []domain.Service, byService map[string]domain.ServiceRepositoryCoverage) repositoryOwnershipView {
+	var view repositoryOwnershipView
+	for _, service := range services {
+		if !service.Enabled {
+			continue
+		}
+		coverage := byService[service.ID]
+		switch {
+		case coverage.RepositoryCount == 0:
+			view.Fallback++
+		case coverage.EnabledRepositoryCount == 0:
+			view.Unavailable++
+		default:
+			view.Explicit++
+		}
+	}
+	return view
+}
+
+func (r *Responder) repositoryOwnershipCoverage(ctx context.Context, services []domain.Service) (repositoryOwnershipView, error) {
+	items, err := r.reader.ListServiceRepositoryCoverage(ctx)
+	if err != nil {
+		return repositoryOwnershipView{}, err
+	}
+	return repositoryOwnershipCounts(services, serviceRepositoryCoverageByID(items)), nil
+}
+
 func (r *Responder) status(ctx context.Context) (string, error) {
 	dashboard, err := r.reader.Dashboard(ctx)
 	if err != nil {
@@ -1641,6 +1708,10 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 		}
 	}
 	coverage, err := r.monitoringCoverage(ctx, services)
+	if err != nil {
+		return "", err
+	}
+	ownership, err := r.repositoryOwnershipCoverage(ctx, services)
 	if err != nil {
 		return "", err
 	}
@@ -1680,8 +1751,9 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 		delivery += " · needs attention in the control plane"
 	}
 	monitoring := fmt.Sprintf("Monitoring: %d fresh · %d stale · %d missing · %d without heartbeat policy", coverage.Fresh, coverage.Stale, coverage.Missing, coverage.WithoutHeartbeatPolicy)
+	repositoryOwnership := fmt.Sprintf("Repository ownership: %d explicit · %d project fallback · %d unavailable", ownership.Explicit, ownership.Fallback, ownership.Unavailable)
 	maintenanceLine := fmt.Sprintf("Maintenance: %d active · %d upcoming", maintenanceState["active"], maintenanceState["upcoming"])
-	return fmt.Sprintf("Echo operational status\n%s%s\n\nServices: %d enabled\n%s\n%s\nGitHub workflow alerts: %d open\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, prefixLine(runtimeLine), enabled, monitoring, maintenanceLine, len(repositoryAlerts), dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
+	return fmt.Sprintf("Echo operational status\n%s%s\n\nServices: %d enabled\n%s\n%s\n%s\nGitHub workflow alerts: %d open\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, prefixLine(runtimeLine), enabled, monitoring, repositoryOwnership, maintenanceLine, len(repositoryAlerts), dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
 }
 
 func (r *Responder) brief(ctx context.Context) (string, error) {
@@ -2431,6 +2503,7 @@ type projectOverview struct {
 	Project                 domain.Project
 	Repositories            []domain.Repository
 	Services                []domain.Service
+	RepositoryCoverage      map[string]domain.ServiceRepositoryCoverage
 	LatestSignals           map[string]domain.MonitorEvent
 	OpenAlerts              []domain.ServiceAlert
 	Incidents               []domain.Incident
@@ -2440,7 +2513,7 @@ type projectOverview struct {
 }
 
 func (r *Responder) loadProjectOverview(ctx context.Context, project domain.Project) (projectOverview, error) {
-	overview := projectOverview{Project: project, LatestSignals: map[string]domain.MonitorEvent{}}
+	overview := projectOverview{Project: project, RepositoryCoverage: map[string]domain.ServiceRepositoryCoverage{}, LatestSignals: map[string]domain.MonitorEvent{}}
 	var err error
 	repositories, err := r.reader.ListRepositories(ctx, project.ID)
 	if err != nil {
@@ -2458,6 +2531,15 @@ func (r *Responder) loadProjectOverview(ctx context.Context, project domain.Proj
 	for _, service := range services {
 		if service.ProjectID == project.ID {
 			overview.Services = append(overview.Services, service)
+		}
+	}
+	repositoryCoverage, err := r.reader.ListServiceRepositoryCoverage(ctx)
+	if err != nil {
+		return projectOverview{}, err
+	}
+	for _, item := range repositoryCoverage {
+		if item.ProjectID == project.ID {
+			overview.RepositoryCoverage[item.ServiceID] = item
 		}
 	}
 	serviceIDs := make(map[string]struct{}, len(overview.Services))
@@ -2533,7 +2615,7 @@ func projectOverviewView(now time.Time, overview projectOverview) map[string]any
 		if index == 50 {
 			break
 		}
-		serviceView := map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "kind": service.Kind, "criticality": service.Criticality, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds, "open_alert_count": alertCounts[service.ID]}
+		serviceView := map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "kind": service.Kind, "criticality": service.Criticality, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds, "open_alert_count": alertCounts[service.ID], "repository_scope": serviceRepositoryScope(overview.RepositoryCoverage[service.ID])}
 		if event, ok := overview.LatestSignals[service.ID]; ok {
 			serviceView["observer_freshness"] = observerFreshness(now, service, []domain.MonitorEvent{event})
 			serviceView["latest_signal"] = map[string]any{"status": event.Status, "severity": event.Severity, "summary": truncateRunes(event.Summary, 300), "source": truncateRunes(event.Source, 120), "observed_at": event.ObservedAt, "age_seconds": ageSeconds(now, event.ObservedAt)}
@@ -2557,6 +2639,7 @@ func projectOverviewView(now time.Time, overview projectOverview) map[string]any
 		deployments = append(deployments, deploymentView(deployment))
 	}
 	fresh, stale, missing, noPolicy, disabled := projectMonitoringCounts(now, overview)
+	ownership := repositoryOwnershipCounts(overview.Services, overview.RepositoryCoverage)
 	return map[string]any{
 		"found":        true,
 		"generated_at": now,
@@ -2564,12 +2647,24 @@ func projectOverviewView(now time.Time, overview projectOverview) map[string]any
 			"id": overview.Project.ID, "key": overview.Project.Key, "name": overview.Project.Name,
 			"description": truncateRunes(overview.Project.Description, 500), "enabled": overview.Project.Enabled,
 		},
-		"monitoring":   map[string]any{"fresh": fresh, "stale": stale, "missing": missing, "without_heartbeat_policy": noPolicy, "disabled": disabled},
-		"repositories": repositories, "repository_count": len(overview.Repositories), "repositories_truncated": len(overview.Repositories) > len(repositories),
+		"monitoring":           map[string]any{"fresh": fresh, "stale": stale, "missing": missing, "without_heartbeat_policy": noPolicy, "disabled": disabled},
+		"repository_ownership": ownership,
+		"repositories":         repositories, "repository_count": len(overview.Repositories), "repositories_truncated": len(overview.Repositories) > len(repositories),
 		"services": services, "service_count": len(overview.Services), "services_truncated": len(overview.Services) > len(services),
 		"open_alerts": alerts, "open_alert_count": len(overview.OpenAlerts), "alerts_truncated": len(overview.OpenAlerts) > len(alerts),
 		"recent_incidents": incidents, "recent_incident_count": len(overview.Incidents), "incidents_truncated": len(overview.Incidents) > len(incidents) || overview.IncidentSourceLimited,
 		"recent_deployments": deployments, "recent_deployment_count": len(overview.Deployments), "deployments_truncated": len(overview.Deployments) > len(deployments) || overview.DeploymentSourceLimited,
+	}
+}
+
+func serviceRepositoryScope(coverage domain.ServiceRepositoryCoverage) string {
+	switch {
+	case coverage.RepositoryCount == 0:
+		return "project_fallback"
+	case coverage.EnabledRepositoryCount == 0:
+		return "unavailable"
+	default:
+		return "explicit"
 	}
 }
 
@@ -2849,6 +2944,8 @@ func (r *Responder) project(ctx context.Context, query string) (string, error) {
 	lines = append(lines, fmt.Sprintf("Services: %d/%d enabled", enabledServices, len(overview.Services)))
 	fresh, stale, missing, noPolicy, disabled := projectMonitoringCounts(r.now().UTC(), overview)
 	lines = append(lines, fmt.Sprintf("Monitoring: %d fresh · %d stale · %d missing · %d without heartbeat policy · %d disabled", fresh, stale, missing, noPolicy, disabled))
+	ownership := repositoryOwnershipCounts(overview.Services, overview.RepositoryCoverage)
+	lines = append(lines, fmt.Sprintf("Repository ownership: %d explicit · %d project fallback · %d unavailable", ownership.Explicit, ownership.Fallback, ownership.Unavailable))
 	if len(overview.OpenAlerts) == 0 {
 		lines = append(lines, "Open alerts: none")
 	} else {
@@ -3026,7 +3123,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary, workflow alerts and monitoring coverage\n• coverage / what isn't monitored — project relationship and monitoring gaps\n• activity / what happened — recent safe audit events\n• alerts — open runtime, service and default-branch workflow conditions\n• ack <code> — acknowledge one exact service alert and pause its reminders\n• maintenance — active and upcoming service maintenance\n• services — monitored service catalogue\n• service <name> — alerts, runbooks and latest evidence\n• investigate <service> — correlate signals, runbooks, incidents, deployments and workflows (AI configured)\n• jobs — queued, running, retrying and dead work\n• deliveries — WhatsApp delivery attempts and safe failure categories\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• github inventory — compare token-visible and configured repositories (AI configured)\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions and AI tools are read-only. Only an exact owner command can acknowledge an alert; production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary, workflow alerts, monitoring and repository-ownership coverage\n• coverage / what isn't monitored — project relationship, repository-ownership and monitoring gaps\n• activity / what happened — recent safe audit events\n• alerts — open runtime, service and default-branch workflow conditions\n• ack <code> — acknowledge one exact service alert and pause its reminders\n• maintenance — active and upcoming service maintenance\n• services — monitored service catalogue\n• service <name> — alerts, repository ownership, runbooks and latest evidence\n• investigate <service> — correlate signals, owned repositories, runbooks, incidents, deployments and workflows (AI configured)\n• jobs — queued, running, retrying and dead work\n• deliveries — WhatsApp delivery attempts and safe failure categories\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• github inventory — compare token-visible and configured repositories (AI configured)\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions and AI tools are read-only. Only an exact owner command can acknowledge an alert; production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

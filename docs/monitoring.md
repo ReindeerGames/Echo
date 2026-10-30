@@ -22,6 +22,8 @@ Open a service in **Monitoring** and select **Link repository** to declare which
 
 Services created before this feature remain useful: with no explicit links, Echo visibly falls back to all enabled repositories in the project. Treat that as a compatibility state, not the preferred steady state, because a broad project can introduce unrelated commits or workflow failures into a diagnosis. A linked service or repository cannot move to another project until its links are removed. Disabling a linked repository preserves the ownership record but excludes that repository from live investigation.
 
+The Monitoring catalogue and owner `status`, `coverage`, and daily-brief replies report ownership as **explicit**, **project fallback**, or **unavailable**. Unavailable means that links exist but every linked repository is disabled, so Echo deliberately does not widen the investigation back to the project. Treat fallback and unavailable counts as setup work: select the service to add or repair its repository links.
+
 ## Service runbooks
 
 Open a service in **Monitoring** and select **Add runbook** to record a concise operational check and, optionally, one HTTPS documentation reference. A service may have at most twenty runbooks. Titles are limited to 120 characters, guidance to 4,000 characters, and references cannot contain credentials, query strings, or fragments. Never store passwords, API tokens, private keys, signed URLs, raw logs, or customer data in a runbook.

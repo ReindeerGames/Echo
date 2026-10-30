@@ -98,6 +98,14 @@ type ServiceRepository struct {
 	CreatedAt         time.Time `json:"createdAt"`
 }
 
+type ServiceRepositoryCoverage struct {
+	ServiceID              string `json:"serviceId"`
+	ProjectID              string `json:"projectId"`
+	ServiceEnabled         bool   `json:"serviceEnabled"`
+	RepositoryCount        int    `json:"repositoryCount"`
+	EnabledRepositoryCount int    `json:"enabledRepositoryCount"`
+}
+
 type ServiceRunbook struct {
 	ID           string    `json:"id"`
 	ProjectID    string    `json:"projectId"`

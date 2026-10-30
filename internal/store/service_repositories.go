@@ -42,6 +42,28 @@ func (s *Store) ListServiceRepositories(ctx context.Context, serviceID string, l
 	return items, rows.Err()
 }
 
+func (s *Store) ListServiceRepositoryCoverage(ctx context.Context) ([]domain.ServiceRepositoryCoverage, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.project_id,s.enabled,COUNT(l.id),COALESCE(SUM(CASE WHEN r.enabled=TRUE THEN 1 ELSE 0 END),0)
+  FROM echo_services s
+  LEFT JOIN echo_service_repositories l ON l.service_id=s.id
+  LEFT JOIN echo_repositories r ON r.id=l.repository_id
+  GROUP BY s.id,s.project_id,s.enabled
+  ORDER BY s.project_id,s.id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.ServiceRepositoryCoverage, 0)
+	for rows.Next() {
+		var item domain.ServiceRepositoryCoverage
+		if err := rows.Scan(&item.ServiceID, &item.ProjectID, &item.ServiceEnabled, &item.RepositoryCount, &item.EnabledRepositoryCount); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *Store) CreateServiceRepository(ctx context.Context, item domain.ServiceRepository) (domain.ServiceRepository, error) {
 	item.ServiceID = strings.TrimSpace(item.ServiceID)
 	item.RepositoryID = strings.TrimSpace(item.RepositoryID)

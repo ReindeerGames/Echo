@@ -1091,6 +1091,10 @@ func TestMariaDBServiceRepositoriesStayExplicitAndProjectScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unlinkedService, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "worker", Name: "Worker", Kind: "worker", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
 	repository, err := st.SaveRepository(ctx, domain.Repository{ProjectID: project.ID, Owner: "ReindeerGames", Name: "api", Role: "application", DefaultBranch: "main", ReadOnly: true, Enabled: true})
 	if err != nil {
 		t.Fatal(err)
@@ -1115,6 +1119,37 @@ func TestMariaDBServiceRepositoriesStayExplicitAndProjectScoped(t *testing.T) {
 	links, err := st.ListServiceRepositories(ctx, service.ID, 10)
 	if err != nil || len(links) != 1 || links[0].ID != link.ID {
 		t.Fatalf("list service repositories: items=%#v err=%v", links, err)
+	}
+	coverage, err := st.ListServiceRepositoryCoverage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	coverageByService := make(map[string]domain.ServiceRepositoryCoverage, len(coverage))
+	for _, item := range coverage {
+		coverageByService[item.ServiceID] = item
+	}
+	if item := coverageByService[service.ID]; item.RepositoryCount != 1 || item.EnabledRepositoryCount != 1 || !item.ServiceEnabled {
+		t.Fatalf("linked service coverage is wrong: %#v", item)
+	}
+	if item := coverageByService[unlinkedService.ID]; item.RepositoryCount != 0 || item.EnabledRepositoryCount != 0 || !item.ServiceEnabled {
+		t.Fatalf("unlinked service coverage is wrong: %#v", item)
+	}
+	disabledRepository := repository
+	disabledRepository.Enabled = false
+	if _, err := st.SaveRepository(ctx, disabledRepository); err != nil {
+		t.Fatalf("disable linked repository: %v", err)
+	}
+	coverage, err = st.ListServiceRepositoryCoverage(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range coverage {
+		if item.ServiceID == service.ID && (item.RepositoryCount != 1 || item.EnabledRepositoryCount != 0) {
+			t.Fatalf("disabled repository remained usable in coverage: %#v", item)
+		}
+	}
+	if _, err := st.SaveRepository(ctx, repository); err != nil {
+		t.Fatalf("re-enable linked repository: %v", err)
 	}
 	movedService := service
 	movedService.ProjectID = otherProject.ID

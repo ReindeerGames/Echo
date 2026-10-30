@@ -118,6 +118,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("GET /api/v1/service-repositories", s.serviceRepositories)
 	protected.HandleFunc("POST /api/v1/service-repositories", s.serviceRepositories)
 	protected.HandleFunc("DELETE /api/v1/service-repositories/{id}", s.deleteServiceRepository)
+	protected.HandleFunc("GET /api/v1/service-repository-coverage", s.serviceRepositoryCoverage)
 	protected.HandleFunc("GET /api/v1/service-runbooks", s.serviceRunbooks)
 	protected.HandleFunc("POST /api/v1/service-runbooks", s.serviceRunbooks)
 	protected.HandleFunc("DELETE /api/v1/service-runbooks/{id}", s.deleteServiceRunbook)
@@ -630,6 +631,11 @@ func (s *Server) deleteServiceRepository(w http.ResponseWriter, r *http.Request)
 		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_repository.deleted", "service_repository", deleted.ID, "succeeded", map[string]any{"serviceId": deleted.ServiceID, "repositoryId": deleted.RepositoryID})
 	}
 	respond(w, deleted, err)
+}
+
+func (s *Server) serviceRepositoryCoverage(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListServiceRepositoryCoverage(r.Context())
+	respond(w, items, err)
 }
 
 func (s *Server) serviceRunbooks(w http.ResponseWriter, r *http.Request) {
