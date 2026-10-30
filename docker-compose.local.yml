@@ -89,7 +89,9 @@ services:
         INSERT IGNORE INTO echo_services
         (id, project_id, service_key, name, service_kind, criticality, description, enabled, heartbeat_timeout_seconds, metadata_json)
         VALUES ('svc_local_echo', 'prj_local_test', 'echo-local', 'Local Echo',
-        'platform', 'low', 'Disposable health target for the local observer.', TRUE, 60, '{}')"
+        'platform', 'low', 'Disposable health target for the local observer.', TRUE, 60, '{}'),
+        ('svc_local_host', 'prj_local_test', 'host-local', 'Local Host',
+        'platform', 'low', 'Disposable host-resource target for the local observer.', TRUE, 60, '{}')"
     networks: [backend]
 
 volumes:

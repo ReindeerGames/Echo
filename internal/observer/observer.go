@@ -28,6 +28,7 @@ type Observer struct {
 	secret string
 	probe  *http.Client
 	sender *http.Client
+	system SystemReader
 	now    func() time.Time
 }
 
@@ -47,6 +48,7 @@ func New(cfg Config, secret string) (*Observer, error) {
 		secret: secret,
 		probe:  &http.Client{Timeout: cfg.Timeout.Duration, CheckRedirect: noRedirect, Transport: directTransport()},
 		sender: &http.Client{Timeout: cfg.Timeout.Duration, CheckRedirect: noRedirect, Transport: directTransport()},
+		system: newSystemReader(),
 		now:    func() time.Time { return time.Now().UTC() },
 	}, nil
 }
@@ -77,25 +79,38 @@ func (o *Observer) Run(ctx context.Context) error {
 }
 
 func (o *Observer) RunOnce(ctx context.Context) error {
-	workerCount := min(8, len(o.config.Probes))
-	jobs := make(chan HTTPProbe)
-	failures := make(chan error, len(o.config.Probes))
+	type probeJob struct {
+		serviceID string
+		observe   func(context.Context) domain.MonitorEvent
+	}
+	allJobs := make([]probeJob, 0, len(o.config.Probes)+len(o.config.SystemProbes))
+	for _, configured := range o.config.Probes {
+		probe := configured
+		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observe(ctx, probe) }})
+	}
+	for _, configured := range o.config.SystemProbes {
+		probe := configured
+		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeSystem(ctx, probe) }})
+	}
+	workerCount := min(8, len(allJobs))
+	jobs := make(chan probeJob)
+	failures := make(chan error, len(allJobs))
 	var workers sync.WaitGroup
 	for range workerCount {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for probe := range jobs {
-				event := o.observe(ctx, probe)
+			for job := range jobs {
+				event := job.observe(ctx)
 				if err := o.sendWithRetry(ctx, event); err != nil {
-					failures <- fmt.Errorf("%s: %w", event.ServiceID, err)
+					failures <- fmt.Errorf("%s: %w", job.serviceID, err)
 				}
 			}
 		}()
 	}
-	for _, probe := range o.config.Probes {
+	for _, job := range allJobs {
 		select {
-		case jobs <- probe:
+		case jobs <- job:
 		case <-ctx.Done():
 			close(jobs)
 			workers.Wait()

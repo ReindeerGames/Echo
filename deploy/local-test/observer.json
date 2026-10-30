@@ -13,5 +13,18 @@
       "expectedStatusMin": 200,
       "expectedStatusMax": 299
     }
+  ],
+  "systemProbes": [
+    {
+      "name": "local-host",
+      "serviceId": "svc_local_host",
+      "diskPath": "/",
+      "diskWarningPercent": 99,
+      "diskCriticalPercent": 100,
+      "memoryWarningPercent": 99,
+      "memoryCriticalPercent": 100,
+      "loadWarningPerCpu": 19,
+      "loadCriticalPerCpu": 20
+    }
   ]
 }

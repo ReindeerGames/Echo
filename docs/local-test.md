@@ -7,7 +7,7 @@ The local stack is deliberately separate from Echo's normal Compose deployment. 
 - Echo on `http://localhost:8080`, bound only to `127.0.0.1`
 - MariaDB 11.4 with separate `echo_local_core` and `echo_local_whatsapp` databases and users
 - a deterministic OpenAI-compatible stub that marks the report as processed without claiming to inspect code
-- a seeded **Local Test** project and **Local Echo** service
+- a seeded **Local Test** project with **Local Echo** and **Local Host** services
 - persistent Docker volumes for the databases, WhatsApp session, and worker state
 
 The local database passwords and administrator token are predictable test defaults and must never be reused in production. The stack is isolated to `docker-compose.local.yml`; MariaDB is not exposed on a host port, and the control plane binds only to loopback.
@@ -75,9 +75,9 @@ With the stack healthy on the default local port, run one signed observation cyc
 make local-observe
 ```
 
-The observer probes `/readyz` without reading its body, signs a normalized health event, and submits it to Echo. **Monitoring → Recent signals** should show `Local Echo` as healthy. The local example explicitly permits plaintext HTTP because both endpoints bind to loopback; observer configuration requires HTTPS by default.
+The observer probes `/readyz` without reading its body, reads bounded kernel/filesystem counters from the local Linux environment, signs two normalized health events, and submits them to Echo. **Monitoring → Recent signals** should show `Local Echo` and `Local Host` as healthy. The local example explicitly permits plaintext HTTP because both endpoints bind to loopback; observer configuration requires HTTPS by default. Its deliberately high resource thresholds make this a data-path test rather than a workstation-capacity alarm.
 
-The seeded service expects a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens an `observer-silent` warning. Running `make local-observe` records fresh evidence and resolves that alert.
+Both seeded services expect a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens `observer-silent` warnings. Running `make local-observe` records fresh evidence and resolves those alerts.
 
 To enable real analysis, open **System → OpenAI connection**, enter the OpenAI API key and model, and save. Echo validates the credentials before encrypting the key in MariaDB. Application settings override the local deterministic mock immediately without restarting the stack.
 

@@ -12,5 +12,18 @@
       "expectedStatusMin": 200,
       "expectedStatusMax": 299
     }
+  ],
+  "systemProbes": [
+    {
+      "name": "primary-host",
+      "serviceId": "svc_replace_with_host_service_id",
+      "diskPath": "/",
+      "diskWarningPercent": 85,
+      "diskCriticalPercent": 95,
+      "memoryWarningPercent": 85,
+      "memoryCriticalPercent": 95,
+      "loadWarningPerCpu": 1,
+      "loadCriticalPerCpu": 2
+    }
   ]
 }

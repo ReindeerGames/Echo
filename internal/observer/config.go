@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -18,12 +19,13 @@ const (
 )
 
 type Config struct {
-	EchoURL           string      `json:"echoUrl"`
-	Source            string      `json:"source"`
-	Interval          Duration    `json:"interval"`
-	Timeout           Duration    `json:"timeout"`
-	AllowInsecureHTTP bool        `json:"allowInsecureHttp"`
-	Probes            []HTTPProbe `json:"probes"`
+	EchoURL           string        `json:"echoUrl"`
+	Source            string        `json:"source"`
+	Interval          Duration      `json:"interval"`
+	Timeout           Duration      `json:"timeout"`
+	AllowInsecureHTTP bool          `json:"allowInsecureHttp"`
+	Probes            []HTTPProbe   `json:"probes"`
+	SystemProbes      []SystemProbe `json:"systemProbes"`
 }
 
 type HTTPProbe struct {
@@ -33,6 +35,18 @@ type HTTPProbe struct {
 	Method      string `json:"method"`
 	ExpectedMin int    `json:"expectedStatusMin"`
 	ExpectedMax int    `json:"expectedStatusMax"`
+}
+
+type SystemProbe struct {
+	Name                  string  `json:"name"`
+	ServiceID             string  `json:"serviceId"`
+	DiskPath              string  `json:"diskPath"`
+	DiskWarningPercent    float64 `json:"diskWarningPercent"`
+	DiskCriticalPercent   float64 `json:"diskCriticalPercent"`
+	MemoryWarningPercent  float64 `json:"memoryWarningPercent"`
+	MemoryCriticalPercent float64 `json:"memoryCriticalPercent"`
+	LoadWarningPerCPU     float64 `json:"loadWarningPerCpu"`
+	LoadCriticalPerCPU    float64 `json:"loadCriticalPerCpu"`
 }
 
 type Duration struct{ time.Duration }
@@ -95,11 +109,12 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("invalid echoUrl: %w", err)
 	}
 	cfg.EchoURL = strings.TrimRight(echoURL.String(), "/")
-	if len(cfg.Probes) == 0 || len(cfg.Probes) > 100 {
+	totalProbes := len(cfg.Probes) + len(cfg.SystemProbes)
+	if totalProbes == 0 || totalProbes > 100 {
 		return Config{}, errors.New("between 1 and 100 probes are required")
 	}
-	seenNames := make(map[string]struct{}, len(cfg.Probes))
-	seenServices := make(map[string]struct{}, len(cfg.Probes))
+	seenNames := make(map[string]struct{}, totalProbes)
+	seenServices := make(map[string]struct{}, totalProbes)
 	for index := range cfg.Probes {
 		probe := &cfg.Probes[index]
 		probe.Name = strings.ToLower(strings.TrimSpace(probe.Name))
@@ -108,20 +123,9 @@ func normalizeConfig(cfg Config) (Config, error) {
 		if probe.Method == "" {
 			probe.Method = "GET"
 		}
-		if !safeName(probe.Name) || len(probe.Name) > 80 {
-			return Config{}, fmt.Errorf("probe %d has an invalid name", index+1)
+		if err := registerProbe(probe.Name, probe.ServiceID, fmt.Sprintf("HTTP probe %d", index+1), seenNames, seenServices); err != nil {
+			return Config{}, err
 		}
-		if !printableASCII(probe.ServiceID) || len(probe.ServiceID) > 28 {
-			return Config{}, fmt.Errorf("probe %q has an invalid serviceId", probe.Name)
-		}
-		if _, exists := seenNames[probe.Name]; exists {
-			return Config{}, fmt.Errorf("probe name %q is duplicated", probe.Name)
-		}
-		if _, exists := seenServices[probe.ServiceID]; exists {
-			return Config{}, fmt.Errorf("serviceId %q has more than one probe; aggregate checks behind one health endpoint", probe.ServiceID)
-		}
-		seenNames[probe.Name] = struct{}{}
-		seenServices[probe.ServiceID] = struct{}{}
 		if probe.Method != "GET" && probe.Method != "HEAD" {
 			return Config{}, fmt.Errorf("probe %q method must be GET or HEAD", probe.Name)
 		}
@@ -140,7 +144,79 @@ func normalizeConfig(cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("probe %q expected status range is invalid", probe.Name)
 		}
 	}
+	for index := range cfg.SystemProbes {
+		probe := &cfg.SystemProbes[index]
+		probe.Name = strings.ToLower(strings.TrimSpace(probe.Name))
+		probe.ServiceID = strings.TrimSpace(probe.ServiceID)
+		probe.DiskPath = strings.TrimSpace(probe.DiskPath)
+		if probe.DiskPath == "" {
+			probe.DiskPath = "/"
+		}
+		if !strings.HasPrefix(probe.DiskPath, "/") || strings.ContainsRune(probe.DiskPath, '\x00') {
+			return Config{}, fmt.Errorf("system probe %q diskPath must be an absolute path", probe.Name)
+		}
+		probe.DiskPath = filepath.Clean(probe.DiskPath)
+		if err := registerProbe(probe.Name, probe.ServiceID, fmt.Sprintf("system probe %d", index+1), seenNames, seenServices); err != nil {
+			return Config{}, err
+		}
+		applySystemDefaults(probe)
+		if err := validatePercentThresholds("disk", probe.Name, probe.DiskWarningPercent, probe.DiskCriticalPercent); err != nil {
+			return Config{}, err
+		}
+		if err := validatePercentThresholds("memory", probe.Name, probe.MemoryWarningPercent, probe.MemoryCriticalPercent); err != nil {
+			return Config{}, err
+		}
+		if probe.LoadWarningPerCPU <= 0 || probe.LoadCriticalPerCPU <= probe.LoadWarningPerCPU || probe.LoadCriticalPerCPU > 20 {
+			return Config{}, fmt.Errorf("system probe %q load thresholds must be positive, ordered, and no greater than 20 per CPU", probe.Name)
+		}
+	}
 	return cfg, nil
+}
+
+func registerProbe(name, serviceID, label string, seenNames, seenServices map[string]struct{}) error {
+	if !safeName(name) || len(name) > 80 {
+		return fmt.Errorf("%s has an invalid name", label)
+	}
+	if !printableASCII(serviceID) || len(serviceID) > 28 {
+		return fmt.Errorf("probe %q has an invalid serviceId", name)
+	}
+	if _, exists := seenNames[name]; exists {
+		return fmt.Errorf("probe name %q is duplicated", name)
+	}
+	if _, exists := seenServices[serviceID]; exists {
+		return fmt.Errorf("serviceId %q has more than one probe; each service requires one aggregate probe", serviceID)
+	}
+	seenNames[name] = struct{}{}
+	seenServices[serviceID] = struct{}{}
+	return nil
+}
+
+func applySystemDefaults(probe *SystemProbe) {
+	if probe.DiskWarningPercent == 0 {
+		probe.DiskWarningPercent = 85
+	}
+	if probe.DiskCriticalPercent == 0 {
+		probe.DiskCriticalPercent = 95
+	}
+	if probe.MemoryWarningPercent == 0 {
+		probe.MemoryWarningPercent = 85
+	}
+	if probe.MemoryCriticalPercent == 0 {
+		probe.MemoryCriticalPercent = 95
+	}
+	if probe.LoadWarningPerCPU == 0 {
+		probe.LoadWarningPerCPU = 1
+	}
+	if probe.LoadCriticalPerCPU == 0 {
+		probe.LoadCriticalPerCPU = 2
+	}
+}
+
+func validatePercentThresholds(kind, name string, warning, critical float64) error {
+	if warning <= 0 || warning >= 100 || critical <= warning || critical > 100 {
+		return fmt.Errorf("system probe %q %s thresholds must be positive percentages with warning below critical", name, kind)
+	}
+	return nil
 }
 
 func validateURL(raw string, allowHTTP bool) (*url.URL, error) {

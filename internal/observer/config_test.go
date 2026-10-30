@@ -50,7 +50,7 @@ func TestConfigRejectsDuplicateServiceAndCredentials(t *testing.T) {
 			{Name: "two", ServiceID: "svc_1", URL: "https://two.test/health"},
 		},
 	})
-	if err == nil || !strings.Contains(err.Error(), "more than one probe") {
+	if err == nil || !strings.Contains(err.Error(), "one aggregate probe") {
 		t.Fatalf("duplicate service probe was not rejected: %v", err)
 	}
 	_, err = normalizeConfig(Config{
@@ -59,5 +59,38 @@ func TestConfigRejectsDuplicateServiceAndCredentials(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "query strings") {
 		t.Fatalf("URL query string was not rejected: %v", err)
+	}
+}
+
+func TestSystemProbeDefaultsAndCrossTypeUniqueness(t *testing.T) {
+	cfg, err := normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		SystemProbes: []SystemProbe{{Name: "Host", ServiceID: "svc_host"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := cfg.SystemProbes[0]
+	if probe.Name != "host" || probe.DiskPath != "/" || probe.DiskWarningPercent != 85 || probe.DiskCriticalPercent != 95 || probe.MemoryWarningPercent != 85 || probe.LoadCriticalPerCPU != 2 {
+		t.Fatalf("unexpected system defaults: %#v", probe)
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		Probes:       []HTTPProbe{{Name: "web", ServiceID: "svc_same", URL: "https://web.test/health"}},
+		SystemProbes: []SystemProbe{{Name: "host", ServiceID: "svc_same"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "one aggregate probe") {
+		t.Fatalf("cross-type duplicate service was not rejected: %v", err)
+	}
+}
+
+func TestSystemProbeRejectsUnsafeThresholdsAndRelativePath(t *testing.T) {
+	_, err := normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", SystemProbes: []SystemProbe{{Name: "host", ServiceID: "svc_host", DiskPath: "relative"}}})
+	if err == nil || !strings.Contains(err.Error(), "absolute path") {
+		t.Fatalf("relative disk path was not rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", SystemProbes: []SystemProbe{{Name: "host", ServiceID: "svc_host", DiskWarningPercent: 95, DiskCriticalPercent: 90}}})
+	if err == nil || !strings.Contains(err.Error(), "disk thresholds") {
+		t.Fatalf("inverted disk thresholds were not rejected: %v", err)
 	}
 }

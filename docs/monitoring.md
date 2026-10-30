@@ -2,7 +2,7 @@
 
 Echo accepts normalized health signals from small, read-only observers. Observers do not receive GitHub, WhatsApp, database, or deployment credentials and do not expose a Docker socket to Echo.
 
-Echo includes `echo-observer`, a small health-endpoint probe and signed event forwarder. Build it with `make build`; its only secret is the monitor webhook secret supplied as `ECHO_OBSERVER_WEBHOOK_SECRET`.
+Echo includes `echo-observer`, a small health-endpoint and Linux host-resource observer with a signed event forwarder. Build it with `make build`; its only secret is the monitor webhook secret supplied as `ECHO_OBSERVER_WEBHOOK_SECRET`.
 
 ## Configure the catalogue
 
@@ -52,7 +52,13 @@ Echo queues a private WhatsApp message to the configured owner when an alert ope
 
 Run observers beside workloads with only the narrow read permissions required to collect health data. Prefer HTTP health endpoints and metrics exporters. If Docker metadata is required, use a constrained socket proxy or a dedicated observer rather than mounting the engine socket into Echo.
 
-The bundled observer accepts a JSON configuration such as [`deploy/observer/echo-observer.example.json`](../deploy/observer/echo-observer.example.json). It permits only `GET` and `HEAD`, rejects URL credentials and query strings, refuses redirects, ignores environment HTTP proxies, requires HTTPS with TLS 1.2 or newer unless `allowInsecureHttp` is explicitly enabled, never records response bodies, and retries the same signed event ID after delivery failures. Each service may have one probe; expose an aggregate readiness endpoint when a service depends on several internal checks.
+The bundled observer accepts a JSON configuration such as [`deploy/observer/echo-observer.example.json`](../deploy/observer/echo-observer.example.json). HTTP probes permit only `GET` and `HEAD`, reject URL credentials and query strings, refuse redirects, ignore environment HTTP proxies, require HTTPS with TLS 1.2 or newer unless `allowInsecureHttp` is explicitly enabled, never record response bodies, and retry the same signed event ID after delivery failures.
+
+On Linux, `systemProbes` read only `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`, and filesystem capacity counters for one absolute `diskPath`. They report disk and memory utilization, one/five/fifteen-minute load, load per logical CPU, and uptime—never process arguments, environment variables, file contents, logs, usernames, or network connections. Warning and critical thresholds are explicit in the configuration; defaults are 85/95 percent for disk and memory and 1/2 load per CPU.
+
+Run a system probe as a host service when host metrics are intended. If it runs inside a container, its kernel and filesystem namespace determine what it measures; do not assume containerized readings represent the host. The observer requires no root privileges, shell, Docker socket, or SSH credential.
+
+Each Echo service may have one aggregate probe across both HTTP and system probe classes. Use a separate service-catalogue entry for the host and each application health endpoint. Expose an aggregate readiness endpoint when one application depends on several internal checks.
 
 Run continuously:
 
@@ -62,3 +68,5 @@ ECHO_OBSERVER_WEBHOOK_SECRET='use-the-same-32-character-or-longer-secret' \
 ```
 
 Use `-once` for installation smoke tests. Create the matching services in Echo before starting the observer. Do not put the webhook secret or health-endpoint credentials in the JSON file; authenticated health endpoints are intentionally not supported by the bundled observer.
+
+For a Linux host installation, [`deploy/observer/echo-observer.service`](../deploy/observer/echo-observer.service) provides a hardened systemd unit. Create an unprivileged `echo-observer` system account, install the binary and JSON configuration as root-owned read-only files, and put only `ECHO_OBSERVER_WEBHOOK_SECRET=...` in `/etc/echo-observer.env` with mode `0600`. Validate with `-once` before enabling the unit. Installation is an explicit deployment step; Echo never installs observers or changes a server on its own.

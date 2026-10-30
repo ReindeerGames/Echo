@@ -1,0 +1,37 @@
+[Unit]
+Description=Echo read-only operations observer
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=echo-observer
+Group=echo-observer
+EnvironmentFile=/etc/echo-observer.env
+ExecStart=/usr/local/bin/echo-observer -config /etc/echo-observer.json
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateDevices=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
