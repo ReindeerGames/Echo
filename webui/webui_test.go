@@ -75,6 +75,18 @@ func TestWhatsAppDeliveryFailuresAreVisible(t *testing.T) {
 	}
 }
 
+func TestMonitoringSupportsServiceEvidenceAndPolicyEditing(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"data-service=", `tabindex="0" role="button"`, "SERVICE EVIDENCE", "Observer freshness", "Edit service policy", "data-edit-service", "serviceId=", "limit=20&includeDetails=false", "limit=10"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("service evidence workflow is missing %q", expected)
+		}
+	}
+}
+
 func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

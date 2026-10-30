@@ -98,3 +98,20 @@ func TestServiceRejectsUnsafeHeartbeatTimeout(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestMonitorEventLimitIsBounded(t *testing.T) {
+	if value, err := monitorEventLimit(""); err != nil || value != 50 {
+		t.Fatalf("unexpected default limit value=%d err=%v", value, err)
+	}
+	if value, err := monitorEventLimit("10"); err != nil || value != 10 {
+		t.Fatalf("unexpected explicit limit value=%d err=%v", value, err)
+	}
+	if value, err := monitorEventLimit(" 10 "); err != nil || value != 10 {
+		t.Fatalf("unexpected trimmed limit value=%d err=%v", value, err)
+	}
+	for _, raw := range []string{"0", "201", "many"} {
+		if _, err := monitorEventLimit(raw); err == nil {
+			t.Fatalf("invalid limit %q was accepted", raw)
+		}
+	}
+}

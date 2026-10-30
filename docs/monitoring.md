@@ -48,6 +48,8 @@ The body is limited to one MiB. Unknown and disabled services are rejected. Deta
 
 Echo queues a private WhatsApp message to the configured owner when an alert opens, reopens, or resolves. The alert transition and durable WhatsApp outbox item commit in the same MariaDB transaction, so a crash cannot preserve one while losing the other. Repeated failing observations update `lastSeenAt` without generating noise. All accepted events and alert state are visible in **Monitoring**.
 
+Select any service, alert, or recent signal in **Monitoring** to open the service evidence view. It shows heartbeat freshness, open-alert timing and fingerprints, and the ten most recent normalized evidence payloads. **Edit service policy** updates the existing catalogue entry without replacing its identity, so observer service IDs and alert history remain stable. Disabling a service stops new intake and resolves only its observer-silent policy alert; historical workload alerts and signals remain available.
+
 ## Observer boundary
 
 Run observers beside workloads with only the narrow read permissions required to collect health data. Prefer HTTP health endpoints and metrics exporters. If Docker metadata is required, use a constrained socket proxy or a dedicated observer rather than mounting the engine socket into Echo.

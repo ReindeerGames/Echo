@@ -179,6 +179,42 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	}
 }
 
+func TestMariaDBServiceCreateAndEditAreUnambiguous(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "services", Name: "Services", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "web", Name: "Web", Kind: "application", Criticality: "medium", Enabled: true, HeartbeatTimeoutSeconds: 120, Metadata: json.RawMessage(`{"owner":"ops"}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "web", Name: "Accidental overwrite", Enabled: true, Metadata: json.RawMessage(`{}`)}); err == nil {
+		t.Fatal("duplicate service creation unexpectedly succeeded")
+	}
+	unchanged, err := st.GetService(ctx, service.ID)
+	if err != nil || unchanged.Name != "Web" || unchanged.HeartbeatTimeoutSeconds != 120 {
+		t.Fatalf("duplicate creation mutated existing service: service=%#v err=%v", unchanged, err)
+	}
+	service.Name = "Public Web"
+	service.Criticality = "high"
+	service.HeartbeatTimeoutSeconds = 180
+	updated, err := st.SaveService(ctx, service)
+	if err != nil || updated.ID != service.ID || updated.Name != "Public Web" || updated.Criticality != "high" || updated.HeartbeatTimeoutSeconds != 180 {
+		t.Fatalf("service edit failed: service=%#v err=%v", updated, err)
+	}
+}
+
 func TestMariaDBHeartbeatWatchdogLifecycle(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {

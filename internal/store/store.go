@@ -381,9 +381,6 @@ func (s *Store) ListServices(ctx context.Context, projectID string) ([]domain.Se
 }
 
 func (s *Store) SaveService(ctx context.Context, item domain.Service) (domain.Service, error) {
-	if item.ID == "" {
-		item.ID = id.New("svc")
-	}
 	if item.Kind == "" {
 		item.Kind = "application"
 	}
@@ -393,7 +390,13 @@ func (s *Store) SaveService(ctx context.Context, item domain.Service) (domain.Se
 	if len(item.Metadata) == 0 {
 		item.Metadata = json.RawMessage(`{}`)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_services(id,project_id,service_key,name,service_kind,criticality,description,enabled,heartbeat_timeout_seconds,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),service_key=VALUES(service_key),name=VALUES(name),service_kind=VALUES(service_kind),criticality=VALUES(criticality),description=VALUES(description),enabled=VALUES(enabled),heartbeat_timeout_seconds=VALUES(heartbeat_timeout_seconds),metadata_json=VALUES(metadata_json)`, item.ID, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.HeartbeatTimeoutSeconds, item.Metadata)
+	var err error
+	if item.ID == "" {
+		item.ID = id.New("svc")
+		_, err = s.db.ExecContext(ctx, `INSERT INTO echo_services(id,project_id,service_key,name,service_kind,criticality,description,enabled,heartbeat_timeout_seconds,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.HeartbeatTimeoutSeconds, item.Metadata)
+	} else {
+		_, err = s.db.ExecContext(ctx, `UPDATE echo_services SET project_id=?,service_key=?,name=?,service_kind=?,criticality=?,description=?,enabled=?,heartbeat_timeout_seconds=?,metadata_json=? WHERE id=?`, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.HeartbeatTimeoutSeconds, item.Metadata, item.ID)
+	}
 	if err != nil {
 		return domain.Service{}, err
 	}

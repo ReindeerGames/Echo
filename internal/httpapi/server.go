@@ -11,6 +11,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -417,8 +418,30 @@ func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) monitorEvents(w http.ResponseWriter, r *http.Request) {
-	items, err := s.store.ListMonitorEvents(r.Context(), r.URL.Query().Get("serviceId"), 200)
+	limit, err := monitorEventLimit(r.URL.Query().Get("limit"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_limit", err.Error())
+		return
+	}
+	items, err := s.store.ListMonitorEvents(r.Context(), r.URL.Query().Get("serviceId"), limit)
+	if r.URL.Query().Get("includeDetails") == "false" {
+		for index := range items {
+			items[index].Details = nil
+		}
+	}
 	respond(w, items, err)
+}
+
+func monitorEventLimit(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 50, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 1 || value > 200 {
+		return 0, errors.New("limit must be between 1 and 200")
+	}
+	return value, nil
 }
 
 func (s *Server) serviceAlerts(w http.ResponseWriter, r *http.Request) {
