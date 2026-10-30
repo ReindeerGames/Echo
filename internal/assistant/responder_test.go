@@ -26,6 +26,7 @@ type fakeReader struct {
 	alerts      []domain.ServiceAlert
 	events      []domain.MonitorEvent
 	jobs        []domain.Job
+	deliveries  []domain.OutboundDelivery
 	deployments []domain.Deployment
 	changes     []domain.ChangeSet
 	incident    domain.Incident
@@ -169,6 +170,9 @@ func (f fakeReader) ListLatestMonitorEvents(context.Context, string) ([]domain.M
 	return f.events, nil
 }
 func (f fakeReader) ListJobs(context.Context, string, int) ([]domain.Job, error) { return f.jobs, nil }
+func (f fakeReader) ListOutboundDeliveries(context.Context, string, int) ([]domain.OutboundDelivery, error) {
+	return f.deliveries, nil
+}
 func (f fakeReader) ListDeployments(context.Context, string) ([]domain.Deployment, error) {
 	return f.deployments, nil
 }
@@ -220,20 +224,24 @@ func (f fakeReader) ListIncidentMessages(context.Context, string, int) ([]domain
 
 func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 	tests := map[string]string{
-		"anything wrong?":       "alerts",
-		"good morning":          "brief",
-		"github status":         "repository_overview",
-		"github inventory":      "unknown",
-		"what isn't monitored?": "coverage",
-		"what happened?":        "activity",
-		"how are things":        "status",
-		"service nudgie-web":    "service",
-		"what can you do?":      "help",
-		"list projects":         "projects",
-		"project invoices":      "project",
-		"incident inc_123456":   "incident",
-		"failed jobs":           "jobs",
-		"repo invoices":         "repository",
+		"anything wrong?":                     "alerts",
+		"good morning":                        "brief",
+		"github status":                       "repository_overview",
+		"github inventory":                    "unknown",
+		"what isn't monitored?":               "coverage",
+		"what happened?":                      "activity",
+		"how are things":                      "status",
+		"service nudgie-web":                  "service",
+		"what can you do?":                    "help",
+		"list projects":                       "projects",
+		"project invoices":                    "project",
+		"incident inc_123456":                 "incident",
+		"failed jobs":                         "jobs",
+		"why didn't WhatsApp send?":           "deliveries",
+		"why didn't the WhatsApp alert send?": "deliveries",
+		"WhatsApp queue":                      "deliveries",
+		"outbox":                              "deliveries",
+		"repo invoices":                       "repository",
 		"repo invoices how does authentication work": "unknown",
 		"what is deployed?":                          "deployments",
 		"open incidents":                             "incidents",
@@ -523,6 +531,24 @@ func TestWorkQueueAnswersDoNotExposeRawErrorsOrPayloads(t *testing.T) {
 	answer, intent, err := responder.Answer(context.Background(), "jobs")
 	if err != nil || intent != "jobs" || !containsAll(answer, "DEAD", "prepare patch", "inc_123", "authorization_failed") || strings.Contains(answer, "must-not-leak") {
 		t.Fatalf("unexpected deterministic jobs answer intent=%s err=%v body=%s", intent, err, answer)
+	}
+}
+
+func TestDeliveryQueueAnswersExposeMechanicsWithoutMessageData(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{deliveries: []domain.OutboundDelivery{{ChannelType: "direct", Status: "failed", Attempts: 2, MaxAttempts: 5, AvailableAt: now.Add(time.Minute), FailureCategory: "authorization_failed", CreatedAt: now.Add(-time.Minute)}}}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	output, err := responder.executeTool(context.Background(), "get_delivery_queue", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(output, `"channel_type":"direct"`, `"status":"failed"`, `"failure_category":"authorization_failed"`, `"privacy":"message content, destinations, WhatsApp IDs, and raw errors omitted"`) {
+		t.Fatalf("unsafe delivery queue output: %s", output)
+	}
+	answer, intent, err := responder.Answer(context.Background(), "why didn't WhatsApp send?")
+	if err != nil || intent != "deliveries" || !containsAll(answer, "WhatsApp delivery queue (1 active)", "RETRYING", "direct", "attempt 2/5", "next attempt in 1m0s", "authorization_failed", "message content and destinations are omitted") {
+		t.Fatalf("unexpected delivery answer intent=%s err=%v body=%s", intent, err, answer)
 	}
 }
 

@@ -99,6 +99,21 @@ func TestWhatsAppDeliveryFailuresAreVisible(t *testing.T) {
 	}
 }
 
+func TestWhatsAppDeliveryDiagnosticsArePrivacySafeAndReadOnly(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/whatsapp/outbox", "deliveryTable", "WhatsApp delivery queue", "Safe failure category", "Message bodies and destinations are omitted", "dead messages are never retried blindly"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("WhatsApp delivery diagnostics are missing %q", expected)
+		}
+	}
+	if strings.Contains(body, "data-retry-delivery") {
+		t.Fatal("WhatsApp diagnostics must not expose a blind retry control")
+	}
+}
+
 func TestWorkerQueueFailuresAreVisibleWithoutRetryControl(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

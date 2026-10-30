@@ -43,3 +43,21 @@ func TestJobContextAndErrorCategoriesAreSafe(t *testing.T) {
 		t.Fatalf("unexpected error category %q", got)
 	}
 }
+
+func TestOutboundDeliveryErrorCategoriesAreSafe(t *testing.T) {
+	tests := map[string]string{
+		"delivery lease expired after final attempt": "lease_expired",
+		"context deadline exceeded":                  "timeout",
+		"server returned status 429":                 "rate_limited",
+		"WhatsApp device logged out":                 "session_invalid",
+		"dial tcp: connection refused":               "gateway_unavailable",
+		"request status 403 bearer must-not-leak":    "authorization_failed",
+		"invalid JID format":                         "invalid_destination",
+		"opaque secret must-not-leak":                "delivery_failed",
+	}
+	for input, expected := range tests {
+		if got := OutboundDeliveryErrorCategory(input); got != expected {
+			t.Errorf("OutboundDeliveryErrorCategory(%q) = %q, want %q", input, got, expected)
+		}
+	}
+}

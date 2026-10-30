@@ -380,6 +380,18 @@ type OutboundMessage struct {
 	CreatedAt time.Time
 }
 
+type OutboundDelivery struct {
+	ChannelType     string     `json:"channelType"`
+	Status          string     `json:"status"`
+	Attempts        int        `json:"attempts"`
+	MaxAttempts     int        `json:"maxAttempts"`
+	AvailableAt     time.Time  `json:"availableAt"`
+	LockedUntil     *time.Time `json:"lockedUntil,omitempty"`
+	FailureCategory string     `json:"failureCategory,omitempty"`
+	CreatedAt       time.Time  `json:"createdAt"`
+	SentAt          *time.Time `json:"sentAt,omitempty"`
+}
+
 type Job struct {
 	ID          string          `json:"id"`
 	Type        string          `json:"type"`

@@ -45,3 +45,25 @@ func JobErrorCategory(value string) string {
 		return "execution_failed"
 	}
 }
+
+func OutboundDeliveryErrorCategory(value string) string {
+	value = strings.ToLower(value)
+	switch {
+	case strings.Contains(value, "lease expired"):
+		return "lease_expired"
+	case strings.Contains(value, "deadline"), strings.Contains(value, "timeout"), strings.Contains(value, "timed out"):
+		return "timeout"
+	case strings.Contains(value, "rate limit"), strings.Contains(value, "too many requests"), strings.Contains(value, "status 429"):
+		return "rate_limited"
+	case strings.Contains(value, "logged out"), strings.Contains(value, "not logged in"), strings.Contains(value, "session expired"), strings.Contains(value, "device removed"):
+		return "session_invalid"
+	case strings.Contains(value, "not connected"), strings.Contains(value, "disconnected"), strings.Contains(value, "connection refused"), strings.Contains(value, "connection reset"), strings.Contains(value, "network is unreachable"), strings.Contains(value, "no route to host"):
+		return "gateway_unavailable"
+	case strings.Contains(value, "unauthorized"), strings.Contains(value, "forbidden"), strings.Contains(value, "status 401"), strings.Contains(value, "status 403"):
+		return "authorization_failed"
+	case strings.Contains(value, "invalid jid"), strings.Contains(value, "invalid recipient"), strings.Contains(value, "invalid destination"):
+		return "invalid_destination"
+	default:
+		return "delivery_failed"
+	}
+}

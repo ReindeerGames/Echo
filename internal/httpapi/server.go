@@ -116,6 +116,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("GET /api/v1/assistant/conversations", s.conversations)
 	protected.HandleFunc("GET /api/v1/assistant/conversations/{id}", s.conversation)
 	protected.HandleFunc("GET /api/v1/jobs", s.jobs)
+	protected.HandleFunc("GET /api/v1/whatsapp/outbox", s.outboundDeliveries)
 	protected.HandleFunc("GET /api/v1/deployments", s.deployments)
 	protected.HandleFunc("GET /api/v1/incidents", s.incidents)
 	protected.HandleFunc("GET /api/v1/incidents/{id}", s.incident)
@@ -555,6 +556,16 @@ func (s *Server) jobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, err := s.store.ListJobs(r.Context(), status, 100)
+	respond(w, items, err)
+}
+
+func (s *Server) outboundDeliveries(w http.ResponseWriter, r *http.Request) {
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status != "" && !oneOf(status, "queued", "sending", "failed", "dead", "sent") {
+		writeError(w, http.StatusBadRequest, "invalid_status", "status must be queued, sending, failed, dead, or sent")
+		return
+	}
+	items, err := s.store.ListOutboundDeliveries(r.Context(), status, 100)
 	respond(w, items, err)
 }
 

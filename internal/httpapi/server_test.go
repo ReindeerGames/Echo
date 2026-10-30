@@ -206,3 +206,13 @@ func TestJobsRejectUnknownStatusBeforeStoreAccess(t *testing.T) {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
+
+func TestOutboundDeliveriesRejectUnknownStatusBeforeStoreAccess(t *testing.T) {
+	server := &Server{}
+	request := httptest.NewRequest("GET", "/api/v1/whatsapp/outbox?status=unknown", nil)
+	response := httptest.NewRecorder()
+	server.outboundDeliveries(response, request)
+	if response.Code != 400 || !strings.Contains(response.Body.String(), "invalid_status") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}

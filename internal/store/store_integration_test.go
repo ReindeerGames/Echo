@@ -846,6 +846,21 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	if err := st.db.QueryRowContext(ctx, `SELECT status,last_error FROM echo_whatsapp_outbox WHERE id=?`, first.ID).Scan(&outboxStatus, &outboxError); err != nil || outboxStatus != "dead" || !strings.Contains(outboxError, "lease expired") {
 		t.Fatalf("final outbox lease not finalized: status=%q error=%q err=%v", outboxStatus, outboxError, err)
 	}
+	deliveries, err := st.ListOutboundDeliveries(ctx, "dead", 10)
+	if err != nil || len(deliveries) != 1 {
+		t.Fatalf("list dead outbound deliveries: items=%#v err=%v", deliveries, err)
+	}
+	delivery := deliveries[0]
+	if delivery.ChannelType != "direct" || delivery.Status != "dead" || delivery.Attempts != 5 || delivery.MaxAttempts != 5 || delivery.FailureCategory != "lease_expired" {
+		t.Fatalf("unsafe or incomplete delivery diagnostic: %#v", delivery)
+	}
+	safeJSON, err := json.Marshal(deliveries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(safeJSON), "owner@s.whatsapp.net") || strings.Contains(string(safeJSON), "lease recovery") || strings.Contains(string(safeJSON), "current-message-id") || strings.Contains(string(safeJSON), outboxError) {
+		t.Fatalf("delivery diagnostic leaked private or raw data: %s", safeJSON)
+	}
 
 	jobID := id.New("job")
 	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json,max_attempts) VALUES(?,?,?,?)`, jobID, "test", `{"incidentId":"inc_lease"}`, 3); err != nil {
