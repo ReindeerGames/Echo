@@ -71,7 +71,7 @@ func run() error {
 	}
 	githubClient := githubapp.New(vault, cfg.GitHub.APIBaseURL, cfg.Worker.MaxRepoBytes)
 	aiClient := ai.NewManaged(vault, cfg.AI.Enabled, cfg.AI.BaseURL, cfg.AI.APIKey, cfg.AI.Model)
-	workflows := workflow.New(st, policies, owners, aiClient, state, expectedComponents, cfg.Assistant.HistoryLimit, cfg.Security.ApprovalTTL)
+	workflows := workflow.New(st, policies, owners, aiClient, githubClient, state, expectedComponents, cfg.Assistant.HistoryLimit, cfg.Security.ApprovalTTL)
 
 	gateway := whatsapp.New(st, workflows, state, cfg.Database.WhatsAppDSN)
 	server := httpapi.New(cfg, st, workflows, owners, state, githubClient, aiClient, gateway)

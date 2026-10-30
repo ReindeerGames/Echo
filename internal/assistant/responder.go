@@ -13,6 +13,7 @@ import (
 
 	"github.com/ReindeerGames/echo/internal/ai"
 	"github.com/ReindeerGames/echo/internal/domain"
+	"github.com/ReindeerGames/echo/internal/githubapp"
 	"github.com/ReindeerGames/echo/internal/store"
 )
 
@@ -33,11 +34,16 @@ type Responder struct {
 	model              ToolModel
 	runtime            RuntimeHealth
 	expectedComponents []string
+	github             RepositoryInspector
 	now                func() time.Time
 }
 
 type RuntimeHealth interface {
 	ComponentReadiness([]string) (bool, map[string]string)
+}
+
+type RepositoryInspector interface {
+	InspectRepository(context.Context, domain.Repository) (githubapp.RepositoryStatus, error)
 }
 
 type ToolModel interface {
@@ -53,9 +59,14 @@ func New(reader Reader, models ...ToolModel) *Responder {
 }
 
 func NewWithRuntime(reader Reader, runtime RuntimeHealth, expected []string, models ...ToolModel) *Responder {
+	return NewOperator(reader, runtime, expected, nil, models...)
+}
+
+func NewOperator(reader Reader, runtime RuntimeHealth, expected []string, github RepositoryInspector, models ...ToolModel) *Responder {
 	responder := New(reader, models...)
 	responder.runtime = runtime
 	responder.expectedComponents = append([]string(nil), expected...)
+	responder.github = github
 	return responder
 }
 
@@ -87,6 +98,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_service", "Get one service with its open alerts and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
 		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
+		ai.FunctionTool("get_repository_status", "Inspect the configured repository default-branch head and its ten most recent GitHub Actions runs. This tool is read-only.", schema(map[string]any{"repository": map[string]string{"type": "string", "description": "Configured repository ID, name, or owner/name."}}, []string{"repository"})),
 		ai.FunctionTool("get_incident", "Get an incident and its latest evidence-backed diagnosis by exact incident ID.", schema(map[string]any{"incident_id": map[string]string{"type": "string"}}, []string{"incident_id"})),
 	}
 }
@@ -273,6 +285,37 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			views = append(views, map[string]any{"key": project.Key, "name": project.Name, "description": truncateRunes(project.Description, 500), "enabled": project.Enabled, "repositories": repos, "repository_count": repositoryCount, "repositories_truncated": repositoryCount > len(repos)})
 		}
 		return marshal(map[string]any{"projects": views, "count": len(projects), "truncated": len(projects) > len(views)})
+	case "get_repository_status":
+		var arguments struct {
+			Repository string `json:"repository"`
+		}
+		if err := decodeArguments(raw, &arguments); err != nil {
+			return "", err
+		}
+		repository, choices, err := r.resolveRepository(ctx, arguments.Repository)
+		if err != nil {
+			return "", err
+		}
+		if len(choices) > 0 {
+			return marshal(map[string]any{"found": false, "ambiguous": true, "choices": choices})
+		}
+		if repository.ID == "" {
+			return marshal(map[string]any{"found": false})
+		}
+		if r.github == nil {
+			return marshal(map[string]any{"found": true, "available": false, "reason": "GitHub inspection is unavailable"})
+		}
+		inspectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		status, err := r.github.InspectRepository(inspectCtx, repository)
+		if err != nil {
+			return "", err
+		}
+		runs := make([]map[string]any, 0, len(status.WorkflowRuns))
+		for _, run := range status.WorkflowRuns {
+			runs = append(runs, map[string]any{"name": truncateRunes(run.Name, 120), "event": truncateRunes(run.Event, 40), "status": truncateRunes(run.Status, 40), "conclusion": truncateRunes(run.Conclusion, 40), "head_sha": truncateRunes(run.HeadSHA, 64), "created_at": run.CreatedAt, "updated_at": run.UpdatedAt, "url": truncateRunes(run.URL, 500)})
+		}
+		return marshal(map[string]any{"found": true, "available": true, "repository": status.Repository, "default_branch": status.DefaultBranch, "head_sha": truncateRunes(status.HeadSHA, 64), "head_committed_at": status.HeadCommittedAt, "workflow_runs": runs})
 	case "get_work_queue":
 		jobs, err := r.reader.ListJobs(ctx, "", 100)
 		if err != nil {
@@ -513,13 +556,15 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.jobs(ctx)
 	case "projects":
 		answer, err = r.projects(ctx)
+	case "repository":
+		answer, err = r.repository(ctx, argument)
 	case "service":
 		answer, err = r.service(ctx, argument)
 	case "incident":
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “projects”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “projects”, “repo <name>”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -533,6 +578,11 @@ func classify(text string) (string, string) {
 	for _, prefix := range []string{"service ", "check service ", "check app ", "app ", "application "} {
 		if strings.HasPrefix(value, prefix) {
 			return "service", strings.TrimSpace(strings.TrimPrefix(value, prefix))
+		}
+	}
+	for _, prefix := range []string{"repo ", "repository ", "github "} {
+		if strings.HasPrefix(value, prefix) {
+			return "repository", strings.TrimSpace(strings.TrimPrefix(value, prefix))
 		}
 	}
 	if strings.HasPrefix(value, "incident ") {
@@ -631,6 +681,69 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 		lines = append(lines, fmt.Sprintf("• %s · %s\n  %s", strings.ToUpper(alert.Severity), alert.ServiceName, alert.Summary))
 	}
 	return fmt.Sprintf("Open operational alerts (%d)\n\n%s", len(alerts)+len(unreadyComponents)+map[bool]int{true: 1}[dashboard.WorkerQueueStalled], strings.Join(lines, "\n")), nil
+}
+
+func (r *Responder) repository(ctx context.Context, query string) (string, error) {
+	repository, choices, err := r.resolveRepository(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	if len(choices) > 0 {
+		return "That repository name is ambiguous. Try one of: " + strings.Join(choices, ", "), nil
+	}
+	if repository.ID == "" {
+		return "I could not find an enabled configured repository matching that name.", nil
+	}
+	if r.github == nil {
+		return "GitHub inspection is unavailable. Configure the GitHub connection in Echo's control plane.", nil
+	}
+	inspectCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	status, err := r.github.InspectRepository(inspectCtx, repository)
+	if err != nil {
+		return "", err
+	}
+	head := truncateRunes(status.HeadSHA, 8)
+	lines := []string{fmt.Sprintf("Default branch: %s · head %s · committed %s ago", status.DefaultBranch, head, formatAge(r.now(), status.HeadCommittedAt))}
+	if len(status.WorkflowRuns) == 0 {
+		lines = append(lines, "Recent workflows: none returned by GitHub")
+	} else {
+		lines = append(lines, "Recent workflows:")
+		for index, run := range status.WorkflowRuns {
+			if index == 5 {
+				lines = append(lines, fmt.Sprintf("…and %d more.", len(status.WorkflowRuns)-index))
+				break
+			}
+			outcome := run.Conclusion
+			if outcome == "" {
+				outcome = run.Status
+			}
+			lines = append(lines, fmt.Sprintf("• %s · %s · %s · updated %s ago", strings.ToUpper(truncateRunes(outcome, 40)), truncateRunes(run.Name, 120), truncateRunes(run.Event, 40), formatAge(r.now(), run.UpdatedAt)))
+		}
+	}
+	return fmt.Sprintf("GitHub repository %s\n\n%s", status.Repository, strings.Join(lines, "\n")), nil
+}
+
+func (r *Responder) resolveRepository(ctx context.Context, query string) (domain.Repository, []string, error) {
+	repositories, err := r.reader.ListRepositories(ctx, "")
+	if err != nil {
+		return domain.Repository{}, nil, err
+	}
+	matches := matchRepositories(repositories, query)
+	if len(matches) == 0 {
+		return domain.Repository{}, nil, nil
+	}
+	if len(matches) == 1 {
+		return matches[0], nil, nil
+	}
+	choices := make([]string, 0, min(len(matches), 10))
+	for index, repository := range matches {
+		if index == 10 {
+			break
+		}
+		choices = append(choices, repository.Owner+"/"+repository.Name)
+	}
+	return domain.Repository{}, choices, nil
 }
 
 func sortedUnreadyComponents(components map[string]string) []string {
@@ -885,8 +998,33 @@ func matchServices(services []domain.Service, query string) []domain.Service {
 	return partial
 }
 
+func matchRepositories(repositories []domain.Repository, query string) []domain.Repository {
+	query = strings.ToLower(strings.TrimSpace(query))
+	var exact, partial []domain.Repository
+	for _, repository := range repositories {
+		if !repository.Enabled {
+			continue
+		}
+		id := strings.ToLower(repository.ID)
+		name := strings.ToLower(repository.Name)
+		fullName := strings.ToLower(repository.Owner + "/" + repository.Name)
+		if query == id || query == name || query == fullName {
+			exact = append(exact, repository)
+		} else if query != "" && (strings.Contains(name, query) || strings.Contains(fullName, query)) {
+			partial = append(partial, repository)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	sort.Slice(partial, func(i, j int) bool {
+		return partial[i].Owner+"/"+partial[i].Name < partial[j].Owner+"/"+partial[j].Name
+	})
+	return partial
+}
+
 func helpText() string {
-	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• projects — project and repository map\n• incident <id> — incident and diagnosis\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• projects — project and repository map\n• repo <name> — live default-branch and GitHub Actions status\n• incident <id> — incident and diagnosis\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

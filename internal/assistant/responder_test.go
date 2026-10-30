@@ -10,6 +10,7 @@ import (
 
 	"github.com/ReindeerGames/echo/internal/ai"
 	"github.com/ReindeerGames/echo/internal/domain"
+	"github.com/ReindeerGames/echo/internal/githubapp"
 	runtimestate "github.com/ReindeerGames/echo/internal/runtime"
 	"github.com/ReindeerGames/echo/internal/store"
 )
@@ -25,6 +26,17 @@ type fakeReader struct {
 }
 
 type fakeToolModel struct{}
+
+type fakeRepositoryInspector struct {
+	status githubapp.RepositoryStatus
+	repo   domain.Repository
+	err    error
+}
+
+func (f *fakeRepositoryInspector) InspectRepository(_ context.Context, repo domain.Repository) (githubapp.RepositoryStatus, error) {
+	f.repo = repo
+	return f.status, f.err
+}
 
 func (fakeToolModel) RespondWithTools(ctx context.Context, instructions string, history []ai.ConversationMessage, tools []ai.ToolDefinition, execute ai.ToolExecutor) (string, []ai.ToolExecution, error) {
 	if !strings.Contains(instructions, "no shell") || len(history) == 0 {
@@ -77,6 +89,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"list projects":       "projects",
 		"incident inc_123456": "incident",
 		"failed jobs":         "jobs",
+		"repo invoices":       "repository",
 	}
 	for input, expected := range tests {
 		got, _ := classify(input)
@@ -240,6 +253,44 @@ func TestRuntimeDegradationIsVisibleToDeterministicAndAIToolAnswers(t *testing.T
 	alertOutput, err := responder.executeTool(context.Background(), "get_open_alerts", json.RawMessage(`{}`))
 	if err != nil || !containsAll(alertOutput, `"fingerprint":"runtime-component-worker"`, `"summary":"worker is error"`) || strings.Contains(alertOutput, "raw detail") {
 		t.Fatalf("runtime tool alert missing or unsafe: output=%s err=%v", alertOutput, err)
+	}
+}
+
+func TestRepositoryStatusUsesOnlyConfiguredEnabledRepository(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{repos: []domain.Repository{
+		{ID: "repo_enabled", Owner: "ReindeerGames", Name: "invoices", DefaultBranch: "main", Enabled: true},
+		{ID: "repo_disabled", Owner: "Other", Name: "invoices", DefaultBranch: "main", Enabled: false},
+	}}
+	inspector := &fakeRepositoryInspector{status: githubapp.RepositoryStatus{
+		Repository: "ReindeerGames/invoices", DefaultBranch: "main", HeadSHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", HeadCommittedAt: now.Add(-time.Hour),
+		WorkflowRuns: []githubapp.RepositoryWorkflowRun{{Name: "Build and deploy", Event: "push", Status: "completed", Conclusion: "success", HeadSHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", UpdatedAt: now.Add(-time.Minute)}},
+	}}
+	responder := NewOperator(reader, nil, nil, inspector)
+	responder.now = func() time.Time { return now }
+
+	answer, intent, err := responder.Answer(context.Background(), "repo invoices")
+	if err != nil || intent != "repository" || !containsAll(answer, "GitHub repository ReindeerGames/invoices", "head a75cdbda", "SUCCESS · Build and deploy · push", "updated 1m0s ago") {
+		t.Fatalf("unexpected repository answer intent=%s body=%s err=%v", intent, answer, err)
+	}
+	if inspector.repo.ID != "repo_enabled" {
+		t.Fatalf("inspected repository outside enabled scope: %#v", inspector.repo)
+	}
+	output, err := responder.executeTool(context.Background(), "get_repository_status", json.RawMessage(`{"repository":"ReindeerGames/invoices"}`))
+	if err != nil || !containsAll(output, `"available":true`, `"conclusion":"success"`, `"head_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`) {
+		t.Fatalf("unexpected repository tool output=%s err=%v", output, err)
+	}
+}
+
+func TestRepositoryStatusReportsAmbiguousConfiguredMatchesWithoutGitHubCall(t *testing.T) {
+	reader := fakeReader{repos: []domain.Repository{
+		{ID: "repo_1", Owner: "One", Name: "site", Enabled: true},
+		{ID: "repo_2", Owner: "Two", Name: "site", Enabled: true},
+	}}
+	inspector := &fakeRepositoryInspector{}
+	answer, intent, err := NewOperator(reader, nil, nil, inspector).Answer(context.Background(), "repo site")
+	if err != nil || intent != "repository" || !containsAll(answer, "ambiguous", "One/site", "Two/site") || inspector.repo.ID != "" {
+		t.Fatalf("unexpected ambiguous answer intent=%s body=%s repo=%#v err=%v", intent, answer, inspector.repo, err)
 	}
 }
 

@@ -27,11 +27,11 @@ type Service struct {
 	approvalTTL  time.Duration
 }
 
-func New(st *store.Store, policies *policy.Engine, owners *owner.Service, aiClient *ai.Client, runtime assistant.RuntimeHealth, expectedComponents []string, historyLimit int, approvalTTL time.Duration) *Service {
+func New(st *store.Store, policies *policy.Engine, owners *owner.Service, aiClient *ai.Client, github assistant.RepositoryInspector, runtime assistant.RuntimeHealth, expectedComponents []string, historyLimit int, approvalTTL time.Duration) *Service {
 	if historyLimit < 4 || historyLimit > 50 {
 		historyLimit = 12
 	}
-	return &Service{store: st, policy: policies, owners: owners, assistant: assistant.NewWithRuntime(st, runtime, expectedComponents, aiClient), historyLimit: historyLimit, approvalTTL: approvalTTL}
+	return &Service{store: st, policy: policies, owners: owners, assistant: assistant.NewOperator(st, runtime, expectedComponents, github, aiClient), historyLimit: historyLimit, approvalTTL: approvalTTL}
 }
 
 func (s *Service) ReceiveGroupReport(ctx context.Context, selfJIDs []string, msg domain.InboundMessage) (domain.Incident, bool, error) {

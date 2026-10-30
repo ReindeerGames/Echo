@@ -46,6 +46,25 @@ type WorkflowResult struct {
 	Workflows []string
 }
 
+type RepositoryWorkflowRun struct {
+	Name       string    `json:"name"`
+	Event      string    `json:"event"`
+	Status     string    `json:"status"`
+	Conclusion string    `json:"conclusion,omitempty"`
+	HeadSHA    string    `json:"headSha"`
+	CreatedAt  time.Time `json:"createdAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	URL        string    `json:"url,omitempty"`
+}
+
+type RepositoryStatus struct {
+	Repository      string                  `json:"repository"`
+	DefaultBranch   string                  `json:"defaultBranch"`
+	HeadSHA         string                  `json:"headSha"`
+	HeadCommittedAt time.Time               `json:"headCommittedAt"`
+	WorkflowRuns    []RepositoryWorkflowRun `json:"workflowRuns"`
+}
+
 type Client struct {
 	vault           *security.Vault
 	baseURL         string
@@ -277,6 +296,53 @@ func (c *Client) DispatchWorkflow(ctx context.Context, repo domain.Repository, w
 	}
 	endpoint := fmt.Sprintf("/repos/%s/%s/actions/workflows/%s/dispatches", url.PathEscape(repo.Owner), url.PathEscape(repo.Name), url.PathEscape(workflow))
 	return c.doJSON(ctx, token, http.MethodPost, endpoint, map[string]any{"ref": ref, "inputs": inputs}, nil)
+}
+
+func (c *Client) InspectRepository(ctx context.Context, repo domain.Repository) (RepositoryStatus, error) {
+	if !repo.Enabled {
+		return RepositoryStatus{}, errors.New("repository is disabled")
+	}
+	token, err := c.token(ctx)
+	if err != nil {
+		return RepositoryStatus{}, err
+	}
+	prefix := fmt.Sprintf("/repos/%s/%s", url.PathEscape(repo.Owner), url.PathEscape(repo.Name))
+	var head struct {
+		SHA    string `json:"sha"`
+		Commit struct {
+			Author struct {
+				Date time.Time `json:"date"`
+			} `json:"author"`
+		} `json:"commit"`
+	}
+	if err := c.doJSON(ctx, token, http.MethodGet, prefix+"/commits/"+url.PathEscape(repo.DefaultBranch), nil, &head); err != nil {
+		return RepositoryStatus{}, err
+	}
+	query := url.Values{"branch": {repo.DefaultBranch}, "per_page": {"10"}}
+	var response struct {
+		Runs []struct {
+			Name       string    `json:"name"`
+			Event      string    `json:"event"`
+			Status     string    `json:"status"`
+			Conclusion string    `json:"conclusion"`
+			HeadSHA    string    `json:"head_sha"`
+			HeadBranch string    `json:"head_branch"`
+			CreatedAt  time.Time `json:"created_at"`
+			UpdatedAt  time.Time `json:"updated_at"`
+			HTMLURL    string    `json:"html_url"`
+		} `json:"workflow_runs"`
+	}
+	if err := c.doJSON(ctx, token, http.MethodGet, prefix+"/actions/runs?"+query.Encode(), nil, &response); err != nil {
+		return RepositoryStatus{}, err
+	}
+	status := RepositoryStatus{Repository: repo.Owner + "/" + repo.Name, DefaultBranch: repo.DefaultBranch, HeadSHA: head.SHA, HeadCommittedAt: head.Commit.Author.Date, WorkflowRuns: make([]RepositoryWorkflowRun, 0, min(len(response.Runs), 10))}
+	for _, run := range response.Runs {
+		if run.HeadBranch != repo.DefaultBranch || len(status.WorkflowRuns) == 10 {
+			continue
+		}
+		status.WorkflowRuns = append(status.WorkflowRuns, RepositoryWorkflowRun{Name: run.Name, Event: run.Event, Status: run.Status, Conclusion: run.Conclusion, HeadSHA: run.HeadSHA, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, URL: run.HTMLURL})
+	}
+	return status, nil
 }
 
 type pullRequestState struct {

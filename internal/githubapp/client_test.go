@@ -262,3 +262,40 @@ func TestWaitForCommitWorkflowsReturnsVerifiedAndFailedResults(t *testing.T) {
 		})
 	}
 }
+
+func TestInspectRepositoryReturnsBoundedDefaultBranchWorkflowState(t *testing.T) {
+	const head = "a75cdbdaad7917a104299753c32f8358b90a50e6"
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/ReindeerGames/invoices/commits/main":
+			writeJSON(t, w, map[string]any{"sha": head, "commit": map[string]any{"author": map[string]any{"date": now}}})
+		case "/repos/ReindeerGames/invoices/actions/runs":
+			if r.URL.Query().Get("branch") != "main" || r.URL.Query().Get("per_page") != "10" {
+				t.Errorf("unexpected workflow query: %s", r.URL.RawQuery)
+			}
+			writeJSON(t, w, map[string]any{"workflow_runs": []map[string]any{
+				{"name": "Build and deploy", "event": "push", "status": "completed", "conclusion": "success", "head_sha": head, "head_branch": "main", "created_at": now, "updated_at": now.Add(time.Minute), "html_url": "https://github.test/actions/42"},
+				{"name": "Wrong branch", "event": "push", "status": "completed", "conclusion": "failure", "head_sha": "other", "head_branch": "develop", "created_at": now, "updated_at": now},
+			}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	status, err := newAuthenticatedTestClient(t, server).InspectRepository(context.Background(), testRepository())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Repository != "ReindeerGames/invoices" || status.HeadSHA != head || !status.HeadCommittedAt.Equal(now) || len(status.WorkflowRuns) != 1 || status.WorkflowRuns[0].Conclusion != "success" {
+		t.Fatalf("unexpected repository status: %#v", status)
+	}
+}
+
+func TestInspectRepositoryRejectsDisabledRepositoryWithoutGitHubCall(t *testing.T) {
+	client := New(nil, "https://api.github.invalid", 1024)
+	if _, err := client.InspectRepository(context.Background(), domain.Repository{}); err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected disabled repository rejection, got %v", err)
+	}
+}

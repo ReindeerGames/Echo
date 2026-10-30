@@ -2,7 +2,7 @@
 
 The configured owner can message Echo directly for a read-only operational view. Echo authorizes the sender against the selected owner contact, reads only its structured MariaDB state, and audits the interpreted intent without storing the question body in the audit event.
 
-When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only seven function tools: current status, open alerts, service search, service detail, worker queue, project/repository listing, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, web, code execution, deployment, or mutation tool.
+When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only eight function tools: current status, open alerts, service search, service detail, worker queue, project/repository listing, live read-only GitHub repository status, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, general web, code execution, deployment, or mutation tool.
 
 Service detail includes observer freshness, evidence age, alert fingerprints and times, plus a strict allowlist of useful operational counters such as disk, memory, load, HTTP latency, container lifecycle, health, restarts, and heartbeat policy. Arbitrary detail keys and free-form failure text are never sent to the model, so a custom observer cannot smuggle credentials or unrestricted logs through monitoring evidence. Evidence objects above 64 KiB are omitted. Tool collections are bounded and declare when results were truncated.
 
@@ -14,6 +14,7 @@ Supported requests include:
 - `service <name-or-key>` for a service's open alerts, latest observer evidence, and whether that evidence is fresh
 - `jobs` or “work queue” for queued, running, retrying, and dead worker jobs
 - `projects` for the project and repository map
+- `repo <name>` for the configured default-branch head and up to ten recent GitHub Actions runs
 - `incident <id>` for the incident state and latest diagnosis
 - `help` for the current command summary
 
@@ -24,5 +25,7 @@ Duplicate WhatsApp message IDs are idempotent and do not run tools or send anoth
 Local owner messages and replies are retained for `ECHO_ASSISTANT_RETENTION` (30 days by default). `ECHO_ASSISTANT_HISTORY_LIMIT` controls how many recent messages, from 4 to 50, are supplied as conversational context. Expired messages and their tool evidence are pruned during startup.
 
 Questions never authorize mutation. Approval commands remain deliberately narrow: `approve <code>` or `reject <code>` resolves only the pending immutable action bound to that one-time code. An unrecognized request cannot run a shell command, contact a production host, execute repository code, or infer permission to change infrastructure.
+
+Live repository inspection is restricted to repositories already enabled in Echo. A short name that matches more than one configured repository produces a clarification list instead of guessing. The GitHub call reads only the configured default-branch head and recent Actions metadata, uses a 15-second investigation deadline, and never downloads or executes repository code.
 
 The `status`, `alerts`, and `jobs` commands include persistent worker-heartbeat and stalled-queue state plus pending and dead WhatsApp delivery counts. `status` and `alerts` also report Echo's supervised runtime components, including a missing, stopped, or retrying worker, watchdog, or enabled WhatsApp gateway. Only fixed component names and state labels are exposed; raw internal errors remain in server logs. A queue stall is reported only after ready work exceeds its configured grace period without a fresh worker heartbeat. Worker errors sent to the model are reduced to safe categories; raw job payloads and failure text are never included. The same state is visible on Overview and System, which remains useful when WhatsApp itself cannot deliver the warning. The deterministic commands remain available when AI is disabled or unavailable. Both paths preserve the separate exact-action approval boundary.
