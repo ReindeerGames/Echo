@@ -37,6 +37,7 @@ type fakeReader struct {
 }
 
 type fakeToolModel struct{}
+type serviceInvestigationToolModel struct{}
 
 type fakeRepositoryInspector struct {
 	status githubapp.RepositoryStatus
@@ -109,6 +110,31 @@ func (fakeToolModel) RespondWithTools(ctx context.Context, instructions string, 
 	return "Nudgie web is unhealthy based on its latest Docker observer signal.", []ai.ToolExecution{{CallID: "call-1", Name: "get_service", Arguments: arguments, Output: output}}, nil
 }
 
+func (serviceInvestigationToolModel) RespondWithTools(ctx context.Context, instructions string, history []ai.ConversationMessage, tools []ai.ToolDefinition, execute ai.ToolExecutor) (string, []ai.ToolExecution, error) {
+	if !strings.Contains(instructions, "Use investigate_service") || len(history) == 0 {
+		return "", nil, errors.New("missing service investigation guidance")
+	}
+	found := false
+	for _, tool := range tools {
+		if tool.Name == "investigate_service" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", nil, errors.New("service investigation tool is unavailable")
+	}
+	arguments := json.RawMessage(`{"service":"invoices-api"}`)
+	output, err := execute(ctx, "investigate_service", arguments)
+	if err != nil {
+		return "", nil, err
+	}
+	if !containsAll(output, `"name":"Invoices API"`, `"limitations":["no logs","no shell","no SSH","no mutation"]`) {
+		return "", nil, errors.New("correlated investigation evidence missing")
+	}
+	return "Invoices API is unhealthy; the available evidence is correlated but does not prove a cause.", []ai.ToolExecution{{CallID: "call-investigate", Name: "investigate_service", Arguments: arguments, Output: output}}, nil
+}
+
 func (f fakeReader) Dashboard(context.Context) (domain.Dashboard, error)    { return f.dashboard, nil }
 func (f fakeReader) ListProjects(context.Context) ([]domain.Project, error) { return f.projects, nil }
 func (f fakeReader) ListGroupBindings(context.Context) ([]domain.GroupBinding, error) {
@@ -122,6 +148,19 @@ func (f fakeReader) ListServices(context.Context, string) ([]domain.Service, err
 }
 func (f fakeReader) ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error) {
 	return f.alerts, nil
+}
+func (f fakeReader) ListServiceAlertsForService(_ context.Context, serviceID, status string, limit int) ([]domain.ServiceAlert, error) {
+	var out []domain.ServiceAlert
+	for _, alert := range f.alerts {
+		if alert.ServiceID != serviceID || (status != "" && alert.Status != "" && alert.Status != status) {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, alert)
+	}
+	return out, nil
 }
 func (f fakeReader) ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error) {
 	return f.events, nil
@@ -694,6 +733,115 @@ func TestRepositoryOverviewIsBoundedToTwenty(t *testing.T) {
 	inspector.mu.Unlock()
 	if calls != 20 {
 		t.Fatalf("repository overview made %d calls, want 20", calls)
+	}
+}
+
+func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		services: []domain.Service{{ID: "svc_api", ProjectID: "prj_1", ProjectName: "Invoices", Key: "invoices-api", Name: "Invoices API", Kind: "application", Criticality: "high", Enabled: true, HeartbeatTimeoutSeconds: 120}},
+		events:   []domain.MonitorEvent{{ServiceID: "svc_api", Status: "unhealthy", Severity: "critical", Summary: "Readiness returned HTTP 503", Source: "observer-01", Fingerprint: "http-health", ObservedAt: now.Add(-2 * time.Minute), Details: json.RawMessage(`{"statusCode":503,"latencyMs":42,"secret":"must-not-leak"}`)}},
+		alerts: []domain.ServiceAlert{
+			{ServiceID: "svc_api", ServiceName: "Invoices API", ProjectID: "prj_1", Status: "open", Severity: "critical", Summary: "Readiness returned HTTP 503", Fingerprint: "http-health", OpenedAt: now.Add(-2 * time.Minute), LastSeenAt: now.Add(-time.Minute)},
+			{ServiceID: "svc_other", ServiceName: "Other", ProjectID: "prj_2", Status: "open", Severity: "warning", Summary: "must-not-appear"},
+		},
+		deployments: []domain.Deployment{{ID: "dep_1", ProjectID: "prj_1", Environment: "production", Operation: "deploy", Status: "verified", Repository: "ReindeerGames/invoices", ArtifactRef: strings.Repeat("a", 40), CreatedAt: now.Add(-10 * time.Minute)}},
+		incidents:   []domain.Incident{{ID: "inc_1", ProjectID: "prj_1", ProjectName: "Invoices", Status: "triaging", Severity: "high", Summary: "Checkout failures", CreatedAt: now.Add(-3 * time.Minute), UpdatedAt: now.Add(-time.Minute)}},
+		repos: []domain.Repository{
+			{ID: "repo_1", ProjectID: "prj_1", Owner: "ReindeerGames", Name: "invoices", DefaultBranch: "main", Enabled: true},
+			{ID: "repo_disabled", ProjectID: "prj_1", Owner: "ReindeerGames", Name: "old-invoices", DefaultBranch: "main", Enabled: false},
+			{ID: "repo_other", ProjectID: "prj_2", Owner: "Other", Name: "other", DefaultBranch: "main", Enabled: true},
+		},
+	}
+	inspector := &estateRepositoryInspector{statuses: map[string]githubapp.RepositoryStatus{
+		"ReindeerGames/invoices": {
+			Repository: "ReindeerGames/invoices", DefaultBranch: "main", HeadSHA: strings.Repeat("b", 40), HeadCommittedAt: now.Add(-15 * time.Minute),
+			WorkflowRuns: []githubapp.RepositoryWorkflowRun{{Name: "Build", Status: "completed", Conclusion: "failure", UpdatedAt: now.Add(-5 * time.Minute)}},
+		},
+	}, errors: map[string]error{}}
+	responder := NewOperator(reader, nil, nil, inspector)
+	responder.now = func() time.Time { return now }
+	output, err := responder.executeTool(context.Background(), "investigate_service", json.RawMessage(`{"service":"invoices-api"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`) {
+		t.Fatalf("incomplete service investigation output: %s", output)
+	}
+	for _, forbidden := range []string{"must-not-leak", "must-not-appear", "old-invoices", "Other/other"} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("service investigation leaked unrelated or unsafe evidence %q: %s", forbidden, output)
+		}
+	}
+	inspector.mu.Lock()
+	calls := append([]string(nil), inspector.calls...)
+	inspector.mu.Unlock()
+	if strings.Join(calls, ",") != "ReindeerGames/invoices" {
+		t.Fatalf("service investigation inspected repositories outside the project scope: %v", calls)
+	}
+}
+
+func TestInvestigateExposesCorrelatedServiceToolToModel(t *testing.T) {
+	reader := fakeReader{services: []domain.Service{{ID: "svc_api", ProjectID: "prj_1", ProjectName: "Invoices", Key: "invoices-api", Name: "Invoices API", Enabled: true}}}
+	history := []domain.ConversationMessage{{Role: "user", Body: "Why is invoices-api failing?"}}
+	answer, executions, err := New(reader, serviceInvestigationToolModel{}).Investigate(context.Background(), history)
+	if err != nil || !strings.Contains(answer, "does not prove a cause") || len(executions) != 1 || executions[0].Name != "investigate_service" {
+		t.Fatalf("unexpected correlated investigation answer=%q executions=%#v err=%v", answer, executions, err)
+	}
+}
+
+func TestServiceInvestigationHandlesAmbiguousServiceWithoutExternalInspection(t *testing.T) {
+	reader := fakeReader{services: []domain.Service{
+		{ID: "svc_web_1", ProjectID: "prj_1", Key: "web-one", Name: "Web One"},
+		{ID: "svc_web_2", ProjectID: "prj_2", Key: "web-two", Name: "Web Two"},
+	}}
+	inspector := &estateRepositoryInspector{statuses: map[string]githubapp.RepositoryStatus{}, errors: map[string]error{}}
+	output, err := NewOperator(reader, nil, nil, inspector).executeTool(context.Background(), "investigate_service", json.RawMessage(`{"service":"web"}`))
+	if err != nil || !containsAll(output, `"ambiguous":true`, `"key":"web-one"`, `"key":"web-two"`) {
+		t.Fatalf("unexpected ambiguous investigation output=%s err=%v", output, err)
+	}
+	inspector.mu.Lock()
+	calls := len(inspector.calls)
+	inspector.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("ambiguous service triggered %d repository inspections", calls)
+	}
+}
+
+func TestServiceInvestigationCollectionsAreBounded(t *testing.T) {
+	reader := fakeReader{services: []domain.Service{{ID: "svc_1", ProjectID: "prj_1", Key: "api", Name: "API", Enabled: true}}}
+	for index := 0; index < 13; index++ {
+		reader.events = append(reader.events, domain.MonitorEvent{ServiceID: "svc_1", Status: "unhealthy", Severity: "warning", Summary: fmt.Sprintf("signal-%02d", index), Source: "observer", ObservedAt: time.Now().UTC().Add(-time.Duration(index) * time.Minute), Details: json.RawMessage(`{}`)})
+	}
+	for index := 0; index < 11; index++ {
+		reader.alerts = append(reader.alerts, domain.ServiceAlert{ServiceID: "svc_1", Status: "open", Summary: fmt.Sprintf("alert-%02d", index)})
+		reader.deployments = append(reader.deployments, domain.Deployment{ID: fmt.Sprintf("dep_%02d", index), ProjectID: "prj_1"})
+		reader.incidents = append(reader.incidents, domain.Incident{ID: fmt.Sprintf("inc_%02d", index), ProjectID: "prj_1"})
+	}
+	for index := 0; index < 9; index++ {
+		reader.repos = append(reader.repos, domain.Repository{ID: fmt.Sprintf("repo_%02d", index), ProjectID: "prj_1", Owner: "Org", Name: fmt.Sprintf("repo-%02d", index), Enabled: true})
+	}
+	output, err := NewOperator(reader, nil, nil, nil).executeTool(context.Background(), "investigate_service", json.RawMessage(`{"service":"api"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		Signals               []json.RawMessage `json:"signals"`
+		SignalsTruncated      bool              `json:"signals_truncated"`
+		OpenAlerts            []json.RawMessage `json:"open_alerts"`
+		AlertsTruncated       bool              `json:"alerts_truncated"`
+		Deployments           []json.RawMessage `json:"deployments"`
+		DeploymentsTruncated  bool              `json:"deployments_truncated"`
+		Incidents             []json.RawMessage `json:"incidents"`
+		IncidentsTruncated    bool              `json:"incidents_truncated"`
+		Repositories          []json.RawMessage `json:"repositories"`
+		RepositoriesTruncated bool              `json:"repositories_truncated"`
+	}
+	if err := json.Unmarshal([]byte(output), &view); err != nil {
+		t.Fatal(err)
+	}
+	if len(view.Signals) != 12 || !view.SignalsTruncated || len(view.OpenAlerts) != 10 || !view.AlertsTruncated || len(view.Deployments) != 10 || !view.DeploymentsTruncated || len(view.Incidents) != 10 || !view.IncidentsTruncated || len(view.Repositories) != 8 || !view.RepositoriesTruncated {
+		t.Fatalf("unbounded service investigation: %#v", view)
 	}
 }
 

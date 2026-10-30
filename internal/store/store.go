@@ -537,6 +537,34 @@ func (s *Store) ListServiceAlerts(ctx context.Context, status string) ([]domain.
 	return out, rows.Err()
 }
 
+func (s *Store) ListServiceAlertsForService(ctx context.Context, serviceID, status string, limit int) ([]domain.ServiceAlert, error) {
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+	query := `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id WHERE a.service_id=?`
+	args := []any{serviceID}
+	if status == "open" || status == "resolved" {
+		query += ` AND a.alert_status=?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY FIELD(a.alert_status,'open','resolved'),FIELD(a.severity,'critical','warning'),a.last_seen_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := make([]domain.ServiceAlert, 0, limit)
+	for rows.Next() {
+		var item domain.ServiceAlert
+		if err := scanServiceAlert(rows, &item); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (s *Store) ListStaleServiceHeartbeats(ctx context.Context, now time.Time) ([]domain.StaleServiceHeartbeat, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.name,s.criticality,s.heartbeat_timeout_seconds,COALESCE(e.event_id,''),e.observed_at,s.updated_at,GREATEST(s.updated_at,COALESCE(e.observed_at,'1970-01-01 00:00:00')) AS policy_reference
       FROM echo_services s

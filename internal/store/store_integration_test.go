@@ -496,6 +496,14 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	if err != nil || len(alerts) != 1 || alerts[0].ServiceName != service.Name {
 		t.Fatalf("list alerts: items=%#v err=%v", alerts, err)
 	}
+	scopedAlerts, err := st.ListServiceAlertsForService(ctx, service.ID, "open", 1)
+	if err != nil || len(scopedAlerts) != 1 || scopedAlerts[0].ServiceID != service.ID || scopedAlerts[0].Status != "open" {
+		t.Fatalf("list bounded service alerts: items=%#v err=%v", scopedAlerts, err)
+	}
+	outsideAlerts, err := st.ListServiceAlertsForService(ctx, "svc_not_this_service", "open", 1)
+	if err != nil || len(outsideAlerts) != 0 {
+		t.Fatalf("service alert scope escaped: items=%#v err=%v", outsideAlerts, err)
+	}
 	dashboard, err := st.Dashboard(ctx)
 	if err != nil || dashboard.OpenAlerts != 1 || dashboard.PendingWhatsAppMessages != 3 || dashboard.DeadWhatsAppMessages != 0 {
 		t.Fatalf("dashboard alert count: item=%#v err=%v", dashboard, err)
