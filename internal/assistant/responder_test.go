@@ -754,10 +754,15 @@ func TestRepositoryOverviewIsBoundedToTwenty(t *testing.T) {
 func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	reader := fakeReader{
-		services: []domain.Service{{ID: "svc_api", ProjectID: "prj_1", ProjectName: "Invoices", Key: "invoices-api", Name: "Invoices API", Kind: "application", Criticality: "high", Enabled: true, HeartbeatTimeoutSeconds: 120}},
-		events:   []domain.MonitorEvent{{ServiceID: "svc_api", Status: "unhealthy", Severity: "critical", Summary: "Readiness returned HTTP 503", Source: "observer-01", Fingerprint: "http-health", ObservedAt: now.Add(-2 * time.Minute), Details: json.RawMessage(`{"statusCode":503,"latencyMs":42,"secret":"must-not-leak"}`)}},
+		services: []domain.Service{
+			{ID: "svc_api", ProjectID: "prj_1", ProjectName: "Invoices", Key: "invoices-api", Name: "Invoices API", Kind: "application", Criticality: "high", Enabled: true, HeartbeatTimeoutSeconds: 120},
+			{ID: "svc_database", ProjectID: "prj_1", ProjectName: "Invoices", Key: "invoices-database", Name: "Invoices database", Kind: "database", Criticality: "critical", Enabled: true, HeartbeatTimeoutSeconds: 120},
+			{ID: "svc_unrelated", ProjectID: "prj_2", ProjectName: "Other", Key: "other-database", Name: "Unrelated database", Kind: "database", Criticality: "critical", Enabled: true},
+		},
+		events: []domain.MonitorEvent{{ServiceID: "svc_api", Status: "unhealthy", Severity: "critical", Summary: "Readiness returned HTTP 503", Source: "observer-01", Fingerprint: "http-health", ObservedAt: now.Add(-2 * time.Minute), Details: json.RawMessage(`{"statusCode":503,"latencyMs":42,"secret":"must-not-leak"}`)}},
 		alerts: []domain.ServiceAlert{
 			{ServiceID: "svc_api", ServiceName: "Invoices API", ProjectID: "prj_1", Status: "open", Severity: "critical", Summary: "Readiness returned HTTP 503", Fingerprint: "http-health", OpenedAt: now.Add(-2 * time.Minute), LastSeenAt: now.Add(-time.Minute)},
+			{ServiceID: "svc_database", ServiceName: "Invoices database", ProjectID: "prj_1", Status: "open", Severity: "warning", Summary: "Database backup is stale", Fingerprint: "artifact-freshness", OpenedAt: now.Add(-time.Hour), LastSeenAt: now.Add(-5 * time.Minute)},
 			{ServiceID: "svc_other", ServiceName: "Other", ProjectID: "prj_2", Status: "open", Severity: "warning", Summary: "must-not-appear"},
 		},
 		deployments: []domain.Deployment{{ID: "dep_1", ProjectID: "prj_1", Environment: "production", Operation: "deploy", Status: "verified", Repository: "ReindeerGames/invoices", ArtifactRef: strings.Repeat("a", 40), CreatedAt: now.Add(-10 * time.Minute)}},
@@ -781,10 +786,10 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`, `"summary":"Reduce checkout database timeout"`, `"commits_truncated":false`) {
+	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`, `"summary":"Reduce checkout database timeout"`, `"commits_truncated":false`, `"name":"Invoices database"`, `"state":"attention"`, `"open_alert_count":1`, `"related_services_truncated":false`) {
 		t.Fatalf("incomplete service investigation output: %s", output)
 	}
-	for _, forbidden := range []string{"must-not-leak", "must-not-appear", "old-invoices", "Other/other"} {
+	for _, forbidden := range []string{"must-not-leak", "must-not-appear", "old-invoices", "Other/other", "Unrelated database"} {
 		if strings.Contains(output, forbidden) {
 			t.Fatalf("service investigation leaked unrelated or unsafe evidence %q: %s", forbidden, output)
 		}
@@ -794,6 +799,32 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 	inspector.mu.Unlock()
 	if strings.Join(calls, ",") != "ReindeerGames/invoices" {
 		t.Fatalf("service investigation inspected repositories outside the project scope: %v", calls)
+	}
+}
+
+func TestRelatedServiceViewsPrioritizeAttentionAndRemainBounded(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	target := domain.Service{ID: "svc_target", ProjectID: "prj_1", Name: "Target", Enabled: true}
+	services := []domain.Service{target}
+	services = append(services, domain.Service{ID: "svc_other_project", ProjectID: "prj_2", Name: "Other project", Enabled: true})
+	var events []domain.MonitorEvent
+	for index := 0; index < 14; index++ {
+		serviceID := fmt.Sprintf("svc_%02d", index)
+		services = append(services, domain.Service{ID: serviceID, ProjectID: "prj_1", Key: fmt.Sprintf("service-%02d", index), Name: fmt.Sprintf("Service %02d", index), Kind: "application", Criticality: "medium", Enabled: true, HeartbeatTimeoutSeconds: 120})
+		events = append(events, domain.MonitorEvent{ServiceID: serviceID, Status: "healthy", Severity: "info", Summary: "healthy", ObservedAt: now.Add(-time.Minute)})
+	}
+	alerts := []domain.ServiceAlert{{ServiceID: "svc_13", Status: "open", Severity: "critical", Summary: "dependency failed"}, {ServiceID: "svc_other_project", Status: "open"}}
+	views, truncated := relatedServiceViews(now, target, services, events, alerts, 12)
+	if len(views) != 12 || !truncated {
+		t.Fatalf("related service context was not bounded: count=%d truncated=%v", len(views), truncated)
+	}
+	if views[0]["id"] != "svc_13" || views[0]["state"] != "attention" || views[0]["open_alert_count"] != 1 {
+		t.Fatalf("attention service was not prioritized: %#v", views[0])
+	}
+	for _, view := range views {
+		if view["id"] == "svc_other_project" || view["id"] == target.ID {
+			t.Fatalf("related service context escaped project/target scope: %#v", view)
+		}
 	}
 }
 

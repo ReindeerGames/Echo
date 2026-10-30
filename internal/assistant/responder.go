@@ -349,6 +349,15 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			}
 			alertViews = append(alertViews, map[string]any{"severity": alert.Severity, "summary": truncateRunes(alert.Summary, 300), "fingerprint": truncateRunes(alert.Fingerprint, 255), "opened_at": alert.OpenedAt, "last_seen_at": alert.LastSeenAt})
 		}
+		projectEvents, err := r.reader.ListLatestMonitorEvents(ctx, service.ProjectID)
+		if err != nil {
+			return "", err
+		}
+		projectAlerts, err := r.reader.ListServiceAlerts(ctx, "open")
+		if err != nil {
+			return "", err
+		}
+		relatedServices, relatedServicesTruncated := relatedServiceViews(now, service, services, projectEvents, projectAlerts, 12)
 		deployments, err := r.reader.ListProjectDeployments(ctx, service.ProjectID, 11)
 		if err != nil {
 			return "", err
@@ -424,6 +433,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			"service":            map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds},
 			"observer_freshness": observerFreshness(now, service, events), "signals": signals, "signals_truncated": eventsTruncated,
 			"open_alerts": alertViews, "open_alerts_returned": len(alertViews), "alerts_truncated": len(alerts) > len(alertViews),
+			"related_services": relatedServices, "related_services_returned": len(relatedServices), "related_services_truncated": relatedServicesTruncated,
 			"incidents": incidentViews, "incidents_truncated": incidentsTruncated,
 			"deployments": deploymentViews, "deployments_truncated": deploymentsTruncated,
 			"repositories": repositoryViews, "repository_count": repositoryTotal, "repositories_truncated": repositoriesTruncated,
@@ -973,6 +983,109 @@ func observerFreshness(now time.Time, service domain.Service, events []domain.Mo
 		break
 	}
 	return view
+}
+
+type relatedServiceCandidate struct {
+	view     map[string]any
+	priority int
+	name     string
+}
+
+func relatedServiceViews(now time.Time, target domain.Service, services []domain.Service, events []domain.MonitorEvent, alerts []domain.ServiceAlert, limit int) ([]map[string]any, bool) {
+	if limit < 1 {
+		limit = 1
+	}
+	projectServices := make(map[string]domain.Service)
+	for _, service := range services {
+		if service.ProjectID == target.ProjectID && service.ID != target.ID && service.Enabled {
+			projectServices[service.ID] = service
+		}
+	}
+	latest := make(map[string]domain.MonitorEvent, len(projectServices))
+	for _, event := range events {
+		if _, ok := projectServices[event.ServiceID]; !ok || event.Source == "echo-watchdog" {
+			continue
+		}
+		if current, exists := latest[event.ServiceID]; !exists || event.ObservedAt.After(current.ObservedAt) {
+			latest[event.ServiceID] = event
+		}
+	}
+	openAlerts := make(map[string]int, len(projectServices))
+	for _, alert := range alerts {
+		if _, ok := projectServices[alert.ServiceID]; ok && (alert.Status == "" || alert.Status == "open") {
+			openAlerts[alert.ServiceID]++
+		}
+	}
+	candidates := make([]relatedServiceCandidate, 0, len(projectServices))
+	for _, service := range projectServices {
+		state := "missing"
+		priority := 3
+		view := map[string]any{
+			"id": service.ID, "key": service.Key, "name": service.Name, "kind": service.Kind, "criticality": service.Criticality,
+			"open_alert_count": openAlerts[service.ID],
+		}
+		if event, ok := latest[service.ID]; ok {
+			state = event.Status
+			priority = relatedServiceStatePriority(state)
+			age := ageSeconds(now, event.ObservedAt)
+			if service.HeartbeatTimeoutSeconds > 0 && age > int64(service.HeartbeatTimeoutSeconds) {
+				state = "stale"
+				priority = max(priority, 3)
+			}
+			view["latest_signal"] = map[string]any{
+				"status": event.Status, "severity": event.Severity, "summary": truncateRunes(event.Summary, 300), "observed_at": event.ObservedAt, "age_seconds": age,
+			}
+		} else {
+			view["latest_signal"] = nil
+		}
+		if openAlerts[service.ID] > 0 {
+			state = "attention"
+			priority = 6
+		}
+		view["state"] = state
+		priority += relatedServiceCriticalityPriority(service.Criticality)
+		candidates = append(candidates, relatedServiceCandidate{view: view, priority: priority, name: strings.ToLower(service.Name) + "\x00" + strings.ToLower(service.Key)})
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].priority != candidates[j].priority {
+			return candidates[i].priority > candidates[j].priority
+		}
+		return candidates[i].name < candidates[j].name
+	})
+	views := make([]map[string]any, 0, min(len(candidates), limit))
+	for index, candidate := range candidates {
+		if index == limit {
+			break
+		}
+		views = append(views, candidate.view)
+	}
+	return views, len(candidates) > len(views)
+}
+
+func relatedServiceStatePriority(state string) int {
+	switch state {
+	case "unhealthy":
+		return 5
+	case "degraded":
+		return 4
+	case "unknown":
+		return 2
+	case "healthy":
+		return 0
+	default:
+		return 1
+	}
+}
+
+func relatedServiceCriticalityPriority(criticality string) int {
+	switch strings.ToLower(strings.TrimSpace(criticality)) {
+	case "critical":
+		return 2
+	case "high":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func ageSeconds(now, observed time.Time) int64 {
