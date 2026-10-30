@@ -7,7 +7,7 @@ The local stack is deliberately separate from Echo's normal Compose deployment. 
 - Echo on `http://localhost:8080`, bound only to `127.0.0.1`
 - MariaDB 11.4 with separate `echo_local_core` and `echo_local_whatsapp` databases and users
 - a deterministic OpenAI-compatible stub that marks the report as processed without claiming to inspect code
-- a seeded **Local Test** project
+- a seeded **Local Test** project and **Local Echo** service
 - persistent Docker volumes for the databases, WhatsApp session, and worker state
 
 The local database passwords and administrator token are predictable test defaults and must never be reused in production. The stack is isolated to `docker-compose.local.yml`; MariaDB is not exposed on a host port, and the control plane binds only to loopback.
@@ -66,6 +66,16 @@ Expected results:
 4. **Audit trail** records `incident.reported` and `incident.analyzed` events.
 
 The local mock diagnosis proves orchestration only. It never claims repository evidence and cannot prepare a patch. Repository-backed diagnosis requires the real AI and an application-managed GitHub token.
+
+## Exercise the read-only observer
+
+With the stack healthy on the default local port, run one signed observation cycle:
+
+```bash
+make local-observe
+```
+
+The observer probes `/readyz` without reading its body, signs a normalized health event, and submits it to Echo. **Monitoring → Recent signals** should show `Local Echo` as healthy. The local example explicitly permits plaintext HTTP because both endpoints bind to loopback; observer configuration requires HTTPS by default.
 
 To enable real analysis, open **System → OpenAI connection**, enter the OpenAI API key and model, and save. Echo validates the credentials before encrypting the key in MariaDB. Application settings override the local deterministic mock immediately without restarting the stack.
 

@@ -39,7 +39,7 @@ See [the architecture](docs/architecture.md), [threat model](docs/threat-model.m
 9. With no staging environment, a separate repository-native production approval is bound to the PR number, exact head SHA, base branch, repository identity, and repository-configuration hash. The worker refuses changed heads or incomplete/failing GitHub checks, marks a draft ready, and squash-merges that exact SHA.
 10. Echo then monitors the repository's existing push workflows for the resulting default-branch commit. It resolves the incident only after all matching runs finish successfully; a failed run marks the deployment and incident failed.
 
-Separately, the operations catalogue maps projects to runtime services. Signed, idempotent observer events maintain an alert lifecycle and privately notify the owner only when a condition opens, reopens, or resolves. Echo never needs a production Docker socket or SSH credential for monitoring.
+Separately, the operations catalogue maps projects to runtime services. The bundled read-only `echo-observer` probes aggregate HTTPS readiness endpoints and sends signed, idempotent events; those signals maintain an alert lifecycle and privately notify the owner only when a condition opens, reopens, or resolves. Echo never needs a production Docker socket or SSH credential for monitoring.
 
 Approvals can be resolved in the UI or by replying privately from the configured owner JID with `approve <code>` or `reject <code>`.
 

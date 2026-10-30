@@ -1,0 +1,17 @@
+{
+  "echoUrl": "http://127.0.0.1:8080",
+  "source": "local-observer",
+  "interval": "30s",
+  "timeout": "3s",
+  "allowInsecureHttp": true,
+  "probes": [
+    {
+      "name": "echo-ready",
+      "serviceId": "svc_local_echo",
+      "url": "http://127.0.0.1:8080/readyz",
+      "method": "GET",
+      "expectedStatusMin": 200,
+      "expectedStatusMax": 299
+    }
+  ]
+}

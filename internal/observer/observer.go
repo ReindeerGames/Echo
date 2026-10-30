@@ -1,0 +1,231 @@
+package observer
+
+import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/ReindeerGames/echo/internal/domain"
+)
+
+const maxResponseBytes = 64 << 10
+
+type Observer struct {
+	config Config
+	secret string
+	probe  *http.Client
+	sender *http.Client
+	now    func() time.Time
+}
+
+func New(cfg Config, secret string) (*Observer, error) {
+	var err error
+	cfg, err = normalizeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	secret = strings.TrimSpace(secret)
+	if len(secret) < 32 {
+		return nil, errors.New("ECHO_OBSERVER_WEBHOOK_SECRET must contain at least 32 characters")
+	}
+	noRedirect := func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	return &Observer{
+		config: cfg,
+		secret: secret,
+		probe:  &http.Client{Timeout: cfg.Timeout.Duration, CheckRedirect: noRedirect, Transport: directTransport()},
+		sender: &http.Client{Timeout: cfg.Timeout.Duration, CheckRedirect: noRedirect, Transport: directTransport()},
+		now:    func() time.Time { return time.Now().UTC() },
+	}, nil
+}
+
+func directTransport() *http.Transport {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	return transport
+}
+
+func (o *Observer) Run(ctx context.Context) error {
+	if err := o.RunOnce(ctx); err != nil {
+		slog.Error("observer cycle completed with delivery failures", "error", err)
+	}
+	ticker := time.NewTicker(o.config.Interval.Duration)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			if err := o.RunOnce(ctx); err != nil {
+				slog.Error("observer cycle completed with delivery failures", "error", err)
+			}
+		}
+	}
+}
+
+func (o *Observer) RunOnce(ctx context.Context) error {
+	workerCount := min(8, len(o.config.Probes))
+	jobs := make(chan HTTPProbe)
+	failures := make(chan error, len(o.config.Probes))
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for probe := range jobs {
+				event := o.observe(ctx, probe)
+				if err := o.sendWithRetry(ctx, event); err != nil {
+					failures <- fmt.Errorf("%s: %w", event.ServiceID, err)
+				}
+			}
+		}()
+	}
+	for _, probe := range o.config.Probes {
+		select {
+		case jobs <- probe:
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			close(failures)
+			return ctx.Err()
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	close(failures)
+	var deliveryErrors []error
+	for err := range failures {
+		deliveryErrors = append(deliveryErrors, err)
+	}
+	return errors.Join(deliveryErrors...)
+}
+
+func (o *Observer) observe(ctx context.Context, probe HTTPProbe) domain.MonitorEvent {
+	observedAt := o.now()
+	event := domain.MonitorEvent{
+		EventID:     fmt.Sprintf("%s:%s:%d", o.config.Source, probe.Name, observedAt.UnixNano()),
+		ServiceID:   probe.ServiceID,
+		Source:      o.config.Source,
+		Status:      "unhealthy",
+		Severity:    "critical",
+		Summary:     probe.Name + " health check failed",
+		Fingerprint: "http-health",
+		ObservedAt:  observedAt,
+	}
+	started := time.Now()
+	request, err := http.NewRequestWithContext(ctx, probe.Method, probe.URL, nil)
+	if err != nil {
+		event.Details = details(probe, 0, time.Since(started), "invalid_request")
+		return event
+	}
+	request.Header.Set("User-Agent", "Echo-Observer/1.0")
+	response, err := o.probe.Do(request)
+	latency := time.Since(started)
+	if err != nil {
+		event.Details = details(probe, 0, latency, classifyProbeError(err))
+		return event
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
+	_ = response.Body.Close()
+	if response.StatusCode < probe.ExpectedMin || response.StatusCode > probe.ExpectedMax {
+		event.Summary = fmt.Sprintf("%s returned HTTP %d", probe.Name, response.StatusCode)
+		event.Details = details(probe, response.StatusCode, latency, "unexpected_status")
+		return event
+	}
+	event.Status = "healthy"
+	event.Severity = "info"
+	event.Summary = fmt.Sprintf("%s is healthy (HTTP %d)", probe.Name, response.StatusCode)
+	event.Fingerprint = ""
+	event.Details = details(probe, response.StatusCode, latency, "")
+	return event
+}
+
+func details(probe HTTPProbe, status int, latency time.Duration, failure string) json.RawMessage {
+	parsed, _ := url.Parse(probe.URL)
+	target := ""
+	if parsed != nil {
+		target = parsed.Scheme + "://" + parsed.Host + parsed.EscapedPath()
+	}
+	value := map[string]any{
+		"probe":      probe.Name,
+		"method":     probe.Method,
+		"target":     target,
+		"statusCode": status,
+		"latencyMs":  latency.Milliseconds(),
+	}
+	if failure != "" {
+		value["failure"] = failure
+	}
+	raw, _ := json.Marshal(value)
+	return raw
+}
+
+func classifyProbeError(err error) string {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	var urlError *url.Error
+	if errors.As(err, &urlError) && urlError.Timeout() {
+		return "timeout"
+	}
+	return "connection_failed"
+}
+
+func (o *Observer) sendWithRetry(ctx context.Context, event domain.MonitorEvent) error {
+	raw, err := json.Marshal(event)
+	if err != nil {
+		return err
+	}
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			timer := time.NewTimer(time.Duration(attempt*attempt) * time.Second)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+		lastErr = o.send(ctx, raw)
+		if lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
+}
+
+func (o *Observer) send(ctx context.Context, raw []byte) error {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, o.config.EchoURL+"/webhooks/monitor", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	mac := hmac.New(sha256.New, []byte(o.secret))
+	_, _ = mac.Write(raw)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "Echo-Observer/1.0")
+	request.Header.Set("X-Echo-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	response, err := o.sender.Do(request)
+	if err != nil {
+		return fmt.Errorf("deliver event: %w", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
+	if response.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("Echo monitor webhook returned HTTP %d", response.StatusCode)
+	}
+	return nil
+}

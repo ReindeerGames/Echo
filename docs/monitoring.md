@@ -2,6 +2,8 @@
 
 Echo accepts normalized health signals from small, read-only observers. Observers do not receive GitHub, WhatsApp, database, or deployment credentials and do not expose a Docker socket to Echo.
 
+Echo includes `echo-observer`, a small health-endpoint probe and signed event forwarder. Build it with `make build`; its only secret is the monitor webhook secret supplied as `ECHO_OBSERVER_WEBHOOK_SECRET`.
+
 ## Configure the catalogue
 
 Open **Monitoring → Add service** and map each runtime workload to its Echo project. Use a stable key such as `nudgie-web`; the returned service ID is the identifier observers send.
@@ -43,3 +45,14 @@ Echo queues a private WhatsApp message to the configured owner when an alert ope
 ## Observer boundary
 
 Run observers beside workloads with only the narrow read permissions required to collect health data. Prefer HTTP health endpoints and metrics exporters. If Docker metadata is required, use a constrained socket proxy or a dedicated observer rather than mounting the engine socket into Echo.
+
+The bundled observer accepts a JSON configuration such as [`deploy/observer/echo-observer.example.json`](../deploy/observer/echo-observer.example.json). It permits only `GET` and `HEAD`, rejects URL credentials and query strings, refuses redirects, ignores environment HTTP proxies, requires HTTPS with TLS 1.2 or newer unless `allowInsecureHttp` is explicitly enabled, never records response bodies, and retries the same signed event ID after delivery failures. Each service may have one probe; expose an aggregate readiness endpoint when a service depends on several internal checks.
+
+Run continuously:
+
+```bash
+ECHO_OBSERVER_WEBHOOK_SECRET='use-the-same-32-character-or-longer-secret' \
+  ./bin/echo-observer -config /etc/echo-observer.json
+```
+
+Use `-once` for installation smoke tests. Create the matching services in Echo before starting the observer. Do not put the webhook secret or health-endpoint credentials in the JSON file; authenticated health endpoints are intentionally not supported by the bundled observer.

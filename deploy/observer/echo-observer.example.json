@@ -1,0 +1,16 @@
+{
+  "echoUrl": "https://echo.example.com",
+  "source": "primary-observer",
+  "interval": "30s",
+  "timeout": "5s",
+  "probes": [
+    {
+      "name": "application-ready",
+      "serviceId": "svc_replace_with_echo_service_id",
+      "url": "https://application.example.com/readyz",
+      "method": "GET",
+      "expectedStatusMin": 200,
+      "expectedStatusMax": 299
+    }
+  ]
+}
