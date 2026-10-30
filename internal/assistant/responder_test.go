@@ -129,7 +129,7 @@ func (serviceInvestigationToolModel) RespondWithTools(ctx context.Context, instr
 	if err != nil {
 		return "", nil, err
 	}
-	if !containsAll(output, `"name":"Invoices API"`, `"limitations":["no logs","no shell","no SSH","no mutation"]`) {
+	if !containsAll(output, `"name":"Invoices API"`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`) {
 		return "", nil, errors.New("correlated investigation evidence missing")
 	}
 	return "Invoices API is unhealthy; the available evidence is correlated but does not prove a cause.", []ai.ToolExecution{{CallID: "call-investigate", Name: "investigate_service", Arguments: arguments, Output: output}}, nil
@@ -578,21 +578,36 @@ func TestRepositoryStatusUsesOnlyConfiguredEnabledRepository(t *testing.T) {
 	}}
 	inspector := &fakeRepositoryInspector{status: githubapp.RepositoryStatus{
 		Repository: "ReindeerGames/invoices", DefaultBranch: "main", HeadSHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", HeadCommittedAt: now.Add(-time.Hour),
-		WorkflowRuns: []githubapp.RepositoryWorkflowRun{{Name: "Build and deploy", Event: "push", Status: "completed", Conclusion: "success", HeadSHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", UpdatedAt: now.Add(-time.Minute)}},
+		RecentCommits: []githubapp.RepositoryCommit{{SHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", Summary: "Fix invoice checkout timeout", CommittedAt: now.Add(-time.Hour)}},
+		WorkflowRuns:  []githubapp.RepositoryWorkflowRun{{Name: "Build and deploy", Event: "push", Status: "completed", Conclusion: "success", HeadSHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", UpdatedAt: now.Add(-time.Minute)}},
 	}}
 	responder := NewOperator(reader, nil, nil, inspector)
 	responder.now = func() time.Time { return now }
 
 	answer, intent, err := responder.Answer(context.Background(), "repo invoices")
-	if err != nil || intent != "repository" || !containsAll(answer, "GitHub repository ReindeerGames/invoices", "head a75cdbda", "SUCCESS · Build and deploy · push", "updated 1m0s ago") {
+	if err != nil || intent != "repository" || !containsAll(answer, "GitHub repository ReindeerGames/invoices", "head a75cdbda", "SUCCESS · Build and deploy · push", "updated 1m0s ago", "Recent default-branch changes", "Fix invoice checkout timeout") {
 		t.Fatalf("unexpected repository answer intent=%s body=%s err=%v", intent, answer, err)
 	}
 	if inspector.repo.ID != "repo_enabled" {
 		t.Fatalf("inspected repository outside enabled scope: %#v", inspector.repo)
 	}
 	output, err := responder.executeTool(context.Background(), "get_repository_status", json.RawMessage(`{"repository":"ReindeerGames/invoices"}`))
-	if err != nil || !containsAll(output, `"available":true`, `"conclusion":"success"`, `"head_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`) {
+	if err != nil || !containsAll(output, `"available":true`, `"conclusion":"success"`, `"head_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`, `"summary":"Fix invoice checkout timeout"`, `"commits_truncated":false`) {
 		t.Fatalf("unexpected repository tool output=%s err=%v", output, err)
+	}
+}
+
+func TestRepositoryCommitViewsAreBoundedAndSingleLine(t *testing.T) {
+	commits := make([]githubapp.RepositoryCommit, 0, 6)
+	for index := 0; index < 6; index++ {
+		commits = append(commits, githubapp.RepositoryCommit{SHA: strings.Repeat(fmt.Sprintf("%x", index), 80), Summary: fmt.Sprintf("change-%d\nignored body", index), CommittedAt: time.Now().UTC()})
+	}
+	views, truncated := repositoryCommitViews(commits, 3)
+	if len(views) != 3 || !truncated {
+		t.Fatalf("commit views were not bounded: views=%#v truncated=%v", views, truncated)
+	}
+	if views[0]["summary"] != "change-0" || len([]rune(views[0]["sha"].(string))) != 65 || !strings.HasSuffix(views[0]["sha"].(string), "…") {
+		t.Fatalf("commit view was not normalized: %#v", views[0])
 	}
 }
 
@@ -756,7 +771,8 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 	inspector := &estateRepositoryInspector{statuses: map[string]githubapp.RepositoryStatus{
 		"ReindeerGames/invoices": {
 			Repository: "ReindeerGames/invoices", DefaultBranch: "main", HeadSHA: strings.Repeat("b", 40), HeadCommittedAt: now.Add(-15 * time.Minute),
-			WorkflowRuns: []githubapp.RepositoryWorkflowRun{{Name: "Build", Status: "completed", Conclusion: "failure", UpdatedAt: now.Add(-5 * time.Minute)}},
+			RecentCommits: []githubapp.RepositoryCommit{{SHA: strings.Repeat("b", 40), Summary: "Reduce checkout database timeout", CommittedAt: now.Add(-15 * time.Minute)}},
+			WorkflowRuns:  []githubapp.RepositoryWorkflowRun{{Name: "Build", Status: "completed", Conclusion: "failure", UpdatedAt: now.Add(-5 * time.Minute)}},
 		},
 	}, errors: map[string]error{}}
 	responder := NewOperator(reader, nil, nil, inspector)
@@ -765,7 +781,7 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`) {
+	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`, `"summary":"Reduce checkout database timeout"`, `"commits_truncated":false`) {
 		t.Fatalf("incomplete service investigation output: %s", output)
 	}
 	for _, forbidden := range []string{"must-not-leak", "must-not-appear", "old-invoices", "Other/other"} {

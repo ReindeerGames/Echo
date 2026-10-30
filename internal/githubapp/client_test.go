@@ -327,8 +327,14 @@ func TestInspectRepositoryReturnsBoundedDefaultBranchWorkflowState(t *testing.T)
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/repos/ReindeerGames/invoices/commits/main":
-			writeJSON(t, w, map[string]any{"sha": head, "commit": map[string]any{"author": map[string]any{"date": now}}})
+		case "/repos/ReindeerGames/invoices/commits":
+			if r.URL.Query().Get("sha") != "main" || r.URL.Query().Get("per_page") != "5" {
+				t.Errorf("unexpected commits query: %s", r.URL.RawQuery)
+			}
+			writeJSON(t, w, []map[string]any{
+				{"sha": head, "commit": map[string]any{"message": "Fix checkout timeout\n\nDetailed body", "author": map[string]any{"date": now.Add(-time.Minute)}, "committer": map[string]any{"date": now}}},
+				{"sha": strings.Repeat("b", 40), "commit": map[string]any{"message": "Rotate token ghp_1234567890abcdef", "author": map[string]any{"date": now.Add(-time.Hour)}}},
+			})
 		case "/repos/ReindeerGames/invoices/actions/runs":
 			if r.URL.Query().Get("branch") != "main" || r.URL.Query().Get("per_page") != "10" {
 				t.Errorf("unexpected workflow query: %s", r.URL.RawQuery)
@@ -347,8 +353,11 @@ func TestInspectRepositoryReturnsBoundedDefaultBranchWorkflowState(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status.Repository != "ReindeerGames/invoices" || status.HeadSHA != head || !status.HeadCommittedAt.Equal(now) || len(status.WorkflowRuns) != 1 || status.WorkflowRuns[0].Conclusion != "success" {
+	if status.Repository != "ReindeerGames/invoices" || status.HeadSHA != head || !status.HeadCommittedAt.Equal(now) || len(status.WorkflowRuns) != 1 || status.WorkflowRuns[0].Conclusion != "success" || len(status.RecentCommits) != 2 {
 		t.Fatalf("unexpected repository status: %#v", status)
+	}
+	if status.RecentCommits[0].Summary != "Fix checkout timeout" || status.RecentCommits[1].Summary != "Rotate token <redacted token>" || !status.RecentCommits[1].CommittedAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("recent commit metadata was unsafe or incorrect: %#v", status.RecentCommits)
 	}
 }
 

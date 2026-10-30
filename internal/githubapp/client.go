@@ -57,12 +57,20 @@ type RepositoryWorkflowRun struct {
 	URL        string    `json:"url,omitempty"`
 }
 
+type RepositoryCommit struct {
+	SHA         string    `json:"sha"`
+	Summary     string    `json:"summary,omitempty"`
+	CommittedAt time.Time `json:"committedAt"`
+}
+
 type RepositoryStatus struct {
-	Repository      string                  `json:"repository"`
-	DefaultBranch   string                  `json:"defaultBranch"`
-	HeadSHA         string                  `json:"headSha"`
-	HeadCommittedAt time.Time               `json:"headCommittedAt"`
-	WorkflowRuns    []RepositoryWorkflowRun `json:"workflowRuns"`
+	Repository       string                  `json:"repository"`
+	DefaultBranch    string                  `json:"defaultBranch"`
+	HeadSHA          string                  `json:"headSha"`
+	HeadCommittedAt  time.Time               `json:"headCommittedAt"`
+	RecentCommits    []RepositoryCommit      `json:"recentCommits"`
+	CommitsTruncated bool                    `json:"commitsTruncated"`
+	WorkflowRuns     []RepositoryWorkflowRun `json:"workflowRuns"`
 }
 
 type AccessibleRepository struct {
@@ -376,16 +384,24 @@ func (c *Client) InspectRepository(ctx context.Context, repo domain.Repository) 
 		return RepositoryStatus{}, err
 	}
 	prefix := fmt.Sprintf("/repos/%s/%s", url.PathEscape(repo.Owner), url.PathEscape(repo.Name))
-	var head struct {
+	var commits []struct {
 		SHA    string `json:"sha"`
 		Commit struct {
-			Author struct {
+			Message string `json:"message"`
+			Author  struct {
 				Date time.Time `json:"date"`
 			} `json:"author"`
+			Committer struct {
+				Date time.Time `json:"date"`
+			} `json:"committer"`
 		} `json:"commit"`
 	}
-	if err := c.doJSON(ctx, token, http.MethodGet, prefix+"/commits/"+url.PathEscape(repo.DefaultBranch), nil, &head); err != nil {
+	commitQuery := url.Values{"sha": {repo.DefaultBranch}, "per_page": {"5"}}
+	if err := c.doJSON(ctx, token, http.MethodGet, prefix+"/commits?"+commitQuery.Encode(), nil, &commits); err != nil {
 		return RepositoryStatus{}, err
+	}
+	if len(commits) == 0 || strings.TrimSpace(commits[0].SHA) == "" {
+		return RepositoryStatus{}, errors.New("GitHub returned no default-branch commits")
 	}
 	query := url.Values{"branch": {repo.DefaultBranch}, "per_page": {"10"}}
 	var response struct {
@@ -404,7 +420,18 @@ func (c *Client) InspectRepository(ctx context.Context, repo domain.Repository) 
 	if err := c.doJSON(ctx, token, http.MethodGet, prefix+"/actions/runs?"+query.Encode(), nil, &response); err != nil {
 		return RepositoryStatus{}, err
 	}
-	status := RepositoryStatus{Repository: repo.Owner + "/" + repo.Name, DefaultBranch: repo.DefaultBranch, HeadSHA: head.SHA, HeadCommittedAt: head.Commit.Author.Date, WorkflowRuns: make([]RepositoryWorkflowRun, 0, min(len(response.Runs), 10))}
+	status := RepositoryStatus{
+		Repository: repo.Owner + "/" + repo.Name, DefaultBranch: repo.DefaultBranch,
+		HeadSHA: commits[0].SHA, HeadCommittedAt: repositoryCommitTime(commits[0].Commit.Committer.Date, commits[0].Commit.Author.Date),
+		RecentCommits: make([]RepositoryCommit, 0, min(len(commits), 5)), CommitsTruncated: len(commits) >= 5,
+		WorkflowRuns: make([]RepositoryWorkflowRun, 0, min(len(response.Runs), 10)),
+	}
+	for _, commit := range commits {
+		if len(status.RecentCommits) == 5 {
+			break
+		}
+		status.RecentCommits = append(status.RecentCommits, RepositoryCommit{SHA: commit.SHA, Summary: sanitizeCommitSummary(commit.Commit.Message), CommittedAt: repositoryCommitTime(commit.Commit.Committer.Date, commit.Commit.Author.Date)})
+	}
 	for _, run := range response.Runs {
 		if run.HeadBranch != repo.DefaultBranch || len(status.WorkflowRuns) == 10 {
 			continue
@@ -412,6 +439,29 @@ func (c *Client) InspectRepository(ctx context.Context, repo domain.Repository) 
 		status.WorkflowRuns = append(status.WorkflowRuns, RepositoryWorkflowRun{Name: run.Name, Event: run.Event, Status: run.Status, Conclusion: run.Conclusion, HeadSHA: run.HeadSHA, CreatedAt: run.CreatedAt, UpdatedAt: run.UpdatedAt, URL: run.HTMLURL})
 	}
 	return status, nil
+}
+
+func repositoryCommitTime(committer, author time.Time) time.Time {
+	if !committer.IsZero() {
+		return committer.UTC()
+	}
+	return author.UTC()
+}
+
+func sanitizeCommitSummary(message string) string {
+	message = strings.TrimSpace(strings.SplitN(strings.ReplaceAll(message, "\x00", ""), "\n", 2)[0])
+	message = strings.Map(func(character rune) rune {
+		if character < 0x20 || character == 0x7f {
+			return -1
+		}
+		return character
+	}, message)
+	message = strings.TrimSpace(redactRepositoryLine(message))
+	runes := []rune(message)
+	if len(runes) > 200 {
+		message = string(runes[:200])
+	}
+	return message
 }
 
 type pullRequestState struct {

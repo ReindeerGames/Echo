@@ -20,7 +20,7 @@ An open incident forms a bounded WhatsApp evidence thread. A reply is correlated
 
 The control plane owns configuration and policy. The embedded UI communicates only with authenticated same-origin JSON endpoints. Every mutating browser request requires a CSRF token tied to the signed session.
 
-The owner assistant exposes only bounded read tools. A deep service investigation joins retained normalized signals and open alerts with the same project's incidents, deployments, and up to eight configured repository workflow summaries. Every collection has an independent cap and truncation marker. This correlation path does not contact the workload, retrieve logs, or acquire shell, SSH, Docker, filesystem, or mutation access; temporal proximity is presented as evidence rather than asserted causation.
+The owner assistant exposes only bounded read tools. A deep service investigation joins retained normalized signals and open alerts with the same project's incidents, deployments, and up to eight configured repository workflow summaries plus three recent default-branch commit summaries per repository. Commit messages are reduced to one bounded line and common credential literals are redacted at the GitHub client boundary. Every collection has an independent cap and truncation marker. This correlation path does not contact the workload, retrieve logs, download source, or acquire shell, SSH, Docker, filesystem, or mutation access; temporal proximity is presented as evidence rather than asserted causation.
 
 Approval state is durable. Approval JSON is hashed before storage, and the one-time WhatsApp code is stored only as a SHA-256 hash. Approving a diagnosis cannot implicitly approve a patch or deployment.
 
