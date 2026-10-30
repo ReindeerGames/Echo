@@ -37,7 +37,12 @@ local-observe:
 	@go build -o bin/echo-docker-proxy ./cmd/echo-docker-proxy
 	@go build -o bin/echo-process-proxy ./cmd/echo-process-proxy
 	@set -eu; \
-		ECHO_DOCKER_PROXY_CONTAINERS=echo-local-test-mock-ai-1 ./bin/echo-docker-proxy & \
+		docker_host=$$($(DOCKER) context inspect --format '{{.Endpoints.docker.Host}}'); \
+		case "$$docker_host" in \
+			unix:///*) docker_socket=$${docker_host#unix://} ;; \
+			*) echo "local-observe requires a local Unix-socket Docker endpoint" >&2; exit 1 ;; \
+		esac; \
+		ECHO_DOCKER_SOCKET="$$docker_socket" ECHO_DOCKER_PROXY_CONTAINERS=echo-local-test-mock-ai-1 ./bin/echo-docker-proxy & \
 		docker_proxy_pid=$$!; \
 		sleep 30 & \
 		process_pid=$$!; \
