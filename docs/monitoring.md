@@ -147,6 +147,20 @@ ECHO_OBSERVER_WEBHOOK_SECRET='use-the-same-32-character-or-longer-secret' \
   ./bin/echo-observer -config /etc/echo-observer.json
 ```
 
-Use `-once` for installation smoke tests. Create the matching services in Echo before starting the observer. Do not put the webhook secret or health-endpoint credentials in the JSON file; authenticated health endpoints are intentionally not supported by the bundled observer.
+Validate an installation in three explicit stages:
 
-For a Linux host installation, [`deploy/observer/echo-observer.service`](../deploy/observer/echo-observer.service), [`deploy/observer/echo-process-proxy.service`](../deploy/observer/echo-process-proxy.service), and [`deploy/observer/echo-docker-proxy.service`](../deploy/observer/echo-docker-proxy.service) provide hardened systemd units. Create separate locked system accounts, install binaries and JSON configuration as root-owned read-only files, and put only `ECHO_OBSERVER_WEBHOOK_SECRET=...` in `/etc/echo-observer.env` with mode `0600`. The observer account keeps its process table hidden and does not belong to the Docker group; only each small allowlisting proxy receives its narrowly required local read access. Validate the observer with `-once` before enabling it. Installation is an explicit deployment step; Echo never installs observers or changes a server on its own.
+```bash
+# Parse and fully validate the configuration. No probes or deliveries occur.
+./bin/echo-observer -config /etc/echo-observer.json -check
+
+# Execute every probe and print only normalized evidence. No secret or delivery.
+./bin/echo-observer -config /etc/echo-observer.json -dry-run
+
+# After reviewing the output, submit one signed cycle to Echo.
+ECHO_OBSERVER_WEBHOOK_SECRET='use-the-same-32-character-or-longer-secret' \
+  ./bin/echo-observer -config /etc/echo-observer.json -once
+```
+
+`-dry-run` preserves configuration order, summarizes healthy/degraded/unhealthy counts, and exits nonzero when any probe needs attention, making it suitable for installation automation. Probe failures remain normalized fixed evidence and response bodies or raw errors are never printed. `-check`, `-dry-run`, and `-once` are mutually exclusive. Create the matching services in Echo before the signed `-once` stage. Do not put the webhook secret or health-endpoint credentials in the JSON file; authenticated health endpoints are intentionally not supported by the bundled observer.
+
+For a Linux host installation, [`deploy/observer/echo-observer.service`](../deploy/observer/echo-observer.service), [`deploy/observer/echo-process-proxy.service`](../deploy/observer/echo-process-proxy.service), and [`deploy/observer/echo-docker-proxy.service`](../deploy/observer/echo-docker-proxy.service) provide hardened systemd units. The observer unit also runs the configuration-only check before every start or restart. Create separate locked system accounts, install binaries and JSON configuration as root-owned read-only files, and put only `ECHO_OBSERVER_WEBHOOK_SECRET=...` in `/etc/echo-observer.env` with mode `0600`. The observer account keeps its process table hidden and does not belong to the Docker group; only each small allowlisting proxy receives its narrowly required local read access. Run `-check`, then `-dry-run`, and only then the signed `-once` delivery before enabling the service. Installation is an explicit deployment step; Echo never installs observers or changes a server on its own.

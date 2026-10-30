@@ -26,28 +26,44 @@ import (
 const maxResponseBytes = 64 << 10
 
 type Observer struct {
-	config Config
-	secret string
-	probe  *http.Client
-	sender *http.Client
-	system SystemReader
-	now    func() time.Time
+	config          Config
+	secret          string
+	deliveryEnabled bool
+	probe           *http.Client
+	sender          *http.Client
+	system          SystemReader
+	now             func() time.Time
 }
 
 func New(cfg Config, secret string) (*Observer, error) {
+	secret = strings.TrimSpace(secret)
+	if len(secret) < 32 {
+		return nil, errors.New("ECHO_OBSERVER_WEBHOOK_SECRET must contain at least 32 characters")
+	}
+	service, err := newObserver(cfg)
+	if err != nil {
+		return nil, err
+	}
+	service.secret = secret
+	service.deliveryEnabled = true
+	return service, nil
+}
+
+// NewCollector creates an observer that can execute and classify probes but
+// cannot deliver events. It is intended for installation diagnostics.
+func NewCollector(cfg Config) (*Observer, error) {
+	return newObserver(cfg)
+}
+
+func newObserver(cfg Config) (*Observer, error) {
 	var err error
 	cfg, err = normalizeConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	secret = strings.TrimSpace(secret)
-	if len(secret) < 32 {
-		return nil, errors.New("ECHO_OBSERVER_WEBHOOK_SECRET must contain at least 32 characters")
-	}
 	noRedirect := func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	return &Observer{
 		config: cfg,
-		secret: secret,
 		probe:  &http.Client{Timeout: cfg.Timeout.Duration, CheckRedirect: noRedirect, Transport: directTransport()},
 		sender: &http.Client{Timeout: cfg.Timeout.Duration, CheckRedirect: noRedirect, Transport: directTransport()},
 		system: newSystemReader(),
@@ -63,6 +79,9 @@ func directTransport() *http.Transport {
 }
 
 func (o *Observer) Run(ctx context.Context) error {
+	if !o.deliveryEnabled {
+		return errors.New("observer delivery is disabled")
+	}
 	if err := o.RunOnce(ctx); err != nil {
 		slog.Error("observer cycle completed with delivery failures", "error", err)
 	}
@@ -80,36 +99,85 @@ func (o *Observer) Run(ctx context.Context) error {
 	}
 }
 
-func (o *Observer) RunOnce(ctx context.Context) error {
-	type probeJob struct {
-		serviceID string
-		observe   func(context.Context) domain.MonitorEvent
-	}
+type probeJob struct {
+	index   int
+	observe func(context.Context) domain.MonitorEvent
+}
+
+func (o *Observer) probeJobs() []probeJob {
 	allJobs := make([]probeJob, 0, len(o.config.Probes)+len(o.config.TCPProbes)+len(o.config.SystemProbes)+len(o.config.ProcessProbes)+len(o.config.DockerProbes)+len(o.config.FreshnessProbes))
+	appendJob := func(observe func(context.Context) domain.MonitorEvent) {
+		allJobs = append(allJobs, probeJob{index: len(allJobs), observe: observe})
+	}
 	for _, configured := range o.config.Probes {
 		probe := configured
-		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observe(ctx, probe) }})
+		appendJob(func(ctx context.Context) domain.MonitorEvent { return o.observe(ctx, probe) })
 	}
 	for _, configured := range o.config.TCPProbes {
 		probe := configured
-		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeTCP(ctx, probe) }})
+		appendJob(func(ctx context.Context) domain.MonitorEvent { return o.observeTCP(ctx, probe) })
 	}
 	for _, configured := range o.config.SystemProbes {
 		probe := configured
-		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeSystem(ctx, probe) }})
+		appendJob(func(ctx context.Context) domain.MonitorEvent { return o.observeSystem(ctx, probe) })
 	}
 	for _, configured := range o.config.ProcessProbes {
 		probe := configured
-		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeProcess(ctx, probe) }})
+		appendJob(func(ctx context.Context) domain.MonitorEvent { return o.observeProcess(ctx, probe) })
 	}
 	for _, configured := range o.config.DockerProbes {
 		probe := configured
-		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeDocker(ctx, probe) }})
+		appendJob(func(ctx context.Context) domain.MonitorEvent { return o.observeDocker(ctx, probe) })
 	}
 	for _, configured := range o.config.FreshnessProbes {
 		probe := configured
-		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeFreshness(ctx, probe) }})
+		appendJob(func(ctx context.Context) domain.MonitorEvent { return o.observeFreshness(ctx, probe) })
 	}
+	return allJobs
+}
+
+// CollectOnce executes every configured probe with bounded concurrency and
+// returns normalized events in configuration order without delivering them.
+func (o *Observer) CollectOnce(ctx context.Context) ([]domain.MonitorEvent, error) {
+	allJobs := o.probeJobs()
+	events := make([]domain.MonitorEvent, len(allJobs))
+	workerCount := min(8, len(allJobs))
+	if workerCount == 0 {
+		return nil, errors.New("observer has no probes")
+	}
+	jobs := make(chan probeJob)
+	var workers sync.WaitGroup
+	for range workerCount {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for job := range jobs {
+				events[job.index] = job.observe(ctx)
+			}
+		}()
+	}
+	for _, job := range allJobs {
+		select {
+		case jobs <- job:
+		case <-ctx.Done():
+			close(jobs)
+			workers.Wait()
+			return nil, ctx.Err()
+		}
+	}
+	close(jobs)
+	workers.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func (o *Observer) RunOnce(ctx context.Context) error {
+	if !o.deliveryEnabled {
+		return errors.New("observer delivery is disabled")
+	}
+	allJobs := o.probeJobs()
 	workerCount := min(8, len(allJobs))
 	jobs := make(chan probeJob)
 	failures := make(chan error, len(allJobs))
@@ -121,7 +189,7 @@ func (o *Observer) RunOnce(ctx context.Context) error {
 			for job := range jobs {
 				event := job.observe(ctx)
 				if err := o.sendWithRetry(ctx, event); err != nil {
-					failures <- fmt.Errorf("%s: %w", job.serviceID, err)
+					failures <- fmt.Errorf("%s: %w", event.ServiceID, err)
 				}
 			}
 		}()

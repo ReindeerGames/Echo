@@ -8,6 +8,7 @@ Type=simple
 User=echo-observer
 Group=echo-observer
 EnvironmentFile=/etc/echo-observer.env
+ExecStartPre=/usr/local/bin/echo-observer -config /etc/echo-observer.json -check
 ExecStart=/usr/local/bin/echo-observer -config /etc/echo-observer.json
 Restart=on-failure
 RestartSec=5s

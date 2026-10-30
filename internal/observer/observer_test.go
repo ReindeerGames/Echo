@@ -75,6 +75,42 @@ func TestRunOnceSendsSignedHealthyEventWithoutResponseBody(t *testing.T) {
 	}
 }
 
+func TestCollectorRunsWithoutSecretOrDeliveryAndPreservesConfigOrder(t *testing.T) {
+	var deliveryCalls atomic.Int32
+	echo := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { deliveryCalls.Add(1) }))
+	defer echo.Close()
+	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			time.Sleep(20 * time.Millisecond)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer probe.Close()
+	service, err := NewCollector(Config{
+		EchoURL: echo.URL, Source: "dry-run-observer", AllowInsecureHTTP: true,
+		Probes: []HTTPProbe{
+			{Name: "slow", ServiceID: "svc_slow", URL: probe.URL + "/slow"},
+			{Name: "fast", ServiceID: "svc_fast", URL: probe.URL + "/fast"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := service.CollectOnce(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].ServiceID != "svc_slow" || events[1].ServiceID != "svc_fast" || events[0].Status != "healthy" || events[1].Status != "healthy" {
+		t.Fatalf("collector did not preserve configured order: %#v", events)
+	}
+	if deliveryCalls.Load() != 0 {
+		t.Fatalf("collector delivered %d events", deliveryCalls.Load())
+	}
+	if err := service.RunOnce(t.Context()); err == nil || !strings.Contains(err.Error(), "delivery is disabled") {
+		t.Fatalf("delivery-disabled collector ran a delivery cycle: %v", err)
+	}
+}
+
 func TestRunOnceReportsUnexpectedStatusAsUnhealthy(t *testing.T) {
 	probe := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "database details", http.StatusServiceUnavailable)
