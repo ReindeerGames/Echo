@@ -121,6 +121,63 @@ func TestInvestigateUsesOnlyGroundedReadTools(t *testing.T) {
 	}
 }
 
+func TestServiceToolProvidesFreshSanitizedOperationalEvidence(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		services: []domain.Service{{ID: "svc_1", Key: "primary-host", Name: "Primary host", ProjectName: "Platform", Kind: "host", Criticality: "critical", Enabled: true, HeartbeatTimeoutSeconds: 60}},
+		alerts:   []domain.ServiceAlert{{ServiceID: "svc_1", ServiceName: "Primary host", Fingerprint: "host-resources", Severity: "critical", Summary: "memory threshold exceeded", OpenedAt: now.Add(-time.Minute), LastSeenAt: now.Add(-30 * time.Second)}},
+		events: []domain.MonitorEvent{{
+			ServiceID: "svc_1", Status: "unhealthy", Severity: "critical", Source: "primary-observer", Summary: "memory threshold exceeded", ObservedAt: now.Add(-90 * time.Second),
+			Details: json.RawMessage(`{"snapshot":{"diskUsedPercent":72.5,"memoryUsedPercent":96.2,"load1PerCpu":0.8,"secret":"must-not-leak"},"thresholds":{"memoryCriticalPercent":95},"password":"must-not-leak","failure":"token-must-not-leak"}`),
+		}},
+	}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	output, err := responder.executeTool(context.Background(), "get_service", json.RawMessage(`{"service":"primary-host"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(output, `"age_seconds":90`, `"stale":true`, `"memoryUsedPercent":96.2`, `"memoryCriticalPercent":95`, `"fingerprint":"host-resources"`) {
+		t.Fatalf("operational evidence missing: %s", output)
+	}
+	if strings.Contains(output, "must-not-leak") || strings.Contains(output, "password") || strings.Contains(output, "secret") {
+		t.Fatalf("unallowlisted evidence leaked: %s", output)
+	}
+}
+
+func TestEvidenceSanitizerRejectsOversizedAndTrailingInput(t *testing.T) {
+	if got := sanitizedEvidence(json.RawMessage(`{"container":"web"} trailing`)); got != nil {
+		t.Fatalf("accepted trailing input: %#v", got)
+	}
+	oversized := json.RawMessage(`{"failure":"` + strings.Repeat("x", maxEvidenceBytes) + `"}`)
+	if got := sanitizedEvidence(oversized); got != nil {
+		t.Fatalf("accepted oversized evidence: %#v", got)
+	}
+}
+
+func TestServiceCommandReportsObserverFreshness(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		services: []domain.Service{{ID: "svc_1", Key: "web", Name: "Web", ProjectName: "Site", Kind: "application", Criticality: "high", Enabled: true, HeartbeatTimeoutSeconds: 60}},
+		events:   []domain.MonitorEvent{{ServiceID: "svc_1", Status: "healthy", Source: "observer", Summary: "ready", ObservedAt: now.Add(-90 * time.Second)}},
+	}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "service web")
+	if err != nil || intent != "service" || !containsAll(answer, "observed 1m30s ago", "Observer evidence: stale", "expected within 1m0s") {
+		t.Fatalf("unexpected freshness answer intent=%s err=%v body=%s", intent, err, answer)
+	}
+}
+
+func TestToolArgumentsRejectTrailingData(t *testing.T) {
+	var arguments struct {
+		Service string `json:"service"`
+	}
+	if err := decodeArguments(json.RawMessage(`{"service":"web"}{"service":"other"}`), &arguments); err == nil {
+		t.Fatal("trailing tool arguments were accepted")
+	}
+}
+
 func containsAll(value string, expected ...string) bool {
 	for _, item := range expected {
 		if !strings.Contains(value, item) {

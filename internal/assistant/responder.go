@@ -1,10 +1,12 @@
 package assistant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
@@ -28,6 +30,7 @@ type Reader interface {
 type Responder struct {
 	reader Reader
 	model  ToolModel
+	now    func() time.Time
 }
 
 type ToolModel interface {
@@ -35,7 +38,7 @@ type ToolModel interface {
 }
 
 func New(reader Reader, models ...ToolModel) *Responder {
-	responder := &Responder{reader: reader}
+	responder := &Responder{reader: reader, now: func() time.Time { return time.Now().UTC() }}
 	if len(models) > 0 {
 		responder.model = models[0]
 	}
@@ -107,16 +110,21 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			return "", err
 		}
 		type alertView struct {
-			Service  string    `json:"service"`
-			Severity string    `json:"severity"`
-			Summary  string    `json:"summary"`
-			LastSeen time.Time `json:"last_seen"`
+			Service     string    `json:"service"`
+			Severity    string    `json:"severity"`
+			Summary     string    `json:"summary"`
+			Fingerprint string    `json:"fingerprint"`
+			OpenedAt    time.Time `json:"opened_at"`
+			LastSeen    time.Time `json:"last_seen"`
 		}
-		views := make([]alertView, 0, len(alerts))
-		for _, alert := range alerts {
-			views = append(views, alertView{Service: alert.ServiceName, Severity: alert.Severity, Summary: alert.Summary, LastSeen: alert.LastSeenAt})
+		views := make([]alertView, 0, min(len(alerts), 50))
+		for index, alert := range alerts {
+			if index == 50 {
+				break
+			}
+			views = append(views, alertView{Service: alert.ServiceName, Severity: alert.Severity, Summary: alert.Summary, Fingerprint: alert.Fingerprint, OpenedAt: alert.OpenedAt, LastSeen: alert.LastSeenAt})
 		}
-		return marshal(map[string]any{"alerts": views, "count": len(views)})
+		return marshal(map[string]any{"alerts": views, "count": len(alerts), "truncated": len(alerts) > len(views)})
 	case "list_services":
 		var arguments struct {
 			Query string `json:"query"`
@@ -129,20 +137,28 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			return "", err
 		}
 		query := strings.ToLower(strings.TrimSpace(arguments.Query))
-		views := make([]map[string]any, 0)
+		views := make([]map[string]any, 0, min(len(services), 100))
+		matched := 0
 		for _, service := range services {
 			if query != "" && !strings.Contains(strings.ToLower(service.Key), query) && !strings.Contains(strings.ToLower(service.Name), query) {
 				continue
 			}
+			matched++
+			if len(views) == 100 {
+				continue
+			}
 			views = append(views, map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds})
 		}
-		return marshal(map[string]any{"services": views, "count": len(views)})
+		return marshal(map[string]any{"services": views, "count": matched, "truncated": matched > len(views)})
 	case "get_service":
 		var arguments struct {
 			Service string `json:"service"`
 		}
 		if err := decodeArguments(raw, &arguments); err != nil {
 			return "", err
+		}
+		if strings.TrimSpace(arguments.Service) == "" {
+			return marshal(map[string]any{"found": false, "reason": "service is required"})
 		}
 		services, err := r.reader.ListServices(ctx, "")
 		if err != nil {
@@ -154,7 +170,10 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		}
 		if len(matches) > 1 {
 			choices := make([]map[string]string, 0, len(matches))
-			for _, service := range matches {
+			for index, service := range matches {
+				if index == 20 {
+					break
+				}
 				choices = append(choices, map[string]string{"key": service.Key, "name": service.Name})
 			}
 			return marshal(map[string]any{"found": false, "ambiguous": true, "choices": choices})
@@ -167,18 +186,23 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		var serviceAlerts []map[string]any
 		for _, alert := range alerts {
 			if alert.ServiceID == service.ID {
-				serviceAlerts = append(serviceAlerts, map[string]any{"severity": alert.Severity, "summary": alert.Summary, "last_seen": alert.LastSeenAt})
+				serviceAlerts = append(serviceAlerts, map[string]any{"severity": alert.Severity, "summary": alert.Summary, "fingerprint": alert.Fingerprint, "opened_at": alert.OpenedAt, "last_seen": alert.LastSeenAt})
 			}
 		}
 		events, err := r.reader.ListMonitorEvents(ctx, service.ID, 5)
 		if err != nil {
 			return "", err
 		}
+		now := r.now().UTC()
 		signals := make([]map[string]any, 0, len(events))
 		for _, event := range events {
-			signals = append(signals, map[string]any{"status": event.Status, "severity": event.Severity, "summary": event.Summary, "source": event.Source, "observed_at": event.ObservedAt})
+			view := map[string]any{"status": event.Status, "severity": event.Severity, "summary": event.Summary, "source": event.Source, "observed_at": event.ObservedAt, "age_seconds": ageSeconds(now, event.ObservedAt)}
+			if evidence := sanitizedEvidence(event.Details); len(evidence) > 0 {
+				view["evidence"] = evidence
+			}
+			signals = append(signals, view)
 		}
-		return marshal(map[string]any{"found": true, "service": map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "description": service.Description, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds}, "open_alerts": serviceAlerts, "recent_signals": signals})
+		return marshal(map[string]any{"found": true, "generated_at": now, "service": map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "project": service.ProjectName, "kind": service.Kind, "criticality": service.Criticality, "description": truncateRunes(service.Description, 1000), "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds}, "observer_freshness": observerFreshness(now, service, events), "open_alerts": serviceAlerts, "recent_signals": signals})
 	case "list_projects":
 		projects, err := r.reader.ListProjects(ctx)
 		if err != nil {
@@ -188,17 +212,25 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		if err != nil {
 			return "", err
 		}
-		views := make([]map[string]any, 0, len(projects))
-		for _, project := range projects {
+		views := make([]map[string]any, 0, min(len(projects), 50))
+		for projectIndex, project := range projects {
+			if projectIndex == 50 {
+				break
+			}
 			var repos []map[string]any
+			repositoryCount := 0
 			for _, repository := range repositories {
 				if repository.ProjectID == project.ID && repository.Enabled {
+					repositoryCount++
+					if len(repos) == 50 {
+						continue
+					}
 					repos = append(repos, map[string]any{"name": repository.Owner + "/" + repository.Name, "role": repository.Role, "read_only": repository.ReadOnly})
 				}
 			}
-			views = append(views, map[string]any{"key": project.Key, "name": project.Name, "description": project.Description, "enabled": project.Enabled, "repositories": repos})
+			views = append(views, map[string]any{"key": project.Key, "name": project.Name, "description": truncateRunes(project.Description, 500), "enabled": project.Enabled, "repositories": repos, "repository_count": repositoryCount, "repositories_truncated": repositoryCount > len(repos)})
 		}
-		return marshal(map[string]any{"projects": views, "count": len(views)})
+		return marshal(map[string]any{"projects": views, "count": len(projects), "truncated": len(projects) > len(views)})
 	case "get_incident":
 		var arguments struct {
 			IncidentID string `json:"incident_id"`
@@ -232,6 +264,13 @@ func decodeArguments(raw json.RawMessage, target any) error {
 	if err := decoder.Decode(target); err != nil {
 		return fmt.Errorf("invalid tool arguments: %w", err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("invalid tool arguments: trailing data")
+		}
+		return fmt.Errorf("invalid tool arguments: %w", err)
+	}
 	return nil
 }
 
@@ -241,6 +280,150 @@ func marshal(value any) (string, error) {
 		return "", err
 	}
 	return string(raw), nil
+}
+
+const maxEvidenceBytes = 64 << 10
+
+var evidenceFields = map[string]map[string]struct{}{
+	"":           setOf("probe", "method", "statusCode", "latencyMs", "failure", "snapshot", "thresholds", "container", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
+	"snapshot":   setOf("diskPath", "diskTotalBytes", "diskAvailableBytes", "diskUsedPercent", "memoryTotalBytes", "memoryAvailableBytes", "memoryUsedPercent", "load1", "load5", "load15", "cpuCount", "load1PerCpu", "uptimeSeconds"),
+	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu"),
+}
+
+func setOf(values ...string) map[string]struct{} {
+	out := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		out[value] = struct{}{}
+	}
+	return out
+}
+
+func sanitizedEvidence(raw json.RawMessage) map[string]any {
+	if len(raw) == 0 || len(raw) > maxEvidenceBytes {
+		return nil
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value map[string]any
+	if err := decoder.Decode(&value); err != nil {
+		return nil
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil
+	}
+	return sanitizeEvidenceObject("", value)
+}
+
+func sanitizeEvidenceObject(kind string, value map[string]any) map[string]any {
+	allowed := evidenceFields[kind]
+	out := make(map[string]any)
+	for key, item := range value {
+		if _, ok := allowed[key]; !ok {
+			continue
+		}
+		if nested, ok := item.(map[string]any); ok {
+			if key != "snapshot" && key != "thresholds" {
+				continue
+			}
+			if cleaned := sanitizeEvidenceObject(key, nested); len(cleaned) > 0 {
+				out[key] = cleaned
+			}
+			continue
+		}
+		switch typed := item.(type) {
+		case string:
+			if cleaned, ok := sanitizeEvidenceString(key, typed); ok {
+				out[key] = cleaned
+			}
+		case bool, json.Number:
+			out[key] = typed
+		}
+	}
+	return out
+}
+
+func sanitizeEvidenceString(key, value string) (string, bool) {
+	value = strings.TrimSpace(value)
+	switch key {
+	case "method":
+		value = strings.ToUpper(value)
+		return value, value == "GET" || value == "HEAD"
+	case "state":
+		value = strings.ToLower(value)
+		return value, stringIn(value, "created", "running", "paused", "restarting", "removing", "exited", "dead", "unknown")
+	case "health":
+		value = strings.ToLower(value)
+		return value, stringIn(value, "healthy", "unhealthy", "starting", "unknown", "none")
+	case "failure":
+		return value, stringIn(value, "metrics_unavailable", "invalid_request", "timeout", "connection_failed", "unexpected_status", "inspect_status", "inspect_response_too_large", "invalid_inspect_response", "docker_unavailable", "container_inspect_failed", "proxy_request_failed")
+	case "container", "probe":
+		if value == "" || len(value) > 128 {
+			return "", false
+		}
+		for _, character := range value {
+			if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || strings.ContainsRune("._-:", character) {
+				continue
+			}
+			return "", false
+		}
+		return value, true
+	case "diskPath":
+		return truncateRunes(value, 200), strings.HasPrefix(value, "/") && !strings.ContainsRune(value, '\x00')
+	case "startedAt", "finishedAt", "lastObservedAt", "policyUpdatedAt", "policyReference":
+		if value == "" {
+			return "", false
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			return "", false
+		}
+		return parsed.UTC().Format(time.RFC3339Nano), true
+	default:
+		return "", false
+	}
+}
+
+func stringIn(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func observerFreshness(now time.Time, service domain.Service, events []domain.MonitorEvent) map[string]any {
+	view := map[string]any{"heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds, "received": false}
+	for _, event := range events {
+		if event.Source == "echo-watchdog" {
+			continue
+		}
+		age := ageSeconds(now, event.ObservedAt)
+		view["received"] = true
+		view["last_observed_at"] = event.ObservedAt
+		view["age_seconds"] = age
+		if service.HeartbeatTimeoutSeconds > 0 {
+			view["stale"] = age > int64(service.HeartbeatTimeoutSeconds)
+		}
+		break
+	}
+	return view
+}
+
+func ageSeconds(now, observed time.Time) int64 {
+	if observed.IsZero() || observed.After(now) {
+		return 0
+	}
+	return int64(now.Sub(observed) / time.Second)
+}
+
+func truncateRunes(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit]) + "…"
 }
 
 func (r *Responder) Answer(ctx context.Context, text string) (string, string, error) {
@@ -416,13 +599,44 @@ func (r *Responder) service(ctx context.Context, query string) (string, error) {
 			lines = append(lines, fmt.Sprintf("• %s · %s", strings.ToUpper(alert.Severity), alert.Summary))
 		}
 	}
+	now := r.now().UTC()
 	if len(events) > 0 {
 		latest := events[0]
-		lines = append(lines, fmt.Sprintf("Latest signal: %s · %s · %s", latest.Status, latest.Source, latest.Summary))
+		lines = append(lines, fmt.Sprintf("Latest signal: %s · %s · %s (observed %s ago)", latest.Status, latest.Source, latest.Summary, formatAge(now, latest.ObservedAt)))
 	} else {
 		lines = append(lines, "Latest signal: none received")
 	}
+	lines = append(lines, observerFreshnessLine(now, service, events))
 	return fmt.Sprintf("Service: %s (%s)\n\n%s", service.Name, service.Key, strings.Join(nonEmpty(lines), "\n")), nil
+}
+
+func observerFreshnessLine(now time.Time, service domain.Service, events []domain.MonitorEvent) string {
+	if service.HeartbeatTimeoutSeconds <= 0 {
+		return "Observer heartbeat: timeout policy disabled"
+	}
+	expected := time.Duration(service.HeartbeatTimeoutSeconds) * time.Second
+	for _, event := range events {
+		if event.Source == "echo-watchdog" {
+			continue
+		}
+		age := time.Duration(ageSeconds(now, event.ObservedAt)) * time.Second
+		if age > expected {
+			return fmt.Sprintf("Observer evidence: stale · last report %s ago (expected within %s)", formatDuration(age), formatDuration(expected))
+		}
+		return fmt.Sprintf("Observer evidence: fresh · last report %s ago", formatDuration(age))
+	}
+	return fmt.Sprintf("Observer evidence: none received (expected within %s)", formatDuration(expected))
+}
+
+func formatAge(now, observed time.Time) string {
+	return formatDuration(time.Duration(ageSeconds(now, observed)) * time.Second)
+}
+
+func formatDuration(value time.Duration) string {
+	if value < 0 {
+		value = 0
+	}
+	return value.Round(time.Second).String()
 }
 
 func (r *Responder) projects(ctx context.Context) (string, error) {

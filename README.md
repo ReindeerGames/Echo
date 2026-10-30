@@ -43,7 +43,7 @@ Separately, the operations catalogue maps projects to runtime services. The bund
 
 Approvals can be resolved in the UI or by replying privately from the configured owner JID with `approve <code>` or `reject <code>`.
 
-The owner can also ask Echo directly for `status`, `alerts`, `services`, `service <name>`, `projects`, or `incident <id>`. With OpenAI configured, natural follow-up questions use a locally retained conversation and bounded Responses API function tools. The tool set is read-only, remote response storage is disabled, and every tool run is reviewable in the Assistant screen; questions can never authorize an action.
+The owner can also ask Echo directly for `status`, `alerts`, `services`, `service <name>`, `projects`, or `incident <id>`. With OpenAI configured, natural follow-up questions use a locally retained conversation and bounded Responses API function tools. Service investigations include evidence age, heartbeat freshness, alert timing, and allowlisted HTTP, host-resource, and container counters without forwarding arbitrary monitoring details. The tool set is read-only, remote response storage is disabled, and every tool run is reviewable in the Assistant screen; questions can never authorize an action.
 
 Configure the owner without handling JIDs manually: send Echo a direct WhatsApp message, open **WhatsApp** in the authenticated control plane, refresh discovered contacts, and select that contact as owner. Echo discovers direct-message contacts only; group participants are not harvested. The selection takes effect immediately and overrides the optional `ECHO_OWNER_JID` environment fallback.
 
