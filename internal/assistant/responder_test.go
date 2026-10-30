@@ -236,6 +236,20 @@ func TestDailyBriefNamesCurrentAttentionItems(t *testing.T) {
 	}
 }
 
+func TestDailyBriefIncludesBoundedGitHubWorkflowAttention(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{repos: []domain.Repository{{ID: "repo_failed", Owner: "ReindeerGames", Name: "invoices", DefaultBranch: "main", Enabled: true}}}
+	inspector := &estateRepositoryInspector{statuses: map[string]githubapp.RepositoryStatus{
+		"ReindeerGames/invoices": {Repository: "ReindeerGames/invoices", DefaultBranch: "main", HeadSHA: strings.Repeat("a", 40), HeadCommittedAt: now, WorkflowRuns: []githubapp.RepositoryWorkflowRun{{Name: "Deploy", Status: "completed", Conclusion: "failure", UpdatedAt: now}}},
+	}, errors: map[string]error{}}
+	responder := NewOperator(reader, nil, nil, inspector)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "daily brief")
+	if err != nil || intent != "brief" || !containsAll(answer, "GitHub workflows: 0 healthy · 0 running · 1 attention · 0 unavailable", "ATTENTION · ReindeerGames/invoices · 1 latest workflow(s) failed") {
+		t.Fatalf("unexpected GitHub daily brief intent=%s body=%s err=%v", intent, answer, err)
+	}
+}
+
 func TestUnknownQuestionExplainsSafeCapabilities(t *testing.T) {
 	answer, intent, err := New(fakeReader{}).Answer(context.Background(), "reboot everything")
 	if err != nil || intent != "unknown" || !containsAll(answer, "did not understand", "never make a production change") {

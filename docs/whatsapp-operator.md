@@ -10,7 +10,7 @@ Service detail includes observer freshness, evidence age, alert fingerprints and
 
 Supported requests include:
 
-- `brief`, `daily brief`, or “good morning” for runtime health, monitoring coverage, open alerts and incidents, and deployments needing attention
+- `brief`, `daily brief`, or “good morning” for runtime health, monitoring coverage, open alerts and incidents, deployments needing attention, and bounded GitHub workflow health
 - `status` or “how are things?” for the estate summary
 - `alerts` or “anything wrong?” for open runtime conditions
 - `services` for the operations catalogue

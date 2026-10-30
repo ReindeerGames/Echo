@@ -896,7 +896,56 @@ func (r *Responder) brief(ctx context.Context) (string, error) {
 			deploymentLines = append(deploymentLines, fmt.Sprintf("…and %d more in the control plane.", attentionCount-len(attention)))
 		}
 	}
-	return "Echo daily brief\n\n" + strings.TrimPrefix(status, "Echo operational status\n") + "\n\n" + alerts + "\n\n" + strings.Join(incidentLines, "\n") + "\n\n" + strings.Join(deploymentLines, "\n"), nil
+	githubLines := r.briefRepositoryHealth(ctx)
+	return "Echo daily brief\n\n" + strings.TrimPrefix(status, "Echo operational status\n") + "\n\n" + alerts + "\n\n" + strings.Join(incidentLines, "\n") + "\n\n" + strings.Join(deploymentLines, "\n") + "\n\n" + strings.Join(githubLines, "\n"), nil
+}
+
+func (r *Responder) briefRepositoryHealth(ctx context.Context) []string {
+	if r.github == nil {
+		return []string{"GitHub workflows: unavailable · connection not configured"}
+	}
+	inspectCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	entries, total, truncated, err := r.inspectRepositoryEstate(inspectCtx)
+	if err != nil {
+		return []string{"GitHub workflows: unavailable · configured repository list could not be read"}
+	}
+	healthy, running, attention, unavailable := 0, 0, 0, 0
+	issues := make([]string, 0, 5)
+	for _, entry := range entries {
+		name := entry.Repository.Owner + "/" + entry.Repository.Name
+		if entry.Failed {
+			unavailable++
+			if len(issues) < 5 {
+				issues = append(issues, "• UNAVAILABLE · "+name)
+			}
+			continue
+		}
+		state, summary := repositoryWorkflowHealth(entry.Status)
+		switch state {
+		case "attention":
+			attention++
+			if len(issues) < 5 {
+				issues = append(issues, "• ATTENTION · "+name+" · "+summary)
+			}
+		case "running":
+			running++
+		case "healthy":
+			healthy++
+		default:
+			unavailable++
+			if len(issues) < 5 {
+				issues = append(issues, "• UNKNOWN · "+name+" · no recent default-branch workflows returned")
+			}
+		}
+	}
+	line := fmt.Sprintf("GitHub workflows: %d healthy · %d running · %d attention · %d unavailable", healthy, running, attention, unavailable)
+	if total == 0 {
+		line = "GitHub workflows: no enabled repositories configured"
+	} else if truncated {
+		line += fmt.Sprintf(" · first 20 of %d repositories", total)
+	}
+	return append([]string{line}, issues...)
 }
 
 func (r *Responder) alerts(ctx context.Context) (string, error) {
