@@ -24,6 +24,9 @@ type fakeReader struct {
 	events      []domain.MonitorEvent
 	jobs        []domain.Job
 	deployments []domain.Deployment
+	changes     []domain.ChangeSet
+	incident    domain.Incident
+	analysis    domain.Analysis
 }
 
 type fakeToolModel struct{}
@@ -77,11 +80,20 @@ func (f fakeReader) ListJobs(context.Context, string, int) ([]domain.Job, error)
 func (f fakeReader) ListDeployments(context.Context, string) ([]domain.Deployment, error) {
 	return f.deployments, nil
 }
+func (f fakeReader) ListChangeSets(context.Context, string) ([]domain.ChangeSet, error) {
+	return f.changes, nil
+}
 func (f fakeReader) GetIncident(context.Context, string) (domain.Incident, error) {
-	return domain.Incident{}, store.ErrNotFound
+	if f.incident.ID == "" {
+		return domain.Incident{}, store.ErrNotFound
+	}
+	return f.incident, nil
 }
 func (f fakeReader) LatestAnalysis(context.Context, string) (domain.Analysis, error) {
-	return domain.Analysis{}, store.ErrNotFound
+	if f.analysis.ID == "" {
+		return domain.Analysis{}, store.ErrNotFound
+	}
+	return f.analysis, nil
 }
 
 func TestClassifyNaturalOperatorQuestions(t *testing.T) {
@@ -314,6 +326,25 @@ func TestDeploymentAnswersExposeBoundedVerificationState(t *testing.T) {
 	output, err := responder.executeTool(context.Background(), "get_deployments", json.RawMessage(`{"status":"failed"}`))
 	if err != nil || !containsAll(output, `"count":1`, `"id":"dep_failed"`, `"status":"failed"`) || strings.Contains(output, "private") || strings.Contains(output, "dep_verified") {
 		t.Fatalf("unexpected deployment tool output=%s err=%v", output, err)
+	}
+}
+
+func TestIncidentAnswersIncludeChangeAndDeploymentLifecycle(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		incident:    domain.Incident{ID: "inc_123", ProjectName: "Invoices", Status: "resolved", Severity: "high", Summary: "Invoices were blank", CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now},
+		analysis:    domain.Analysis{ID: "ana_1", IncidentID: "inc_123", Status: "complete", Confidence: "high", Summary: "Template regression", CreatedAt: now.Add(-90 * time.Minute)},
+		changes:     []domain.ChangeSet{{ID: "chg_1", IncidentID: "inc_123", RepositoryID: "repo_1", BranchName: "echo/inc-123", CommitSHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", PullRequestNumber: 17, ArtifactRef: "a75cdbdaad7917a104299753c32f8358b90a50e6", Status: "merged", CreatedAt: now.Add(-time.Hour), UpdatedAt: now}},
+		deployments: []domain.Deployment{{ID: "dep_1", IncidentID: "inc_123", ProjectID: "prj_1", Environment: "production", Operation: "deploy", ArtifactRef: "a75cdbdaad7917a104299753c32f8358b90a50e6", Status: "verified", CreatedAt: now.Add(-30 * time.Minute)}},
+	}
+	responder := New(reader)
+	answer, intent, err := responder.Answer(context.Background(), "incident inc_123")
+	if err != nil || intent != "incident" || !containsAll(answer, "Analysis (high confidence): Template regression", "Latest change: merged · PR #17 · a75cdbda", "Latest deployment: production · deploy · verified") {
+		t.Fatalf("unexpected incident answer intent=%s body=%s err=%v", intent, answer, err)
+	}
+	output, err := responder.executeTool(context.Background(), "get_incident", json.RawMessage(`{"incident_id":"inc_123"}`))
+	if err != nil || !containsAll(output, `"pull_request_number":17`, `"commit_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`, `"environment":"production"`, `"status":"verified"`) || strings.Contains(output, "pullRequestUrl") {
+		t.Fatalf("unexpected incident tool output=%s err=%v", output, err)
 	}
 }
 

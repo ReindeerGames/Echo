@@ -26,6 +26,7 @@ type Reader interface {
 	ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error)
 	ListJobs(context.Context, string, int) ([]domain.Job, error)
 	ListDeployments(context.Context, string) ([]domain.Deployment, error)
+	ListChangeSets(context.Context, string) ([]domain.ChangeSet, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
 }
@@ -392,6 +393,32 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		} else if !errors.Is(analysisErr, store.ErrNotFound) {
 			return "", analysisErr
 		}
+		changes, err := r.reader.ListChangeSets(ctx, incident.ID)
+		if err != nil {
+			return "", err
+		}
+		changeViews := make([]map[string]any, 0, min(len(changes), 20))
+		for index, change := range changes {
+			if index == 20 {
+				break
+			}
+			changeViews = append(changeViews, changeSetView(change))
+		}
+		deployments, err := r.reader.ListDeployments(ctx, incident.ID)
+		if err != nil {
+			return "", err
+		}
+		deploymentViews := make([]map[string]any, 0, min(len(deployments), 20))
+		for index, deployment := range deployments {
+			if index == 20 {
+				break
+			}
+			deploymentViews = append(deploymentViews, deploymentView(deployment))
+		}
+		view["changes"] = changeViews
+		view["changes_truncated"] = len(changes) > len(changeViews)
+		view["deployments"] = deploymentViews
+		view["deployments_truncated"] = len(deployments) > len(deploymentViews)
 		return marshal(view)
 	default:
 		return "", fmt.Errorf("unknown read-only tool %q", name)
@@ -919,6 +946,20 @@ func deploymentView(deployment domain.Deployment) map[string]any {
 	}
 }
 
+func changeSetView(change domain.ChangeSet) map[string]any {
+	return map[string]any{
+		"id":                  change.ID,
+		"repository_id":       change.RepositoryID,
+		"status":              change.Status,
+		"branch":              truncateRunes(change.BranchName, 200),
+		"commit_sha":          truncateRunes(change.CommitSHA, 64),
+		"pull_request_number": change.PullRequestNumber,
+		"artifact_ref":        truncateRunes(change.ArtifactRef, 64),
+		"created_at":          change.CreatedAt,
+		"updated_at":          change.UpdatedAt,
+	}
+}
+
 func (r *Responder) service(ctx context.Context, query string) (string, error) {
 	if query == "" {
 		return "Please name the service, for example “service nudgie-web”.", nil
@@ -1048,6 +1089,29 @@ func (r *Responder) incident(ctx context.Context, incidentID string) (string, er
 		lines = append(lines, fmt.Sprintf("Analysis (%s confidence): %s", analysis.Confidence, analysis.Summary))
 	} else if !errors.Is(analysisErr, store.ErrNotFound) {
 		return "", analysisErr
+	}
+	changes, err := r.reader.ListChangeSets(ctx, incident.ID)
+	if err != nil {
+		return "", err
+	}
+	if len(changes) > 0 {
+		latest := changes[0]
+		change := fmt.Sprintf("Latest change: %s", latest.Status)
+		if latest.PullRequestNumber > 0 {
+			change += fmt.Sprintf(" · PR #%d", latest.PullRequestNumber)
+		}
+		if latest.CommitSHA != "" {
+			change += " · " + truncateRunes(latest.CommitSHA, 8)
+		}
+		lines = append(lines, change)
+	}
+	deployments, err := r.reader.ListDeployments(ctx, incident.ID)
+	if err != nil {
+		return "", err
+	}
+	if len(deployments) > 0 {
+		latest := deployments[0]
+		lines = append(lines, fmt.Sprintf("Latest deployment: %s · %s · %s", latest.Environment, latest.Operation, latest.Status))
 	}
 	return fmt.Sprintf("Incident %s\n\n%s", incident.ID, strings.Join(nonEmpty(lines), "\n")), nil
 }

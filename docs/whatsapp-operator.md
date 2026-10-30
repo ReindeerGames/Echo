@@ -16,7 +16,7 @@ Supported requests include:
 - `deployments` or “what is deployed?” for recent dispatch, rollback, and verification state
 - `projects` for the project and repository map
 - `repo <name>` for the configured default-branch head and up to ten recent GitHub Actions runs
-- `incident <id>` for the incident state and latest diagnosis
+- `incident <id>` for the report, latest diagnosis, bounded change/PR state, and deployment verification that followed
 - `help` for the current command summary
 
 Replies are capped for WhatsApp readability. The control plane remains the complete record.
