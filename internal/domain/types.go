@@ -475,6 +475,7 @@ type OutboundMessage struct {
 type OutboundDelivery struct {
 	ChannelType     string     `json:"channelType"`
 	Status          string     `json:"status"`
+	BatchCount      int        `json:"batchCount"`
 	Attempts        int        `json:"attempts"`
 	MaxAttempts     int        `json:"maxAttempts"`
 	AvailableAt     time.Time  `json:"availableAt"`

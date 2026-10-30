@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -574,6 +575,143 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	}
 }
 
+func TestMariaDBMonitorNotificationBurstsAreCoalesced(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "notification-burst", Name: "Notification burst", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	serviceNames := []string{"API", "Worker", "Database", "Queue", "Cache", "Search", "Billing", "Email", "Scheduler", "Proxy", "Storage", "Reports"}
+	events := make([]domain.MonitorEvent, 0, len(serviceNames))
+	for index, name := range serviceNames {
+		service, saveErr := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: strings.ToLower(name), Name: name, Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+		if saveErr != nil {
+			t.Fatal(saveErr)
+		}
+		events = append(events, domain.MonitorEvent{EventID: fmt.Sprintf("burst-%d", index), ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: name + " is unavailable", Fingerprint: "readiness", Details: json.RawMessage(`{}`), ObservedAt: now.Add(time.Duration(index) * time.Second)})
+	}
+	start := make(chan struct{})
+	errorsFound := make(chan error, len(events))
+	var wait sync.WaitGroup
+	for _, event := range events {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			_, recordErr := st.RecordMonitorEvent(ctx, event, "owner@s.whatsapp.net")
+			errorsFound <- recordErr
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errorsFound)
+	for recordErr := range errorsFound {
+		if recordErr != nil {
+			t.Fatal(recordErr)
+		}
+	}
+	var outboxID, body string
+	var batchCount int
+	var availableAt, createdAt time.Time
+	if err := st.db.QueryRowContext(ctx, `SELECT id,body,coalesce_count,available_at,created_at FROM echo_whatsapp_outbox`).Scan(&outboxID, &body, &batchCount, &availableAt, &createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if batchCount != len(serviceNames) || !availableAt.After(createdAt) || len([]rune(body)) > monitorNotificationMaxCharacters {
+		t.Fatalf("unexpected coalesced delivery: count=%d available=%s created=%s length=%d", batchCount, availableAt, createdAt, len([]rune(body)))
+	}
+	for _, expected := range []string{"Echo monitoring update · OPENED", "Additional monitoring changes are available"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("coalesced delivery missing %q: %s", expected, body)
+		}
+	}
+	detailedItems := strings.Count(body, "(readiness)")
+	if detailedItems < 1 || detailedItems > monitorNotificationMaxItems {
+		t.Fatalf("coalesced delivery detailed item count=%d body=%s", detailedItems, body)
+	}
+	if _, err := st.ClaimOutbound(ctx, time.Minute); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("coalescing window did not defer delivery: %v", err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET available_at=UTC_TIMESTAMP(6) WHERE id=?`, outboxID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := st.ClaimOutbound(ctx, time.Minute)
+	if err != nil || claimed.ID != outboxID || claimed.Body != body {
+		t.Fatalf("claim coalesced delivery: item=%#v err=%v", claimed, err)
+	}
+	var remainingKey sql.NullString
+	if err := st.db.QueryRowContext(ctx, `SELECT coalesce_key FROM echo_whatsapp_outbox WHERE id=?`, outboxID).Scan(&remainingKey); err != nil || remainingKey.Valid {
+		t.Fatalf("claimed batch retained coalescing key: key=%#v err=%v", remainingKey, err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "post-claim", Name: "Post claim", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordMonitorEvent(ctx, domain.MonitorEvent{EventID: "burst-after-claim", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "Post-claim service is unavailable", Fingerprint: "readiness", Details: json.RawMessage(`{}`), ObservedAt: now.Add(time.Minute)}, "owner@s.whatsapp.net"); err != nil {
+		t.Fatal(err)
+	}
+	queued, err := st.ListOutboundDeliveries(ctx, "queued", 10)
+	if err != nil || len(queued) != 1 || queued[0].BatchCount != 1 {
+		t.Fatalf("new burst did not start after claim: deliveries=%#v err=%v", queued, err)
+	}
+}
+
+func TestMariaDBMutedNotificationsStillExpireMaintenanceSuppression(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "muted-maintenance", Name: "Muted maintenance", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "api", Name: "API", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	window, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{ServiceID: service.ID, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour), Reason: "Muted delivery test"}, "integration-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := domain.MonitorEvent{EventID: "muted-maintenance-open", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "API is unavailable", Fingerprint: "readiness", Details: json.RawMessage(`{}`), ObservedAt: now}
+	if result, err := st.RecordMonitorEvent(ctx, event); err != nil || len(result.Transitions) != 1 || !result.Transitions[0].Suppressed {
+		t.Fatalf("maintenance opening state: result=%#v err=%v", result, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_service_maintenance_windows SET starts_at=?,ends_at=? WHERE id=?`, now.Add(-2*time.Hour), now.Add(-time.Hour), window.ID); err != nil {
+		t.Fatal(err)
+	}
+	transitions, err := st.QueueDueServiceAlertNotifications(ctx, now.Add(time.Minute), time.Hour, "", 20)
+	if err != nil || len(transitions) != 1 || transitions[0].Kind != "maintenance_ended" {
+		t.Fatalf("muted maintenance expiry: transitions=%#v err=%v", transitions, err)
+	}
+	alerts, err := st.ListServiceAlertsForService(ctx, service.ID, "open", 10)
+	if err != nil || len(alerts) != 1 || alerts[0].MaintenanceWindowID != "" || alerts[0].NotificationSuppressedUntil != nil {
+		t.Fatalf("muted maintenance suppression remained stale: alerts=%#v err=%v", alerts, err)
+	}
+	var notifications int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&notifications); err != nil || notifications != 0 {
+		t.Fatalf("muted maintenance queued delivery: count=%d err=%v", notifications, err)
+	}
+}
+
 func TestMariaDBMonitorRecoveryIsScopedAndClearsObserverSilence(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -680,7 +818,7 @@ func TestMariaDBMonitorAlertSeverityEscalationNotifiesOnce(t *testing.T) {
 		t.Fatalf("severity transition notification count=%d err=%v", notifications, err)
 	}
 	var escalationBody string
-	if err := st.db.QueryRowContext(ctx, `SELECT body FROM echo_whatsapp_outbox WHERE body LIKE 'Echo alert ESCALATED%' LIMIT 1`).Scan(&escalationBody); err != nil || !strings.Contains(escalationBody, "ESCALATED · CRITICAL") || !strings.Contains(escalationBody, "investigate Web") {
+	if err := st.db.QueryRowContext(ctx, `SELECT body FROM echo_whatsapp_outbox WHERE body LIKE 'Echo monitoring update · ESCALATED%' LIMIT 1`).Scan(&escalationBody); err != nil || !strings.Contains(escalationBody, "CRITICAL · Web") || !strings.Contains(escalationBody, "investigate Web") {
 		t.Fatalf("severity escalation notification body=%q err=%v", escalationBody, err)
 	}
 }
@@ -757,7 +895,7 @@ func TestMariaDBMaintenanceSuppressesAndRestoresAlertNotifications(t *testing.T)
 	if err != nil || len(due) != 1 || due[0].Kind != "maintenance_ended" || due[0].Suppressed {
 		t.Fatalf("persistent alert did not notify proactively after maintenance: transitions=%#v err=%v", due, err)
 	}
-	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE body LIKE 'Echo alert MAINTENANCE ENDED%'`).Scan(&notifications); err != nil || notifications != 1 {
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE body LIKE 'Echo monitoring update · MAINTENANCE ENDED%'`).Scan(&notifications); err != nil || notifications != 1 {
 		t.Fatalf("maintenance-ended notification count=%d err=%v", notifications, err)
 	}
 	alerts, err = st.ListServiceAlertsForService(ctx, service.ID, "open", 10)

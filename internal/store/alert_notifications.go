@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/domain"
-	"github.com/ReindeerGames/echo/internal/id"
 )
 
 var ErrAlertTokenAmbiguous = errors.New("alert acknowledgement code is ambiguous")
@@ -129,9 +128,6 @@ func (s *Store) ClearServiceAlertAcknowledgement(ctx context.Context, alertID st
 // Row locking makes concurrent watchdog replicas safe without a process lock.
 func (s *Store) QueueDueServiceAlertNotifications(ctx context.Context, now time.Time, reminderInterval time.Duration, ownerJID string, limit int) ([]domain.AlertTransition, error) {
 	ownerJID = strings.TrimSpace(ownerJID)
-	if ownerJID == "" {
-		return []domain.AlertTransition{}, nil
-	}
 	if len(ownerJID) > 255 {
 		return nil, errors.New("owner JID exceeds storage limits")
 	}
@@ -140,7 +136,7 @@ func (s *Store) QueueDueServiceAlertNotifications(ctx context.Context, now time.
 	}
 	now = now.UTC()
 	deadline := now.Add(-reminderInterval)
-	remindersEnabled := reminderInterval > 0
+	remindersEnabled := reminderInterval > 0 && ownerJID != ""
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -188,20 +184,23 @@ func (s *Store) QueueDueServiceAlertNotifications(ctx context.Context, now time.
 		if expiredMaintenance {
 			kind = "maintenance_ended"
 		}
-		body := serviceAlertNotificationBody(kind, alert)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, body); err != nil {
-			return nil, err
-		}
 		if kind == "reminder" {
 			alert.ReminderCount++
 			if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET last_notified_at=?,reminder_count=reminder_count+1 WHERE id=?`, now, alert.ID); err != nil {
 				return nil, err
 			}
-		} else if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET last_notified_at=? WHERE id=?`, now, alert.ID); err != nil {
-			return nil, err
+		} else if ownerJID != "" {
+			if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET last_notified_at=? WHERE id=?`, now, alert.ID); err != nil {
+				return nil, err
+			}
 		}
-		alert.LastNotifiedAt = &now
+		if ownerJID != "" {
+			alert.LastNotifiedAt = &now
+		}
 		transitions = append(transitions, domain.AlertTransition{Kind: kind, Alert: alert})
+	}
+	if err := enqueueMonitorTransitionBodies(ctx, tx, ownerJID, transitions); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -217,14 +216,15 @@ func validAlertAcknowledgementCode(code string) bool {
 	return err == nil
 }
 
-func serviceAlertNotificationBody(kind string, alert domain.ServiceAlert) string {
+func serviceAlertNotificationParts(kind string, alert domain.ServiceAlert) (string, string) {
 	label := strings.ReplaceAll(strings.ToUpper(kind), "_", " ")
-	body := fmt.Sprintf("Echo alert %s · %s\n%s (%s)\n%s", label, strings.ToUpper(alert.Severity), alert.ServiceName, alert.Fingerprint, alert.Summary)
+	header := "Echo monitoring update · " + label
+	item := fmt.Sprintf("• %s · %s (%s)\n%s", strings.ToUpper(alert.Severity), alert.ServiceName, alert.Fingerprint, alert.Summary)
 	if alert.Status == "open" {
 		if alert.Severity == "critical" && alert.AcknowledgedAt == nil {
-			body += fmt.Sprintf("\n\nReply “ack %s” to acknowledge this alert and stop reminders until it resolves, reopens, or escalates.", AlertAcknowledgementCode(alert.ID))
+			item += fmt.Sprintf("\nReply “ack %s” to acknowledge this alert and stop reminders until it resolves, reopens, or escalates.", AlertAcknowledgementCode(alert.ID))
 		}
-		body += fmt.Sprintf("\nReply “service %s” for current evidence, or “investigate %s” for correlated diagnosis when AI tools are enabled.", alert.ServiceName, alert.ServiceName)
+		item += fmt.Sprintf("\nReply “service %s” for current evidence, or “investigate %s” for correlated diagnosis when AI tools are enabled.", alert.ServiceName, alert.ServiceName)
 	}
-	return body
+	return header, item
 }

@@ -24,6 +24,12 @@ var migrationFS embed.FS
 var ErrNotFound = errors.New("not found")
 var ErrApprovalStale = errors.New("approval evidence revision is stale")
 
+const (
+	monitorNotificationMaxItems      = 10
+	monitorNotificationMaxCharacters = 3500
+	monitorNotificationOverflow      = "\n\n• Additional monitoring changes are available in Echo → Monitoring."
+)
+
 type Store struct {
 	db *sql.DB
 }
@@ -696,6 +702,34 @@ func (s *Store) ResolveInactiveHeartbeatAlerts(ctx context.Context, now time.Tim
 }
 
 func (s *Store) RecordMonitorEvent(ctx context.Context, event domain.MonitorEvent, ownerJID ...string) (domain.MonitorResult, error) {
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		result, err := s.recordMonitorEvent(ctx, event, ownerJID...)
+		if err == nil || !retryableTransactionError(err) {
+			return result, err
+		}
+		lastErr = err
+		if attempt == maxAttempts {
+			break
+		}
+		timer := time.NewTimer(time.Duration(attempt) * 10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return domain.MonitorResult{}, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return domain.MonitorResult{}, lastErr
+}
+
+func retryableTransactionError(err error) bool {
+	var databaseError *mysql.MySQLError
+	return errors.As(err, &databaseError) && (databaseError.Number == 1205 || databaseError.Number == 1213)
+}
+
+func (s *Store) recordMonitorEvent(ctx context.Context, event domain.MonitorEvent, ownerJID ...string) (domain.MonitorResult, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.MonitorResult{}, err
@@ -726,6 +760,9 @@ func (s *Store) RecordMonitorEvent(ctx context.Context, event domain.MonitorEven
 
 	var now time.Time
 	if err := tx.QueryRowContext(ctx, `SELECT UTC_TIMESTAMP(6)`).Scan(&now); err != nil {
+		return domain.MonitorResult{}, err
+	}
+	if err := lockNotificationCoalesce(ctx, tx, "monitor-alert-lifecycle"); err != nil {
 		return domain.MonitorResult{}, err
 	}
 	maintenance, err := activeMaintenanceWindow(ctx, tx, event.ServiceID, now)
@@ -760,15 +797,14 @@ func enqueueMonitorTransitions(ctx context.Context, tx *sql.Tx, ownerJID string,
 	if len(ownerJID) > 255 {
 		return errors.New("owner JID exceeds storage limits")
 	}
+	if err := enqueueMonitorTransitionBodies(ctx, tx, ownerJID, transitions); err != nil {
+		return err
+	}
 	for _, transition := range transitions {
-		if transition.Suppressed || (transition.Kind != "opened" && transition.Kind != "reopened" && transition.Kind != "escalated" && transition.Kind != "resolved" && transition.Kind != "maintenance_ended") {
+		if transition.Suppressed || !monitorTransitionNotifiable(transition.Kind) {
 			continue
 		}
 		alert := transition.Alert
-		body := serviceAlertNotificationBody(transition.Kind, alert)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, body); err != nil {
-			return err
-		}
 		if alert.Status == "open" {
 			if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET last_notified_at=UTC_TIMESTAMP(6) WHERE id=?`, alert.ID); err != nil {
 				return err
@@ -776,6 +812,74 @@ func enqueueMonitorTransitions(ctx context.Context, tx *sql.Tx, ownerJID string,
 		}
 	}
 	return nil
+}
+
+func enqueueMonitorTransitionBodies(ctx context.Context, tx *sql.Tx, ownerJID string, transitions []domain.AlertTransition) error {
+	if ownerJID == "" {
+		return nil
+	}
+	kinds := make(map[string]struct{})
+	for _, transition := range transitions {
+		if !transition.Suppressed && monitorTransitionNotifiable(transition.Kind) {
+			kinds[transition.Kind] = struct{}{}
+		}
+	}
+	orderedKinds := make([]string, 0, len(kinds))
+	for kind := range kinds {
+		orderedKinds = append(orderedKinds, kind)
+	}
+	sort.Strings(orderedKinds)
+	for _, kind := range orderedKinds {
+		if err := lockNotificationCoalesce(ctx, tx, "monitor-transition:"+kind); err != nil {
+			return err
+		}
+	}
+	for _, transition := range transitions {
+		if transition.Suppressed || !monitorTransitionNotifiable(transition.Kind) {
+			continue
+		}
+		if err := enqueueCoalescedMonitorNotification(ctx, tx, ownerJID, transition.Kind, transition.Alert); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func lockNotificationCoalesce(ctx context.Context, tx *sql.Tx, key string) error {
+	var locked string
+	if err := tx.QueryRowContext(ctx, `SELECT lock_key FROM echo_notification_coalesce_locks WHERE lock_key=? FOR UPDATE`, key).Scan(&locked); err != nil {
+		return fmt.Errorf("lock monitoring notification batch: %w", err)
+	}
+	return nil
+}
+
+func monitorTransitionNotifiable(kind string) bool {
+	switch kind {
+	case "opened", "reopened", "escalated", "resolved", "maintenance_ended", "reminder":
+		return true
+	default:
+		return false
+	}
+}
+
+func enqueueCoalescedMonitorNotification(ctx context.Context, tx *sql.Tx, ownerJID, kind string, alert domain.ServiceAlert) error {
+	header, item := serviceAlertNotificationParts(kind, alert)
+	body := header + "\n\n" + item
+	appendItem := "\n\n" + item
+	key := "monitor-transition:" + kind
+	_, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body,available_at,coalesce_key,coalesce_count)
+      VALUES(?,?,?,DATE_ADD(UTC_TIMESTAMP(6),INTERVAL 8 SECOND),?,1)
+      ON DUPLICATE KEY UPDATE
+        body=CASE
+          WHEN coalesce_count<? AND CHAR_LENGTH(body)+CHAR_LENGTH(?)<=? THEN CONCAT(body,?)
+          WHEN coalesce_count<=? AND LOCATE(?,body)=0 AND CHAR_LENGTH(body)+CHAR_LENGTH(?)<=? THEN CONCAT(body,?)
+          ELSE body
+        END,
+        coalesce_count=LEAST(coalesce_count+1,1000000)`,
+		id.New("out"), ownerJID, body, key,
+		monitorNotificationMaxItems, appendItem, monitorNotificationMaxCharacters, appendItem,
+		monitorNotificationMaxItems, monitorNotificationOverflow, monitorNotificationOverflow, monitorNotificationMaxCharacters, monitorNotificationOverflow)
+	return err
 }
 
 func firstString(values []string) string {
@@ -1506,7 +1610,7 @@ func (s *Store) ClaimOutbound(ctx context.Context, lease time.Duration) (domain.
 		}
 		return domain.OutboundMessage{}, ErrNotFound
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sending',attempts=attempts+1,locked_until=? WHERE id=?`, time.Now().Add(lease), item.ID)
+	_, err = tx.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sending',attempts=attempts+1,locked_until=?,coalesce_key=NULL WHERE id=?`, time.Now().Add(lease), item.ID)
 	if err != nil {
 		return domain.OutboundMessage{}, err
 	}

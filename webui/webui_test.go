@@ -104,7 +104,7 @@ func TestWhatsAppDeliveryDiagnosticsArePrivacySafeAndReadOnly(t *testing.T) {
 	response := httptest.NewRecorder()
 	Handler().ServeHTTP(response, request)
 	body := response.Body.String()
-	for _, expected := range []string{"/api/v1/whatsapp/outbox", "deliveryTable", "WhatsApp delivery queue", "Safe failure category", "Message bodies and destinations are omitted", "dead messages are never retried blindly"} {
+	for _, expected := range []string{"/api/v1/whatsapp/outbox", "deliveryTable", "WhatsApp delivery queue", "Safe failure category", "batchCount", "Items", "Message bodies and destinations are omitted", "dead messages are never retried blindly"} {
 		if response.Code != 200 || !strings.Contains(body, expected) {
 			t.Fatalf("WhatsApp delivery diagnostics are missing %q", expected)
 		}

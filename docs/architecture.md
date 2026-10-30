@@ -43,7 +43,7 @@ The observer has no database, GitHub, WhatsApp, AI, shell, SSH, Docker-socket, o
 `echo_core` is migration-owned by Echo. The key durable queues are:
 
 - `echo_jobs`: leased, retryable background work.
-- `echo_whatsapp_outbox`: retryable outbound messages with expiring leases and stable WhatsApp message IDs across crash recovery. Confirmed-sent rows are pruned in bounded batches after `ECHO_WHATSAPP_OUTBOX_RETENTION`; every unconfirmed or dead row is preserved.
+- `echo_whatsapp_outbox`: retryable outbound messages with expiring leases and stable WhatsApp message IDs across crash recovery. Short-lived nullable coalescing keys combine same-kind monitoring transitions into bounded digests before claim; claiming atomically clears the key so an in-flight body is immutable. Existing static lock rows serialize the short alert-lifecycle/index mutation and acquire any mixed transition kinds in lexical order, preventing concurrent observers and watchdog replicas from deadlocking while they converge on the same digest. Confirmed-sent rows are pruned in bounded batches after `ECHO_WHATSAPP_OUTBOX_RETENTION`; every unconfirmed or dead row is preserved.
 - `echo_runtime_component_alerts`: one durable open-or-resolved lifecycle per supervised Echo component, used to deduplicate failure and recovery notifications across retries and process restarts.
 - `echo_briefing_settings`: the opt-in local schedule and last successfully queued local date for the owner's daily operational briefing.
 - `echo_incident_attachments`: byte-verified, SHA-256-addressed screenshot evidence linked to an incident and pruned according to `ECHO_ATTACHMENT_RETENTION`.

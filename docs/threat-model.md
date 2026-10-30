@@ -58,7 +58,7 @@ The UI uses an HTTP-only signed session, SameSite Strict cookies, CSRF tokens, C
 
 ### Availability and replay
 
-Inbound incidents are unique by group JID and source message ID. Jobs and outbox messages use leases, bounded attempts, and backoff. One MariaDB named lock controls active WhatsApp ownership.
+Inbound incidents are unique by group JID and source message ID. Jobs and outbox messages use leases, bounded attempts, and backoff. Same-kind monitoring transitions share a nullable queued-only coalescing key for eight seconds; the digest is capped at ten detailed items and 3,500 characters, and the key is cleared atomically on claim so later transactions cannot rewrite a message being sent. Static MariaDB rows serialize alert-index mutation and sorted batch-kind acquisition, while only deadlock and lock-timeout transactions receive bounded replay through the event idempotency key. One MariaDB named lock controls active WhatsApp ownership.
 
 ## Residual risks
 
