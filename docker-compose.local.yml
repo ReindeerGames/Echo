@@ -1,0 +1,98 @@
+name: echo-local-test
+
+services:
+  mariadb:
+    image: mariadb:11.4
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: echo-local-root-password
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_bin
+    volumes:
+      - local_mariadb_data:/var/lib/mysql
+      - ./deploy/local-test/init.sql:/docker-entrypoint-initdb.d/01-echo-local.sql:ro
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks: [backend]
+
+  mock-ai:
+    build:
+      context: .
+      dockerfile: deploy/local-test/Dockerfile.ai
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/echo-test-ai", "--healthcheck"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+    networks: [backend]
+
+  echo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      ECHO_HTTP_ADDRESS: :8080
+      ECHO_WORKSPACE_ROOT: /var/lib/echo/workers
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      mock-ai:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${ECHO_LOCAL_PORT:-8080}:8080"
+    volumes:
+      - local_worker_data:/var/lib/echo/workers
+    read_only: true
+    tmpfs:
+      - /tmp:size=128m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    networks: [backend, edge]
+
+  seed:
+    image: mariadb:11.4
+    restart: "no"
+    profiles: [tools]
+    depends_on:
+      echo:
+        condition: service_healthy
+    environment:
+      MYSQL_PWD: echo-local-core-password
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - >-
+        mariadb --skip-ssl -h mariadb -u echo_local_core echo_local_core
+        -e "INSERT IGNORE INTO echo_projects
+        (id, project_key, name, description, enabled)
+        VALUES ('prj_local_test', 'local-test', 'Local Test',
+        'Disposable project for validating WhatsApp incident intake.', TRUE)"
+    networks: [backend]
+
+volumes:
+  local_mariadb_data:
+  local_worker_data:
+
+networks:
+  backend:
+    internal: true
+  edge:

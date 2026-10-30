@@ -1,297 +1,209 @@
-<p align="center">
-  <img src="./Echo-main.png" alt="Echo logo" width="220" />
-</p>
+# Echo v2
 
-# Echo
+Echo turns WhatsApp bug reports into evidence-backed, approval-controlled software changes.
 
-Echo is a WhatsApp-native SRE assistant for Docker hosts.  
-It combines deterministic host telemetry, filtered log triage, and concise operational messaging so you can run incident checks from chat without losing rigor.
+A partner mentions Echo in a configured WhatsApp group. Echo records the report, acknowledges it in the group, inspects only the repositories mapped to that project, and sends the owner a private diagnosis. Code changes, staging deployments, production promotions, and rollbacks each require a separate approval bound to an immutable action.
 
-## Table of contents
+Echo is designed around four rules:
 
-- [Why Echo](#why-echo)
-- [Core capabilities](#core-capabilities)
-- [How Echo works](#how-echo-works)
-- [Command reference](#command-reference)
-- [Guarded remediation flow](#guarded-remediation-flow)
-- [API endpoints](#api-endpoints)
-- [Webhook setup (GoChatAPI)](#webhook-setup-gochatapi)
-- [Prerequisites](#prerequisites)
-- [Quick start](#quick-start)
-- [Testing](#testing)
-- [Container runtime](#container-runtime)
-- [Environment variables](#environment-variables)
-- [Runtime configuration (`config/echo.json`)](#runtime-configuration-configechojson)
-- [Data storage](#data-storage)
-- [Safety model](#safety-model)
-- [Operational notes](#operational-notes)
-- [Development](#development)
-- [CI/CD](#cicd)
-- [Troubleshooting](#troubleshooting)
-- [Project structure](#project-structure)
-- [License](#license)
+1. Messages and repository contents are untrusted evidence, never instructions.
+2. AI may propose; deterministic policy decides what is permitted.
+3. No consequential action inherits approval from an earlier action.
+4. Production always requires a separate approval bound to an exact commit; when staging exists, production receives the same artifact staging verified.
 
-## Why Echo
+## Architecture
 
-Most chat assistants are good at wording but weak on operational grounding. Echo is built for the opposite:
+Echo is a Go application with three logical trust zones:
 
-- deterministic checks drive issue detection
-- AI is used for summarization, not invented telemetry
-- safety controls are explicit for remediation actions
-- responses are concise and WhatsApp-friendly
+- **WhatsApp gateway:** HyperMeow, `mdbstore`, pairing, inbound message normalization, and a durable outbound queue. It never receives GitHub credentials.
+- **Control plane:** authenticated API and embedded responsive UI, project routing, policy, approvals, audit, and deployment verification.
+- **Workers:** bounded repository downloads, advisory AI analysis, draft pull requests, and approved workflow dispatches.
 
-## Core capabilities
+One externally managed MariaDB server hosts two isolated databases and accounts:
 
-- Monitor container state and health across the host.
-- Detect deterministic issues: exited/dead, restarting, unhealthy, high CPU, high memory.
-- Group containers and detect outliers by service baseline.
-- Analyze change signals between snapshots.
-- Triage filtered logs (deduped/truncated/scored) without dumping raw log streams.
-- Troubleshoot a specific container end-to-end (state + issues + log signals + change context).
-- Run guarded remediation (`start` / `restart`) with explicit two-step confirmation.
-- Track AI token usage and estimated USD costs.
-- Persist snapshots, anomalies, issues, queries, and usage events in SQLite.
+- `echo_whatsapp` is owned by `mdbstore` and contains cryptographic WhatsApp session state.
+- `echo_core` contains Echo's projects, incidents, jobs, approvals, deployments, outbox, and audit events.
 
-## How Echo works
+See [the architecture](docs/architecture.md), [threat model](docs/threat-model.md), and [deployment contract](docs/deployment-contract.md).
 
-1. Receives WhatsApp webhooks from GoChatAPI.
-2. Validates sender allowlist and deduplicates repeated inbound messages.
-3. Captures a fresh Docker estate snapshot (except for identity/usage-only requests).
-4. Routes the message to an intent handler (report, priority, logs, troubleshoot, remediation, etc.).
-5. Optionally asks OpenAI to summarize verified facts in a natural operator-facing response.
-6. Returns a plain-text WhatsApp reply with a bold title and concise body.
+## Implemented workflow
 
-## Command reference
+1. HyperMeow receives a group message with a real mention of Echo's JID.
+2. The group JID is resolved to an enabled project binding.
+3. Echo atomically creates an incident, analysis job, group acknowledgement, and audit event.
+4. A worker downloads only enabled project repositories using the encrypted fine-grained token configured in Echo.
+5. Bounded text evidence is sent to the configured AI provider with an explicit untrusted-data boundary.
+6. The diagnosis and confidence are stored and sent privately to the owner.
+7. Patch approval queues a one-time `prepare_patch` job. The worker can create a draft branch and pull request, never a direct default-branch write.
+8. With configured environments, staging approval dispatches a GitHub Actions workflow with an immutable commit SHA; a signed `workflow_run` webhook records verification.
+9. With no staging environment, a separate repository-native production approval is bound to the PR number, exact head SHA, base branch, repository identity, and repository-configuration hash. The worker refuses changed heads or incomplete/failing GitHub checks, marks a draft ready, and squash-merges that exact SHA.
+10. Echo then monitors the repository's existing push workflows for the resulting default-branch commit. It resolves the incident only after all matching runs finish successfully; a failed run marks the deployment and incident failed.
 
-| Intent | Example messages |
-|---|---|
-| Identity/help | `help`, `who are you`, `what can you do` |
-| Full report | `full report`, `report`, `overview`, `summary` |
-| Priority queue | `priority`, `critical`, `urgent`, `sev1`, `p1` |
-| Top resources | `top cpu`, `top memory`, `top mem` |
-| Group check | `group wordpress`, `check group api`, `group:edge` |
-| Container check | `check homepage`, `status db`, `container-name status` |
-| Logs triage | `logs homepage`, `log db` |
-| Change detection | `what changed`, `delta`, `changes since` |
-| Troubleshooting | `troubleshoot homepage`, `investigate db`, `debug api` |
-| Guarded remediation | `restart homepage`, `start worker` |
-| Confirm remediation | `confirm <code>` |
-| Cancel remediation | `cancel`, `abort`, `stop` |
-| AI usage summary | `usage`, `usage daily`, `usage weekly`, `usage monthly` |
+Approvals can be resolved in the UI or by replying privately from the configured owner JID with `approve <code>` or `reject <code>`.
 
-Follow-up context is supported for natural chat continuity, for example:
-- `priority`
-- `troubleshoot it`
-- `restart it`
+Configure the owner without handling JIDs manually: send Echo a direct WhatsApp message, open **WhatsApp** in the authenticated control plane, refresh discovered contacts, and select that contact as owner. Echo discovers direct-message contacts only; group participants are not harvested. The selection takes effect immediately and overrides the optional `ECHO_OWNER_JID` environment fallback.
 
-## Guarded remediation flow
+Configure OpenAI under **System → OpenAI connection**. Echo validates the key and selected model, encrypts the key in MariaDB with `ECHO_ENCRYPTION_KEY`, never returns it to the browser, and applies the new provider settings immediately. `ECHO_AI_*` remains only as an optional environment fallback.
 
-1. Request action with `restart <container>` or `start <container>`.
-2. Echo prepares a guarded plan and returns a short confirmation code.
-3. Echo performs no change yet.
-4. You confirm explicitly with `confirm <code>` within the configured TTL.
-5. Echo executes the action and returns post-action verification.
-6. `cancel` aborts any pending guarded action.
+## Requirements
 
-## API endpoints
+- Go 1.26.10 or newer
+- MariaDB 11.4 LTS
+- A dedicated WhatsApp number
+- A fine-grained GitHub personal access token limited to selected repositories
+- An OpenAI-compatible API when AI diagnosis and patch preparation are enabled
 
-- `GET /health`  
-  Returns service liveness for local checks.
+HyperMeow is an unofficial WhatsApp client. Use a dedicated number and plan for re-pairing or account restrictions.
 
-- `POST /webhook`  
-  Receives GoChatAPI inbound message events.
+## Local start
 
-## Webhook setup (GoChatAPI)
+For a disposable end-to-end environment that includes local databases, a safe mock AI, real WhatsApp QR pairing, and a seeded test project, follow the [local WhatsApp test guide](docs/local-test.md):
 
-Configure your GoChatAPI instance to send inbound messages to:
+```bash
+make local-up
+```
 
-- `POST https://<your-host>/webhook`
+The normal deployment below continues to use the externally managed MariaDB host configured in `.env`.
 
-Recommended setup checks:
+Create the two databases and database-scoped users on your existing MariaDB server before starting Echo. Both accounts need permission to create and migrate tables within their own database, but need no global privileges:
 
-- Ensure the webhook can reach your Echo host from the internet or your VPN.
-- Ensure the sender phone number exists in `WA_ALLOWED_NUMBERS`.
-- Set a shared webhook secret in both GoChat and Echo (`WA_WEBHOOK_SECRET`).
-- Send a test WhatsApp message and confirm Echo logs receipt.
+```sql
+CREATE DATABASE echo_core CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+CREATE DATABASE echo_whatsapp CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
+CREATE USER 'echo_core'@'echo-host' IDENTIFIED BY 'use-a-strong-password';
+CREATE USER 'echo_whatsapp'@'echo-host' IDENTIFIED BY 'use-a-different-strong-password';
+GRANT ALL PRIVILEGES ON echo_core.* TO 'echo_core'@'echo-host';
+GRANT ALL PRIVILEGES ON echo_whatsapp.* TO 'echo_whatsapp'@'echo-host';
+```
 
-Payload contract for shared-secret validation:
+Replace `echo-host` with the narrowest host pattern that matches the Echo container or server. Echo applies its embedded core migrations and `mdbstore` applies the HyperMeow session migrations at startup; neither account needs server-administration access.
+
+```bash
+cp .env.example .env
+# Set the existing MariaDB host, two database credentials, and all secrets.
+docker compose up --build
+```
+
+Open `http://localhost:8080` and sign in with `ECHO_ADMIN_TOKEN`. **Guided setup** resumes at the first incomplete step. Choose **Link device** to request a fresh, rotating WhatsApp pairing QR code; Echo never leaves a stale code waiting on the page.
+
+For direct development:
+
+```bash
+set -a
+. ./.env
+set +a
+export ECHO_WHATSAPP_ENABLED=false
+export ECHO_DEV_MODE=true
+go run ./cmd/echo
+```
+
+`ECHO_DEV_MODE` bypasses administrator authentication and must never be used outside local development.
+
+Echo constructs the database DSNs internally, so passwords may contain DSN-reserved characters. `ECHO_MARIADB_TLS=true` verifies the server certificate against the container's trusted certificate authorities. Use `false` only on a trusted private network. `preferred` may downgrade to plaintext, while `skip-verify` encrypts without authenticating the server; neither is recommended for production.
+
+## Initial configuration order
+
+1. Use **Guided setup** to pair the dedicated Echo number.
+2. Create or select a **Project**. A project is the hub that owns the team’s group bindings, repository graph and deployment environments.
+3. In **Guided setup**, enter a fine-grained GitHub token and add selected **Repositories** as read-only. This is required for code-aware diagnosis, but not for a message-intake smoke test.
+4. In WhatsApp, add Echo’s connected account to the partner group. Group membership cannot be changed from Echo.
+5. Return to **Guided setup → Bind group**, discover the joined group and bind it to the project with real mentions required. Manual JID entry remains available for recovery.
+6. Validate report intake and read-only diagnosis.
+7. Change only the repositories intended for autonomous patch preparation from read-only to write-gated.
+8. Choose a delivery mode per project:
+   - Configure protected `staging` and `production` environments for Echo-dispatched workflows, then add a **Workflow runs** webhook pointing to `POST /webhooks/github` with the same secret as `ECHO_GITHUB_WEBHOOK_SECRET`.
+   - Or leave environments unconfigured and use the repository-native production flow. Echo will merge only the separately approved PR commit and monitor the repository's existing default-branch push workflow, such as a GHCR build and Portainer redeploy.
+
+## GitHub token permissions
+
+Start with:
+
+- Contents: read
+- Metadata: read
+
+Patch preparation additionally requires:
+
+- Contents: write
+- Pull requests: write
+
+Reading checks and monitoring repository-native production workflows requires:
+
+- Actions: read
+
+Workflow dispatch requires:
+
+- Actions: write
+
+Do not grant administration, members, secrets, workflows, or repository deletion permissions. See [GitHub token setup](docs/github-token.md).
+
+## Environment configuration
+
+The UI stores a deployment adapter similar to:
 
 ```json
 {
-  "event_type": "message_received",
-  "webhook_secret": "YOUR_SHARED_SECRET",
-  "data": {
-    "...": "..."
+  "repositoryId": "repo_...",
+  "workflow": "deploy.yml",
+  "inputs": {
+    "site": "nudgie"
   }
 }
 ```
 
-## Prerequisites
+The environment repository must be the repository containing the approved change. Echo dispatches from the exact `echo/` change branch and adds `echo_deployment_id`, `echo_incident_id`, `echo_artifact_ref`, and `echo_environment` to every dispatch. The workflow must deploy `echo_artifact_ref`, not rebuild an unrelated branch head. Keep the change branch until production verification or rollback retention is complete.
 
-- Node.js `>=20`
-- Docker Engine available on the host
-- Access to Docker socket (default `/var/run/docker.sock`)
-- GoChatAPI instance and token
-- OpenAI API key (optional but recommended for higher-quality summaries)
+For a project without configured environments, Echo uses repository-native production. The production approval records the exact open PR head and configured default branch. At execution, Echo revalidates the PR and successful GitHub checks, merges only that SHA, and watches push-triggered workflow runs for the merge commit on the default branch. The repository's workflow remains responsible for building, deploying, and verifying the application; a successful merge by itself is never treated as a successful deployment.
 
-## Quick start
+## Security controls
 
-```bash
-cp .env.example .env
-npm install
-npm start
-```
+- HTTP-only, SameSite-strict owner sessions and CSRF protection
+- Strict content-security and framing headers
+- Constant-time token and webhook signature verification
+- Separate MariaDB accounts and schemas
+- Database leases for WhatsApp single-client ownership and worker jobs
+- Idempotent WhatsApp incident intake by group and source message ID
+- Bounded repository archive extraction with traversal and symlink rejection
+- Protected patch paths and eight-file/one-MiB limits
+- No execution of repository code on the Echo host
+- AES-GCM-encrypted, repository-scoped fine-grained GitHub tokens
+- Signed CI result ingestion before deployment verification
+- Append-only audit records around authorization and mutations
+- Container capability drop, read-only root filesystem, and no-new-privileges
 
-Default service port is `3000`.
+Read [the threat model](docs/threat-model.md) before enabling write access.
 
-## Testing
-
-```bash
-npm run check
-npm test
-```
-
-The test suite uses Node's built-in test runner and covers:
-
-- intent routing and AI fallback behavior
-- webhook validation and secret enforcement
-- deterministic issue and change detection
-- grouping, outlier detection, and log filtering
-- SQLite-backed state persistence and usage aggregation
-
-## Container runtime
-
-### Build and run with Docker
+## Verification
 
 ```bash
-docker build -t echo-sre-assistant:local .
-docker run --rm -p 3000:3000 --env-file .env \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v echo_data:/app/data \
-  echo-sre-assistant:local
+make check
+make test
+docker compose config
+docker build -t echo:v2 .
 ```
 
-### Run with Docker Compose
+MariaDB integration tests run only when `ECHO_TEST_CORE_DSN` is set.
 
-```bash
-docker compose up --build -d
-```
-
-Compose file included: `docker-compose.yml`  
-Docker build context controls included files via `.dockerignore`.
-
-## Environment variables
-
-Copy `.env.example` and configure the following:
-
-| Variable | Required | Default | Notes |
-|---|---|---|---|
-| `OPENAI_API_KEY` | No | - | If omitted, Echo falls back to deterministic non-AI responses. |
-| `OPENAI_MODEL` | No | `gpt-4o-mini` | Model for summarization. |
-| `AI_RATE_GPT4O_MINI_INPUT_PER_M` | No | `0.15` | USD per 1M input tokens. |
-| `AI_RATE_GPT4O_MINI_CACHED_INPUT_PER_M` | No | `0.075` | USD per 1M cached input tokens. |
-| `AI_RATE_GPT4O_MINI_OUTPUT_PER_M` | No | `0.60` | USD per 1M output tokens. |
-| `WA_BASE_URL` | Yes | `https://api.gochatapi.com` | GoChatAPI base URL. |
-| `WA_INSTANCE` | Yes | - | GoChat instance ID. |
-| `WA_TOKEN` | Yes | - | GoChat access token. |
-| `WA_ALLOWED_NUMBERS` | Yes | - | Comma-separated phone numbers (digits only). |
-| `WA_WEBHOOK_SECRET` | No | - | If set, Echo requires exact match against top-level `webhook_secret` in every incoming webhook payload. |
-| `WA_STATUS_RETRIES` | No | `3` | Startup WhatsApp status retries. |
-| `WA_STATUS_TIMEOUT_MS` | No | `10000` | Startup status request timeout. |
-| `WA_STATUS_RETRY_DELAY_MS` | No | `1200` | Delay between status retries. |
-| `WA_SEND_TIMEOUT_MS` | No | `30000` | Outbound send timeout. |
-| `PORT` | No | `3000` | HTTP server port. |
-| `DOCKER_SOCKET` | No | `/var/run/docker.sock` | Docker socket path. |
-
-## Runtime configuration (`config/echo.json`)
-
-`config/echo.json` controls thresholds and feature toggles.
-
-- `thresholds`  
-  CPU/memory limits, change thresholds, outlier sensitivity, and log filtering limits.
-- `grouping.overrides.byName/byImage`  
-  Service grouping rules for estate-level analysis.
-- `features.aiSummaries`  
-  Enables/disables AI summarization.
-- `features.scheduler`  
-  Enables/disables scheduled background snapshots.
-- `features.skillDrafting`  
-  Enables repeated-query skill draft generation.
-- `features.guardedRemediation`  
-  Enables guarded `start/restart` workflow.
-- `scheduler.cron`  
-  Cron expression for background scans.
-- `remediation.confirmationTtlSeconds`  
-  Confirmation window for guarded actions.
-- `remediation.restartTimeoutSeconds`  
-  Docker restart timeout passed to the restart operation.
-
-## Data storage
-
-Echo stores state in SQLite at `data/echo.db`:
-
-- `snapshots` (container metrics/state over time)
-- `issues` (deterministic findings)
-- `anomalies` (outlier detections)
-- `recent_queries` (inbound prompts and responses)
-- `skill_proposals` (draft skills from repeated workflows)
-- `ai_pricing` (rate-card metadata)
-- `ai_usage_events` (token/cost usage events)
-
-## Safety model
-
-- Deterministic telemetry is primary; AI is secondary summarization.
-- No secret/token echoing in responses.
-- No raw log dumps; only filtered signal summaries.
-- Guarded remediation always requires explicit confirmation.
-- Pending confirmation windows expire automatically.
-
-## Operational notes
-
-- Echo acknowledges webhook requests quickly, then processes asynchronously.
-- Duplicate inbound messages are ignored within a short time window.
-- Startup runs an immediate estate snapshot and optional WhatsApp status check.
-- If scheduler is enabled, periodic scans run using the configured cron expression.
-
-## Development
-
-```bash
-# Run with file watching
-npm run dev
-
-# Syntax check (entrypoint parse check)
-npm run check
-
-# Run full tests
-npm test
-```
-## Troubleshooting
-
-| Symptom | Checks |
-|---|---|
-| No WhatsApp replies | Verify `WA_BASE_URL`, `WA_INSTANCE`, `WA_TOKEN`; verify sender is in `WA_ALLOWED_NUMBERS`; verify GoChat webhook targets `POST /webhook`. |
-| Webhook requests are ignored with secret errors | Verify GoChat sends top-level `webhook_secret`; verify it matches `WA_WEBHOOK_SECRET` exactly. |
-| No Docker data in responses | Verify Docker is running; verify process permission to access `DOCKER_SOCKET`. |
-| AI summaries not appearing | Verify `OPENAI_API_KEY`; verify `features.aiSummaries=true` in `config/echo.json`. |
-| Guarded actions unavailable | Verify `features.guardedRemediation=true` in `config/echo.json`. |
-| Confirmation code keeps expiring | Increase `remediation.confirmationTtlSeconds` in `config/echo.json`. |
-
-## Project structure
+## Repository layout
 
 ```text
-.github/      CI workflows
-config/       Runtime configuration
-data/         SQLite database files
-prompts/      System identity/prompt files
-skills/       Skill registry + core and draft skills
-src/          Service implementation
-tests/        Node test suite
-Dockerfile    Container image build definition
-.dockerignore Docker build exclusions
-docker-compose.yml Local compose runtime
-README.md     Project documentation
+cmd/echo/                 Process lifecycle
+internal/ai/              Advisory diagnosis and bounded patch plans
+internal/config/          Fail-closed environment configuration
+internal/githubapp/       GitHub authentication, repository archives, PRs and Actions
+internal/httpapi/         Authenticated API, CSRF and signed webhooks
+internal/policy/          Deterministic action rules
+internal/store/           MariaDB access and embedded migrations
+internal/whatsapp/        HyperMeow gateway and durable outbox
+internal/worker/          Leased jobs and disposable workspaces
+internal/workflow/        Incident and approval orchestration
+webui/                    Embedded responsive control-plane UI
+docs/                     Architecture, security and operations
 ```
+
+## Current operational boundary
+
+Echo creates draft pull requests and can either dispatch explicitly configured environment workflows or, after a distinct production approval, merge an exact PR head and monitor the repository's existing default-branch deployment workflow. It does not bypass branch protection, write GitHub secrets, execute repository scripts on the Echo host, or SSH into staging/production. Repository-native production never rewrites a changed PR head into an existing approval.
 
 ## License
 
-This project is licensed under the MIT License. See `LICENSE`.
+MIT. HyperMeow and `mdbstore` contain their own MPL-2.0/MIT licensing boundaries.

@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Echo Control Plane</title>
+  <meta name="description" content="Secure incident intake, diagnosis, approvals, and deployments for Echo.">
+  <link rel="stylesheet" href="/styles.css">
+  <script defer src="/app.js"></script>
+</head>
+<body>
+  <div class="shell" id="shell" hidden>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">E</span><div><strong>Echo</strong><small>Control plane</small></div></div>
+      <nav aria-label="Primary navigation">
+        <button class="nav-item" data-view="setup"><span>✦</span>Guided setup <b id="setup-progress">0/4</b></button>
+        <button class="nav-item active" data-view="overview"><span>◫</span>Overview</button>
+        <button class="nav-item" data-view="incidents"><span>◎</span>Incidents <b id="incident-count">0</b></button>
+        <button class="nav-item" data-view="approvals"><span>◇</span>Approvals <b id="approval-count">0</b></button>
+		<button class="nav-item" data-view="deployments"><span>△</span>Deployments</button>
+        <div class="nav-label">Configuration</div>
+        <button class="nav-item" data-view="projects"><span>▦</span>Projects</button>
+        <button class="nav-item" data-view="channels"><span>⌁</span>WhatsApp</button>
+        <button class="nav-item" data-view="repositories"><span>⌘</span>Repositories</button>
+		<button class="nav-item" data-view="environments"><span>⬡</span>Environments</button>
+        <div class="nav-label">Assurance</div>
+        <button class="nav-item" data-view="audit"><span>≡</span>Audit trail</button>
+        <button class="nav-item" data-view="system"><span>◉</span>System</button>
+      </nav>
+      <div class="sidebar-foot">
+        <div class="connection"><i id="wa-dot"></i><div><span id="wa-status">Checking</span><small>WhatsApp gateway</small></div></div>
+        <button class="quiet" id="logout">Sign out</button>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation">☰</button>
+        <div><p class="eyebrow" id="view-kicker">OPERATIONS</p><h1 id="view-title">Overview</h1></div>
+        <div class="top-actions"><span class="environment" id="environment">—</span><button class="button secondary" id="refresh">Refresh</button></div>
+      </header>
+      <section class="content" id="content" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <section class="login" id="login">
+    <div class="login-art"><div class="radar"><i></i><i></i><i></i><b>E</b></div><p>Reports become evidence.<br>Evidence becomes controlled action.</p></div>
+    <form class="login-card" id="login-form">
+      <div class="brand"><span class="brand-mark">E</span><div><strong>Echo</strong><small>Secure control plane</small></div></div>
+      <div><p class="eyebrow">OWNER ACCESS</p><h1>Sign in to Echo</h1><p class="muted">Use the administrator token configured for this deployment.</p></div>
+      <label>Administrator token<input id="admin-token" name="token" type="password" autocomplete="current-password" required></label>
+      <p class="form-error" id="login-error" role="alert"></p>
+      <button class="button primary" type="submit">Continue securely</button>
+      <small class="security-note">Session cookies are HTTP-only. Actions remain approval-bound and audited.</small>
+    </form>
+  </section>
+
+  <dialog id="modal"><div class="modal-card"><div class="modal-head"><div><p class="eyebrow" id="modal-kicker"></p><h2 id="modal-title"></h2></div><button class="icon-button" type="button" data-close aria-label="Close">×</button></div><div id="modal-body"></div></div></dialog>
+  <div class="toast" id="toast" role="status"></div>
+</body>
+</html>

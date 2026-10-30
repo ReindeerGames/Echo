@@ -1,24 +1,18 @@
-FROM node:20-bookworm-slim AS deps
-WORKDIR /app
-
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
-FROM node:20-bookworm-slim AS runtime
-WORKDIR /app
-
-ENV NODE_ENV=production
-
-COPY --from=deps /app/node_modules ./node_modules
+FROM golang:1.26.10-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
 COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/echo ./cmd/echo
 
-RUN mkdir -p /app/data && chown -R node:node /app
-
-# Add node user to docker group (GID 999 is common for docker group)
-# This allows the container to access the Docker socket
-RUN groupadd -g 999 docker || true && usermod -aG docker node
-
-USER node
-EXPOSE 3000
-
-CMD ["node", "src/index.js"]
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl tzdata \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home echo
+WORKDIR /app
+COPY --from=build /out/echo /usr/local/bin/echo
+RUN mkdir -p /var/lib/echo/workers && chown -R echo:echo /var/lib/echo
+USER echo
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/echo"]

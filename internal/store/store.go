@@ -1,0 +1,876 @@
+package store
+
+import (
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/ReindeerGames/echo/internal/domain"
+	"github.com/ReindeerGames/echo/internal/id"
+	"github.com/go-sql-driver/mysql"
+)
+
+//go:embed migrations/*.sql
+var migrationFS embed.FS
+
+var ErrNotFound = errors.New("not found")
+
+type Store struct {
+	db *sql.DB
+}
+
+func (s *Store) SaveEncryptedSetting(ctx context.Context, key string, ciphertext []byte, metadata json.RawMessage) (time.Time, error) {
+	if len(metadata) == 0 {
+		metadata = json.RawMessage(`{}`)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_encrypted_settings(setting_key,ciphertext,metadata_json) VALUES(?,?,?) ON DUPLICATE KEY UPDATE ciphertext=VALUES(ciphertext),metadata_json=VALUES(metadata_json)`, key, ciphertext, metadata)
+	if err != nil {
+		return time.Time{}, err
+	}
+	var updated time.Time
+	err = s.db.QueryRowContext(ctx, `SELECT updated_at FROM echo_encrypted_settings WHERE setting_key=?`, key).Scan(&updated)
+	return updated, err
+}
+
+func (s *Store) GetEncryptedSetting(ctx context.Context, key string) ([]byte, json.RawMessage, time.Time, error) {
+	var ciphertext []byte
+	var metadata json.RawMessage
+	var updated time.Time
+	err := s.db.QueryRowContext(ctx, `SELECT ciphertext,metadata_json,updated_at FROM echo_encrypted_settings WHERE setting_key=?`, key).Scan(&ciphertext, &metadata, &updated)
+	return ciphertext, metadata, updated, notFound(err)
+}
+
+func (s *Store) DeleteEncryptedSetting(ctx context.Context, key string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM echo_encrypted_settings WHERE setting_key=?`, key)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) AcquireNamedLock(ctx context.Context, name string, wait time.Duration) (func(), error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var acquired int
+	if err := conn.QueryRowContext(ctx, `SELECT GET_LOCK(?, ?)`, name, int(wait.Seconds())).Scan(&acquired); err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	if acquired != 1 {
+		_ = conn.Close()
+		return nil, fmt.Errorf("named lock %q is held by another instance", name)
+	}
+	return func() {
+		_, _ = conn.ExecContext(context.Background(), `SELECT RELEASE_LOCK(?)`, name)
+		_ = conn.Close()
+	}, nil
+}
+
+func Open(ctx context.Context, dsn string) (*Store, error) {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("parse core DSN: %w", err)
+	}
+	cfg.ParseTime = true
+	cfg.Collation = "utf8mb4_bin"
+	cfg.Timeout = defaultDuration(cfg.Timeout, 10*time.Second)
+	cfg.ReadTimeout = defaultDuration(cfg.ReadTimeout, 30*time.Second)
+	cfg.WriteTimeout = defaultDuration(cfg.WriteTimeout, 30*time.Second)
+	db, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return nil, fmt.Errorf("open core database: %w", err)
+	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(10)
+	db.SetConnMaxLifetime(30 * time.Minute)
+	db.SetConnMaxIdleTime(5 * time.Minute)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("ping core database: %w", err)
+	}
+	s := &Store{db: db}
+	if err := s.migrate(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *Store) Close() error                   { return s.db.Close() }
+func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
+func (s *Store) migrate(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `SELECT GET_LOCK('echo_core_migrations', 30)`); err != nil {
+		return fmt.Errorf("lock migrations: %w", err)
+	}
+	defer func() { _, _ = s.db.ExecContext(context.Background(), `SELECT RELEASE_LOCK('echo_core_migrations')`) }()
+
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		return err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		var applied int
+		err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=DATABASE() AND table_name='echo_schema_migrations'`).Scan(&applied)
+		if err != nil {
+			return err
+		}
+		if applied > 0 {
+			err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_schema_migrations WHERE version=?`, entry.Name()).Scan(&applied)
+			if err != nil {
+				return err
+			}
+			if applied > 0 {
+				continue
+			}
+		}
+		content, err := migrationFS.ReadFile("migrations/" + entry.Name())
+		if err != nil {
+			return err
+		}
+		for _, statement := range strings.Split(string(content), "-- echo:split") {
+			statement = strings.TrimSpace(statement)
+			if statement == "" {
+				continue
+			}
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migration %s: %w", entry.Name(), err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT IGNORE INTO echo_schema_migrations(version) VALUES (?)`, entry.Name()); err != nil {
+			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
+	var out domain.Dashboard
+	err := s.db.QueryRowContext(ctx, `SELECT
+      (SELECT COUNT(*) FROM echo_incidents WHERE status NOT IN ('resolved','closed')),
+      (SELECT COUNT(*) FROM echo_approvals WHERE status='pending' AND expires_at > NOW(6)),
+      (SELECT COUNT(*) FROM echo_jobs WHERE status='running'),
+      (SELECT COUNT(*) FROM echo_deployments WHERE status='failed'),
+      (SELECT COUNT(*) FROM echo_projects WHERE enabled=TRUE)`).Scan(
+		&out.OpenIncidents, &out.PendingApprovals, &out.RunningJobs, &out.FailedDeployments, &out.EnabledProjects,
+	)
+	return out, err
+}
+
+func (s *Store) ListProjects(ctx context.Context) ([]domain.Project, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, project_key, name, description, enabled, created_at, updated_at FROM echo_projects ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Project
+	for rows.Next() {
+		var item domain.Project
+		if err := rows.Scan(&item.ID, &item.Key, &item.Name, &item.Description, &item.Enabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveProject(ctx context.Context, item domain.Project) (domain.Project, error) {
+	if item.ID == "" {
+		item.ID = id.New("prj")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_projects(id, project_key, name, description, enabled) VALUES(?,?,?,?,?)
+      ON DUPLICATE KEY UPDATE project_key=VALUES(project_key), name=VALUES(name), description=VALUES(description), enabled=VALUES(enabled)`,
+		item.ID, item.Key, item.Name, item.Description, item.Enabled)
+	if err != nil {
+		return domain.Project{}, err
+	}
+	return s.GetProject(ctx, item.ID)
+}
+
+func (s *Store) GetProject(ctx context.Context, projectID string) (domain.Project, error) {
+	var item domain.Project
+	err := s.db.QueryRowContext(ctx, `SELECT id, project_key, name, description, enabled, created_at, updated_at FROM echo_projects WHERE id=?`, projectID).Scan(
+		&item.ID, &item.Key, &item.Name, &item.Description, &item.Enabled, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) ListGroupBindings(ctx context.Context) ([]domain.GroupBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT g.id,g.project_id,p.name,g.group_jid,g.group_name,g.mention_required,g.ack_template,g.enabled,g.created_at,g.updated_at FROM echo_group_bindings g JOIN echo_projects p ON p.id=g.project_id ORDER BY g.group_name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.GroupBinding
+	for rows.Next() {
+		var item domain.GroupBinding
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.GroupJID, &item.GroupName, &item.MentionRequired, &item.AckTemplate, &item.Enabled, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveGroupBinding(ctx context.Context, item domain.GroupBinding) (domain.GroupBinding, error) {
+	if item.ID == "" {
+		item.ID = id.New("grp")
+	}
+	if item.AckTemplate == "" {
+		item.AckTemplate = "Thanks — I have logged this report and will investigate it privately with the owner."
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_group_bindings(id,project_id,group_jid,group_name,mention_required,ack_template,enabled) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),group_jid=VALUES(group_jid),group_name=VALUES(group_name),mention_required=VALUES(mention_required),ack_template=VALUES(ack_template),enabled=VALUES(enabled)`, item.ID, item.ProjectID, item.GroupJID, item.GroupName, item.MentionRequired, item.AckTemplate, item.Enabled)
+	if err != nil {
+		return domain.GroupBinding{}, err
+	}
+	return s.GetGroupBinding(ctx, item.ID)
+}
+
+func (s *Store) GetGroupBinding(ctx context.Context, bindingID string) (domain.GroupBinding, error) {
+	var item domain.GroupBinding
+	err := s.db.QueryRowContext(ctx, `SELECT g.id,g.project_id,p.name,g.group_jid,g.group_name,g.mention_required,g.ack_template,g.enabled,g.created_at,g.updated_at FROM echo_group_bindings g JOIN echo_projects p ON p.id=g.project_id WHERE g.id=?`, bindingID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.GroupJID, &item.GroupName, &item.MentionRequired, &item.AckTemplate, &item.Enabled, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) FindGroupBinding(ctx context.Context, groupJID string) (domain.GroupBinding, error) {
+	var item domain.GroupBinding
+	err := s.db.QueryRowContext(ctx, `SELECT g.id,g.project_id,p.name,g.group_jid,g.group_name,g.mention_required,g.ack_template,g.enabled,g.created_at,g.updated_at FROM echo_group_bindings g JOIN echo_projects p ON p.id=g.project_id WHERE g.group_jid=? AND g.enabled=TRUE AND p.enabled=TRUE`, groupJID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.GroupJID, &item.GroupName, &item.MentionRequired, &item.AckTemplate, &item.Enabled, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) ListRepositories(ctx context.Context, projectID string) ([]domain.Repository, error) {
+	query := `SELECT id,project_id,owner_name,repository_name,repository_role,default_branch,read_only,enabled,test_command,created_at,updated_at FROM echo_repositories`
+	args := []any{}
+	if projectID != "" {
+		query += ` WHERE project_id=?`
+		args = append(args, projectID)
+	}
+	query += ` ORDER BY owner_name, repository_name`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Repository
+	for rows.Next() {
+		var item domain.Repository
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Owner, &item.Name, &item.Role, &item.DefaultBranch, &item.ReadOnly, &item.Enabled, &item.TestCommand, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveRepository(ctx context.Context, item domain.Repository) (domain.Repository, error) {
+	if item.ID == "" {
+		item.ID = id.New("repo")
+	}
+	if item.DefaultBranch == "" {
+		item.DefaultBranch = "main"
+	}
+	if item.Role == "" {
+		item.Role = "application"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_repositories(id,project_id,owner_name,repository_name,repository_role,default_branch,read_only,enabled,test_command) VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),owner_name=VALUES(owner_name),repository_name=VALUES(repository_name),repository_role=VALUES(repository_role),default_branch=VALUES(default_branch),read_only=VALUES(read_only),enabled=VALUES(enabled),test_command=VALUES(test_command)`, item.ID, item.ProjectID, item.Owner, item.Name, item.Role, item.DefaultBranch, item.ReadOnly, item.Enabled, item.TestCommand)
+	if err != nil {
+		return domain.Repository{}, err
+	}
+	var out domain.Repository
+	err = s.db.QueryRowContext(ctx, `SELECT id,project_id,owner_name,repository_name,repository_role,default_branch,read_only,enabled,test_command,created_at,updated_at FROM echo_repositories WHERE id=?`, item.ID).Scan(&out.ID, &out.ProjectID, &out.Owner, &out.Name, &out.Role, &out.DefaultBranch, &out.ReadOnly, &out.Enabled, &out.TestCommand, &out.CreatedAt, &out.UpdatedAt)
+	return out, notFound(err)
+}
+
+func (s *Store) GetRepository(ctx context.Context, repositoryID string) (domain.Repository, error) {
+	var out domain.Repository
+	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,owner_name,repository_name,repository_role,default_branch,read_only,enabled,test_command,created_at,updated_at FROM echo_repositories WHERE id=?`, repositoryID).Scan(&out.ID, &out.ProjectID, &out.Owner, &out.Name, &out.Role, &out.DefaultBranch, &out.ReadOnly, &out.Enabled, &out.TestCommand, &out.CreatedAt, &out.UpdatedAt)
+	return out, notFound(err)
+}
+
+func (s *Store) ListEnvironments(ctx context.Context, projectID string) ([]domain.Environment, error) {
+	query := `SELECT id,project_id,name,kind,requires_approval,protected,config_json,created_at,updated_at FROM echo_environments`
+	args := []any{}
+	if projectID != "" {
+		query += ` WHERE project_id=?`
+		args = append(args, projectID)
+	}
+	query += ` ORDER BY project_id,name`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Environment
+	for rows.Next() {
+		var item domain.Environment
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.Name, &item.Kind, &item.RequiresApproval, &item.Protected, &item.Config, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveEnvironment(ctx context.Context, item domain.Environment) (domain.Environment, error) {
+	if item.ID == "" {
+		item.ID = id.New("env")
+	}
+	if item.Kind == "" {
+		item.Kind = "github_actions"
+	}
+	if len(item.Config) == 0 {
+		item.Config = json.RawMessage(`{}`)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_environments(id,project_id,name,kind,requires_approval,protected,config_json) VALUES(?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),name=VALUES(name),kind=VALUES(kind),requires_approval=VALUES(requires_approval),protected=VALUES(protected),config_json=VALUES(config_json)`, item.ID, item.ProjectID, item.Name, item.Kind, item.RequiresApproval, item.Protected, item.Config)
+	if err != nil {
+		return domain.Environment{}, err
+	}
+	return s.GetEnvironment(ctx, item.ID)
+}
+func (s *Store) GetEnvironment(ctx context.Context, environmentID string) (domain.Environment, error) {
+	var item domain.Environment
+	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,name,kind,requires_approval,protected,config_json,created_at,updated_at FROM echo_environments WHERE id=?`, environmentID).Scan(&item.ID, &item.ProjectID, &item.Name, &item.Kind, &item.RequiresApproval, &item.Protected, &item.Config, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) CreateChangeSet(ctx context.Context, item domain.ChangeSet) (domain.ChangeSet, error) {
+	if item.ID == "" {
+		item.ID = id.New("cng")
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_change_sets(id,incident_id,repository_id,branch_name,commit_sha,pull_request_number,pull_request_url,artifact_ref,status,diff_sha256) VALUES(?,?,?,?,?,?,?,?,?,?)`, item.ID, item.IncidentID, item.RepositoryID, item.BranchName, item.CommitSHA, item.PullRequestNumber, item.PullRequestURL, item.ArtifactRef, item.Status, item.DiffSHA256)
+	if err != nil {
+		return domain.ChangeSet{}, err
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='patching' WHERE id=?`, item.IncidentID)
+	item.CreatedAt = time.Now().UTC()
+	item.UpdatedAt = item.CreatedAt
+	return item, nil
+}
+func (s *Store) ListChangeSets(ctx context.Context, incidentID string) ([]domain.ChangeSet, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,incident_id,repository_id,branch_name,COALESCE(commit_sha,''),COALESCE(pull_request_number,0),pull_request_url,artifact_ref,status,diff_sha256,created_at,updated_at FROM echo_change_sets WHERE incident_id=? ORDER BY created_at DESC`, incidentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.ChangeSet
+	for rows.Next() {
+		var item domain.ChangeSet
+		if err := rows.Scan(&item.ID, &item.IncidentID, &item.RepositoryID, &item.BranchName, &item.CommitSHA, &item.PullRequestNumber, &item.PullRequestURL, &item.ArtifactRef, &item.Status, &item.DiffSHA256, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetChangeSet(ctx context.Context, changeSetID string) (domain.ChangeSet, error) {
+	var item domain.ChangeSet
+	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,repository_id,branch_name,COALESCE(commit_sha,''),COALESCE(pull_request_number,0),pull_request_url,artifact_ref,status,diff_sha256,created_at,updated_at FROM echo_change_sets WHERE id=?`, changeSetID).Scan(&item.ID, &item.IncidentID, &item.RepositoryID, &item.BranchName, &item.CommitSHA, &item.PullRequestNumber, &item.PullRequestURL, &item.ArtifactRef, &item.Status, &item.DiffSHA256, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) MarkChangeSetMerged(ctx context.Context, changeSetID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE echo_change_sets SET status='merged' WHERE id=? AND status IN ('testing','ready')`, changeSetID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 1 {
+		return nil
+	}
+	var status string
+	if err := s.db.QueryRowContext(ctx, `SELECT status FROM echo_change_sets WHERE id=?`, changeSetID).Scan(&status); err != nil {
+		return notFound(err)
+	}
+	if status == "merged" {
+		return nil
+	}
+	return errors.New("change set is not eligible to be marked merged")
+}
+
+func (s *Store) FindChangeSetByArtifact(ctx context.Context, incidentID, artifact string) (domain.ChangeSet, error) {
+	var item domain.ChangeSet
+	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,repository_id,branch_name,COALESCE(commit_sha,''),COALESCE(pull_request_number,0),pull_request_url,artifact_ref,status,diff_sha256,created_at,updated_at FROM echo_change_sets WHERE incident_id=? AND artifact_ref=? ORDER BY created_at DESC LIMIT 1`, incidentID, artifact).Scan(&item.ID, &item.IncidentID, &item.RepositoryID, &item.BranchName, &item.CommitSHA, &item.PullRequestNumber, &item.PullRequestURL, &item.ArtifactRef, &item.Status, &item.DiffSHA256, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) FindProjectChangeSetByArtifact(ctx context.Context, projectID, artifact string) (domain.ChangeSet, error) {
+	var item domain.ChangeSet
+	err := s.db.QueryRowContext(ctx, `SELECT c.id,c.incident_id,c.repository_id,c.branch_name,COALESCE(c.commit_sha,''),COALESCE(c.pull_request_number,0),c.pull_request_url,c.artifact_ref,c.status,c.diff_sha256,c.created_at,c.updated_at FROM echo_change_sets c JOIN echo_incidents i ON i.id=c.incident_id WHERE i.project_id=? AND c.artifact_ref=? ORDER BY c.created_at DESC LIMIT 1`, projectID, artifact).Scan(&item.ID, &item.IncidentID, &item.RepositoryID, &item.BranchName, &item.CommitSHA, &item.PullRequestNumber, &item.PullRequestURL, &item.ArtifactRef, &item.Status, &item.DiffSHA256, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) CreateDeployment(ctx context.Context, item domain.Deployment) (domain.Deployment, error) {
+	if item.ID == "" {
+		item.ID = id.New("dep")
+	}
+	if item.Operation == "" {
+		item.Operation = "deploy"
+	}
+	if item.Status == "" {
+		item.Status = "dispatching"
+	}
+	var sourceDeploymentID any
+	if item.SourceDeploymentID != "" {
+		sourceDeploymentID = item.SourceDeploymentID
+	}
+	var approvalID any
+	if item.ApprovalID != "" {
+		approvalID = item.ApprovalID
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_deployments(id,incident_id,approval_id,project_id,environment_name,operation_type,artifact_ref,source_deployment_id,status,workflow_url,repository_full_name,workflow_name,external_run_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, item.ID, item.IncidentID, approvalID, item.ProjectID, item.Environment, item.Operation, item.ArtifactRef, sourceDeploymentID, item.Status, item.WorkflowURL, item.Repository, item.Workflow, item.ExternalRunID)
+	if err != nil {
+		return domain.Deployment{}, err
+	}
+	item.CreatedAt = time.Now().UTC()
+	return item, nil
+}
+func (s *Store) ListDeployments(ctx context.Context, incidentID string) ([]domain.Deployment, error) {
+	query := `SELECT id,incident_id,COALESCE(approval_id,''),project_id,environment_name,operation_type,artifact_ref,COALESCE(source_deployment_id,''),status,workflow_url,repository_full_name,workflow_name,COALESCE(external_run_id,0),started_at,finished_at,created_at FROM echo_deployments`
+	args := []any{}
+	if incidentID != "" {
+		query += ` WHERE incident_id=?`
+		args = append(args, incidentID)
+	}
+	query += ` ORDER BY created_at DESC LIMIT 200`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Deployment
+	for rows.Next() {
+		var item domain.Deployment
+		if err := rows.Scan(&item.ID, &item.IncidentID, &item.ApprovalID, &item.ProjectID, &item.Environment, &item.Operation, &item.ArtifactRef, &item.SourceDeploymentID, &item.Status, &item.WorkflowURL, &item.Repository, &item.Workflow, &item.ExternalRunID, &item.StartedAt, &item.FinishedAt, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetDeployment(ctx context.Context, deploymentID string) (domain.Deployment, error) {
+	var item domain.Deployment
+	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,COALESCE(approval_id,''),project_id,environment_name,operation_type,artifact_ref,COALESCE(source_deployment_id,''),status,workflow_url,repository_full_name,workflow_name,COALESCE(external_run_id,0),started_at,finished_at,created_at FROM echo_deployments WHERE id=?`, deploymentID).Scan(&item.ID, &item.IncidentID, &item.ApprovalID, &item.ProjectID, &item.Environment, &item.Operation, &item.ArtifactRef, &item.SourceDeploymentID, &item.Status, &item.WorkflowURL, &item.Repository, &item.Workflow, &item.ExternalRunID, &item.StartedAt, &item.FinishedAt, &item.CreatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) FindDeploymentByApproval(ctx context.Context, approvalID string) (domain.Deployment, error) {
+	var item domain.Deployment
+	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,COALESCE(approval_id,''),project_id,environment_name,operation_type,artifact_ref,COALESCE(source_deployment_id,''),status,workflow_url,repository_full_name,workflow_name,COALESCE(external_run_id,0),started_at,finished_at,created_at FROM echo_deployments WHERE approval_id=?`, approvalID).Scan(&item.ID, &item.IncidentID, &item.ApprovalID, &item.ProjectID, &item.Environment, &item.Operation, &item.ArtifactRef, &item.SourceDeploymentID, &item.Status, &item.WorkflowURL, &item.Repository, &item.Workflow, &item.ExternalRunID, &item.StartedAt, &item.FinishedAt, &item.CreatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) MarkDeploymentQueued(ctx context.Context, deploymentID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE echo_deployments SET status='queued' WHERE id=? AND status='dispatching'`, deploymentID)
+	if err != nil {
+		return err
+	}
+	rows, _ := result.RowsAffected()
+	if rows != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) CompleteRepositoryNativeDeployment(ctx context.Context, deploymentID string, runID int64, runURL string, success bool) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var incidentID string
+	if err := tx.QueryRowContext(ctx, `SELECT incident_id FROM echo_deployments WHERE id=? FOR UPDATE`, deploymentID).Scan(&incidentID); err != nil {
+		return notFound(err)
+	}
+	status := "failed"
+	incidentStatus := "failed"
+	if success {
+		status = "verified"
+		incidentStatus = "resolved"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE echo_deployments SET status=?,workflow_url=?,external_run_id=?,started_at=COALESCE(started_at,created_at),finished_at=NOW(6) WHERE id=?`, status, runURL, runID, deploymentID); err != nil {
+		return err
+	}
+	if success {
+		_, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status=?,resolved_at=NOW(6) WHERE id=?`, incidentStatus, incidentID)
+	} else {
+		_, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status=?,resolved_at=NULL WHERE id=?`, incidentStatus, incidentID)
+	}
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CompleteDeploymentFromWorkflow(ctx context.Context, repository, workflow, artifact string, runID int64, runURL string, success bool) (domain.Deployment, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Deployment{}, err
+	}
+	defer tx.Rollback()
+	var item domain.Deployment
+	err = tx.QueryRowContext(ctx, `SELECT id,incident_id,COALESCE(approval_id,''),project_id,environment_name,operation_type,artifact_ref,COALESCE(source_deployment_id,''),status,workflow_url,repository_full_name,workflow_name,COALESCE(external_run_id,0),started_at,finished_at,created_at FROM echo_deployments WHERE repository_full_name=? AND workflow_name=? AND artifact_ref=? AND status IN ('dispatching','queued','running') ORDER BY created_at LIMIT 1 FOR UPDATE`, repository, workflow, artifact).Scan(&item.ID, &item.IncidentID, &item.ApprovalID, &item.ProjectID, &item.Environment, &item.Operation, &item.ArtifactRef, &item.SourceDeploymentID, &item.Status, &item.WorkflowURL, &item.Repository, &item.Workflow, &item.ExternalRunID, &item.StartedAt, &item.FinishedAt, &item.CreatedAt)
+	if err != nil {
+		return domain.Deployment{}, notFound(err)
+	}
+	status := "failed"
+	if success {
+		status = "verified"
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE echo_deployments SET status=?,external_run_id=?,workflow_url=?,started_at=COALESCE(started_at,created_at),finished_at=NOW(6) WHERE id=?`, status, runID, runURL, item.ID)
+	if err != nil {
+		return domain.Deployment{}, err
+	}
+	if success && item.Operation == "rollback" {
+		if item.SourceDeploymentID == "" {
+			return domain.Deployment{}, errors.New("rollback deployment has no source deployment")
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE echo_deployments SET status='rolled_back' WHERE id=? AND status='verified'`, item.SourceDeploymentID); err == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status='resolved',resolved_at=NOW(6) WHERE id=?`, item.IncidentID)
+		}
+	} else if success && strings.EqualFold(item.Environment, "staging") {
+		_, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status='staging_verified' WHERE id=?`, item.IncidentID)
+	} else if success && strings.EqualFold(item.Environment, "production") {
+		_, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status='resolved',resolved_at=NOW(6) WHERE id=?`, item.IncidentID)
+	} else if !success {
+		_, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status='failed' WHERE id=?`, item.IncidentID)
+	}
+	if err != nil {
+		return domain.Deployment{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Deployment{}, err
+	}
+	item.Status = status
+	item.ExternalRunID = runID
+	item.WorkflowURL = runURL
+	now := time.Now().UTC()
+	item.FinishedAt = &now
+	return item, nil
+}
+
+func (s *Store) ListIncidents(ctx context.Context, limit int) ([]domain.Incident, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.assigned_to,i.created_at,i.updated_at,i.resolved_at FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id ORDER BY i.created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Incident
+	for rows.Next() {
+		var item domain.Incident
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetIncident(ctx context.Context, incidentID string) (domain.Incident, error) {
+	var item domain.Incident
+	err := s.db.QueryRowContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.assigned_to,i.created_at,i.updated_at,i.resolved_at FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id WHERE i.id=?`, incidentID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) CreateIncident(ctx context.Context, binding domain.GroupBinding, msg domain.InboundMessage) (domain.Incident, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Incident{}, false, err
+	}
+	defer tx.Rollback()
+	var existing string
+	err = tx.QueryRowContext(ctx, `SELECT id FROM echo_incidents WHERE group_jid=? AND source_message_id=?`, msg.ChatJID, msg.MessageID).Scan(&existing)
+	if err == nil {
+		if err := tx.Commit(); err != nil {
+			return domain.Incident{}, false, err
+		}
+		item, e := s.GetIncident(ctx, existing)
+		return item, false, e
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return domain.Incident{}, false, err
+	}
+	incidentID := id.New("inc")
+	summary := strings.TrimSpace(msg.Body)
+	if len(summary) > 500 {
+		summary = summary[:500]
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO echo_incidents(id,project_id,summary,reporter_jid,reporter_name,group_jid,source_message_id,source_body) VALUES(?,?,?,?,?,?,?,?)`, incidentID, binding.ProjectID, summary, msg.SenderJID, msg.SenderName, msg.ChatJID, msg.MessageID, msg.Body)
+	if err != nil {
+		return domain.Incident{}, false, err
+	}
+	metadata, _ := json.Marshal(map[string]any{"mentionedJids": msg.MentionedJIDs, "isGroup": msg.IsGroup})
+	_, err = tx.ExecContext(ctx, `INSERT INTO echo_incident_messages(id,incident_id,whatsapp_message_id,chat_jid,sender_jid,sender_name,direction,body,metadata_json,message_timestamp) VALUES(?,?,?,?,?,?,'inbound',?,?,?)`, id.New("msg"), incidentID, msg.MessageID, msg.ChatJID, msg.SenderJID, msg.SenderName, msg.Body, metadata, msg.Timestamp)
+	if err != nil {
+		return domain.Incident{}, false, err
+	}
+	jobPayload, _ := json.Marshal(map[string]string{"incidentId": incidentID})
+	_, err = tx.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json) VALUES(?,'analyze_incident',?)`, id.New("job"), jobPayload)
+	if err != nil {
+		return domain.Incident{}, false, err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), msg.ChatJID, binding.AckTemplate)
+	if err != nil {
+		return domain.Incident{}, false, err
+	}
+	if err = insertAudit(ctx, tx, "whatsapp", msg.SenderJID, "incident.reported", "incident", incidentID, "succeeded", map[string]any{"groupJid": msg.ChatJID}); err != nil {
+		return domain.Incident{}, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Incident{}, false, err
+	}
+	item, e := s.GetIncident(ctx, incidentID)
+	return item, true, e
+}
+
+func (s *Store) SaveAnalysis(ctx context.Context, item domain.Analysis) (domain.Analysis, error) {
+	if item.ID == "" {
+		item.ID = id.New("ana")
+	}
+	if len(item.Evidence) == 0 {
+		item.Evidence = json.RawMessage(`[]`)
+	}
+	if len(item.Proposal) == 0 {
+		item.Proposal = json.RawMessage(`{}`)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_analyses(id,incident_id,status,confidence,summary,evidence_json,proposal_json,model) VALUES(?,?,?,?,?,?,?,?)`, item.ID, item.IncidentID, item.Status, item.Confidence, item.Summary, item.Evidence, item.Proposal, item.Model)
+	if err != nil {
+		return domain.Analysis{}, err
+	}
+	_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='awaiting_owner' WHERE id=? AND status IN ('reported','triaging')`, item.IncidentID)
+	item.CreatedAt = time.Now().UTC()
+	return item, nil
+}
+
+func (s *Store) LatestAnalysis(ctx context.Context, incidentID string) (domain.Analysis, error) {
+	var item domain.Analysis
+	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,status,confidence,summary,evidence_json,proposal_json,model,created_at FROM echo_analyses WHERE incident_id=? ORDER BY created_at DESC LIMIT 1`, incidentID).Scan(&item.ID, &item.IncidentID, &item.Status, &item.Confidence, &item.Summary, &item.Evidence, &item.Proposal, &item.Model, &item.CreatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) ListApprovals(ctx context.Context) ([]domain.Approval, error) {
+	_, _ = s.db.ExecContext(ctx, `UPDATE echo_approvals SET status='expired' WHERE status='pending' AND expires_at<=NOW(6)`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,incident_id,action_type,action_hash,action_json,status,requested_by,resolved_by,expires_at,created_at,resolved_at FROM echo_approvals ORDER BY created_at DESC LIMIT 200`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Approval
+	for rows.Next() {
+		var item domain.Approval
+		if err := rows.Scan(&item.ID, &item.IncidentID, &item.ActionType, &item.ActionHash, &item.Action, &item.Status, &item.RequestedBy, &item.ResolvedBy, &item.ExpiresAt, &item.CreatedAt, &item.ResolvedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) CreateApproval(ctx context.Context, item domain.Approval, nonceHash string) (domain.Approval, error) {
+	if item.ID == "" {
+		item.ID = id.New("apr")
+	}
+	canonical := sha256.Sum256(item.Action)
+	item.ActionHash = hex.EncodeToString(canonical[:])
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_approvals(id,incident_id,action_type,action_hash,action_json,nonce_hash,requested_by,expires_at) VALUES(?,?,?,?,?,?,?,?)`, item.ID, item.IncidentID, item.ActionType, item.ActionHash, item.Action, nonceHash, item.RequestedBy, item.ExpiresAt)
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	item.Status = "pending"
+	item.CreatedAt = time.Now().UTC()
+	return item, nil
+}
+
+func (s *Store) ResolveApproval(ctx context.Context, approvalID, resolver, status string) (domain.Approval, error) {
+	if status != "approved" && status != "rejected" {
+		return domain.Approval{}, errors.New("invalid approval resolution")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE echo_approvals SET status=?,resolved_by=?,resolved_at=NOW(6) WHERE id=? AND status='pending' AND expires_at>NOW(6)`, status, resolver, approvalID)
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	n, _ := res.RowsAffected()
+	if n != 1 {
+		return domain.Approval{}, errors.New("approval is not pending or has expired")
+	}
+	if status == "approved" {
+		var actionType, incidentID string
+		var action json.RawMessage
+		if err := s.db.QueryRowContext(ctx, `SELECT action_type,incident_id,action_json FROM echo_approvals WHERE id=?`, approvalID).Scan(&actionType, &incidentID, &action); err == nil {
+			if actionType == "prepare_patch" {
+				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='change_approved' WHERE id=?`, incidentID)
+			}
+			if actionType == "deploy_staging" {
+				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='staging' WHERE id=?`, incidentID)
+			}
+			if actionType == "deploy_production" {
+				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='production' WHERE id=?`, incidentID)
+			}
+			if actionType == "merge_production" {
+				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='production' WHERE id=?`, incidentID)
+			}
+			payload, _ := json.Marshal(map[string]any{"incidentId": incidentID, "approvalId": approvalID, "action": json.RawMessage(action)})
+			_, _ = s.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json) VALUES(?,?,?)`, id.New("job"), actionType, payload)
+		}
+	}
+	items, err := s.ListApprovals(ctx)
+	if err != nil {
+		return domain.Approval{}, err
+	}
+	for _, item := range items {
+		if item.ID == approvalID {
+			return item, nil
+		}
+	}
+	return domain.Approval{}, ErrNotFound
+}
+
+func (s *Store) FindPendingApprovalByNonceHash(ctx context.Context, nonceHash string) (string, error) {
+	var approvalID string
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM echo_approvals WHERE nonce_hash=? AND status='pending' AND expires_at>NOW(6) ORDER BY created_at DESC LIMIT 1`, nonceHash).Scan(&approvalID)
+	return approvalID, notFound(err)
+}
+
+func (s *Store) EnqueueOutbound(ctx context.Context, chatJID, body string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), chatJID, body)
+	return err
+}
+
+func (s *Store) ClaimOutbound(ctx context.Context, lease time.Duration) (domain.OutboundMessage, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.OutboundMessage{}, err
+	}
+	defer tx.Rollback()
+	var item domain.OutboundMessage
+	err = tx.QueryRowContext(ctx, `SELECT id,chat_jid,body,created_at FROM echo_whatsapp_outbox WHERE status IN ('queued','failed') AND available_at<=NOW(6) AND (locked_until IS NULL OR locked_until<NOW(6)) AND attempts<5 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&item.ID, &item.ChatJID, &item.Body, &item.CreatedAt)
+	if err != nil {
+		return domain.OutboundMessage{}, notFound(err)
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sending',attempts=attempts+1,locked_until=? WHERE id=?`, time.Now().Add(lease), item.ID)
+	if err != nil {
+		return domain.OutboundMessage{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.OutboundMessage{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) CompleteOutbound(ctx context.Context, outboxID, messageID string, sendErr error) error {
+	if sendErr == nil {
+		_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sent',whatsapp_message_id=?,sent_at=NOW(6),locked_until=NULL WHERE id=?`, messageID, outboxID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status=IF(attempts>=5,'dead','failed'),last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,60) SECOND),locked_until=NULL WHERE id=?`, truncate(sendErr.Error(), 1000), outboxID)
+	return err
+}
+
+func (s *Store) ClaimJob(ctx context.Context, worker string, lease time.Duration) (domain.Job, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	defer tx.Rollback()
+	var item domain.Job
+	err = tx.QueryRowContext(ctx, `SELECT id,job_type,payload_json,status,attempts,max_attempts,locked_by,locked_until,created_at FROM echo_jobs WHERE status IN ('queued','failed') AND available_at<=NOW(6) AND (locked_until IS NULL OR locked_until<NOW(6)) AND attempts<max_attempts ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED`).Scan(&item.ID, &item.Type, &item.Payload, &item.Status, &item.Attempts, &item.MaxAttempts, &item.LockedBy, &item.LockedUntil, &item.CreatedAt)
+	if err != nil {
+		return domain.Job{}, notFound(err)
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status='running',attempts=attempts+1,locked_by=?,locked_until=? WHERE id=?`, worker, time.Now().Add(lease), item.ID)
+	if err != nil {
+		return domain.Job{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Job{}, err
+	}
+	return item, nil
+}
+
+func (s *Store) CompleteJob(ctx context.Context, jobID string, jobErr error) error {
+	if jobErr == nil {
+		_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status='complete',locked_by='',locked_until=NULL,last_error='' WHERE id=?`, jobID)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=?`, truncate(jobErr.Error(), 1000), jobID)
+	return err
+}
+
+func (s *Store) Audit(ctx context.Context, actorType, actorID, action, resourceType, resourceID, outcome string, metadata any) error {
+	return insertAudit(ctx, s.db, actorType, actorID, action, resourceType, resourceID, outcome, metadata)
+}
+
+func (s *Store) ListAudit(ctx context.Context, limit int) ([]domain.AuditEvent, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,actor_type,actor_id,action_name,resource_type,resource_id,outcome,metadata_json,created_at FROM echo_audit_events ORDER BY id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.AuditEvent
+	for rows.Next() {
+		var item domain.AuditEvent
+		if err := rows.Scan(&item.ID, &item.ActorType, &item.ActorID, &item.Action, &item.ResourceType, &item.ResourceID, &item.Outcome, &item.Metadata, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertAudit(ctx context.Context, e execer, actorType, actorID, action, resourceType, resourceID, outcome string, metadata any) error {
+	raw, err := json.Marshal(metadata)
+	if err != nil {
+		return err
+	}
+	_, err = e.ExecContext(ctx, `INSERT INTO echo_audit_events(actor_type,actor_id,action_name,resource_type,resource_id,outcome,metadata_json) VALUES(?,?,?,?,?,?,?)`, actorType, actorID, action, resourceType, resourceID, outcome, raw)
+	return err
+}
+func notFound(err error) error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	return err
+}
+func defaultDuration(value, fallback time.Duration) time.Duration {
+	if value <= 0 {
+		return fallback
+	}
+	return value
+}
+func truncate(value string, max int) string {
+	if len(value) <= max {
+		return value
+	}
+	return value[:max]
+}
