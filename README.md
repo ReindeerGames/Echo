@@ -24,7 +24,7 @@ One externally managed MariaDB server hosts two isolated databases and accounts:
 - `echo_whatsapp` is owned by `mdbstore` and contains cryptographic WhatsApp session state.
 - `echo_core` contains Echo's projects, incidents, jobs, approvals, deployments, outbox, and audit events.
 
-See [the architecture](docs/architecture.md), [threat model](docs/threat-model.md), [monitoring contract](docs/monitoring.md), and [deployment contract](docs/deployment-contract.md).
+See [the architecture](docs/architecture.md), [threat model](docs/threat-model.md), [monitoring contract](docs/monitoring.md), [WhatsApp operator guide](docs/whatsapp-operator.md), and [deployment contract](docs/deployment-contract.md).
 
 ## Implemented workflow
 
@@ -42,6 +42,8 @@ See [the architecture](docs/architecture.md), [threat model](docs/threat-model.m
 Separately, the operations catalogue maps projects to runtime services. Signed, idempotent observer events maintain an alert lifecycle and privately notify the owner only when a condition opens, reopens, or resolves. Echo never needs a production Docker socket or SSH credential for monitoring.
 
 Approvals can be resolved in the UI or by replying privately from the configured owner JID with `approve <code>` or `reject <code>`.
+
+The owner can also ask Echo directly for `status`, `alerts`, `services`, `service <name>`, `projects`, or `incident <id>`. These queries read only Echo's structured catalogue and evidence; questions can never authorize an action.
 
 Configure the owner without handling JIDs manually: send Echo a direct WhatsApp message, open **WhatsApp** in the authenticated control plane, refresh discovered contacts, and select that contact as owner. Echo discovers direct-message contacts only; group participants are not harvested. The selection takes effect immediately and overrides the optional `ECHO_OWNER_JID` environment fallback.
 

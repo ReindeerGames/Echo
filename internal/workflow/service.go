@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ReindeerGames/echo/internal/assistant"
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/owner"
 	"github.com/ReindeerGames/echo/internal/policy"
@@ -20,11 +21,12 @@ type Service struct {
 	store       *store.Store
 	policy      *policy.Engine
 	owners      *owner.Service
+	assistant   *assistant.Responder
 	approvalTTL time.Duration
 }
 
 func New(st *store.Store, policies *policy.Engine, owners *owner.Service, approvalTTL time.Duration) *Service {
-	return &Service{store: st, policy: policies, owners: owners, approvalTTL: approvalTTL}
+	return &Service{store: st, policy: policies, owners: owners, assistant: assistant.New(st), approvalTTL: approvalTTL}
 }
 
 func (s *Service) ReceiveGroupReport(ctx context.Context, selfJIDs []string, msg domain.InboundMessage) (domain.Incident, bool, error) {
@@ -205,27 +207,37 @@ func (s *Service) ReceiveOwnerCommand(ctx context.Context, msg domain.InboundMes
 		return "", false
 	}
 	parts := strings.Fields(strings.TrimSpace(msg.Body))
-	if len(parts) != 2 {
-		return "", false
+	if len(parts) == 2 {
+		resolution := ""
+		switch strings.ToLower(parts[0]) {
+		case "approve", "confirm":
+			resolution = "approved"
+		case "reject", "deny":
+			resolution = "rejected"
+		}
+		if resolution != "" {
+			approvalID, err := s.store.FindPendingApprovalByNonceHash(ctx, security.HashNonce(parts[1]))
+			if err != nil {
+				return "I could not find an active approval for that code. It may be incorrect or expired.", true
+			}
+			item, err := s.ResolveApproval(ctx, approvalID, msg.SenderJID, resolution)
+			if err != nil {
+				return "The approval could not be resolved safely. Please review it in the Echo control plane.", true
+			}
+			return approvalResolutionMessage(item, resolution), true
+		}
 	}
-	resolution := ""
-	switch strings.ToLower(parts[0]) {
-	case "approve", "confirm":
-		resolution = "approved"
-	case "reject", "deny":
-		resolution = "rejected"
-	default:
-		return "", false
+	if s.assistant == nil {
+		return "Echo's read-only operator assistant is unavailable. Please use the control plane.", true
 	}
-	approvalID, err := s.store.FindPendingApprovalByNonceHash(ctx, security.HashNonce(parts[1]))
-	if err != nil {
-		return "I could not find an active approval for that code. It may be incorrect or expired.", true
+	reply, intent, answerErr := s.assistant.Answer(ctx, msg.Body)
+	outcome := "succeeded"
+	if answerErr != nil {
+		outcome = "failed"
+		reply = "I could not retrieve the operational facts safely just now. Please check the Echo control plane and try again."
 	}
-	item, err := s.ResolveApproval(ctx, approvalID, msg.SenderJID, resolution)
-	if err != nil {
-		return "The approval could not be resolved safely. Please review it in the Echo control plane.", true
-	}
-	return approvalResolutionMessage(item, resolution), true
+	_ = s.store.Audit(ctx, "whatsapp", msg.SenderJID, "assistant.query", "owner", ownerJID, outcome, map[string]any{"intent": intent, "messageId": msg.MessageID, "error": errorString(answerErr)})
+	return reply, true
 }
 
 func approvalResolutionMessage(item domain.Approval, resolution string) string {
