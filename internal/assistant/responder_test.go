@@ -77,15 +77,36 @@ func (f fakeReader) ListServiceAlerts(context.Context, string) ([]domain.Service
 func (f fakeReader) ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error) {
 	return f.events, nil
 }
+func (f fakeReader) ListLatestMonitorEvents(context.Context, string) ([]domain.MonitorEvent, error) {
+	return f.events, nil
+}
 func (f fakeReader) ListJobs(context.Context, string, int) ([]domain.Job, error) { return f.jobs, nil }
 func (f fakeReader) ListDeployments(context.Context, string) ([]domain.Deployment, error) {
 	return f.deployments, nil
+}
+func (f fakeReader) ListProjectDeployments(_ context.Context, projectID string, limit int) ([]domain.Deployment, error) {
+	var out []domain.Deployment
+	for _, deployment := range f.deployments {
+		if deployment.ProjectID == projectID && len(out) < limit {
+			out = append(out, deployment)
+		}
+	}
+	return out, nil
 }
 func (f fakeReader) ListChangeSets(context.Context, string) ([]domain.ChangeSet, error) {
 	return f.changes, nil
 }
 func (f fakeReader) ListIncidents(context.Context, int) ([]domain.Incident, error) {
 	return f.incidents, nil
+}
+func (f fakeReader) ListProjectIncidents(_ context.Context, projectID string, limit int) ([]domain.Incident, error) {
+	var out []domain.Incident
+	for _, incident := range f.incidents {
+		if incident.ProjectID == projectID && len(out) < limit {
+			out = append(out, incident)
+		}
+	}
+	return out, nil
 }
 func (f fakeReader) GetIncident(context.Context, string) (domain.Incident, error) {
 	if f.incident.ID == "" {
@@ -107,6 +128,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"service nudgie-web":  "service",
 		"what can you do?":    "help",
 		"list projects":       "projects",
+		"project invoices":    "project",
 		"incident inc_123456": "incident",
 		"failed jobs":         "jobs",
 		"repo invoices":       "repository",
@@ -367,6 +389,61 @@ func TestIncidentFinderIsBoundedAndSearchableWithoutSensitiveSourceFields(t *tes
 	output, err := responder.executeTool(context.Background(), "list_incidents", json.RawMessage(`{"query":"invoice","status":"triaging"}`))
 	if err != nil || !containsAll(output, `"count":1`, `"id":"inc_open"`, `"summary":"Blank invoice PDFs"`) || strings.Contains(output, "secret raw report") || strings.Contains(output, "27820000000") || strings.Contains(output, "inc_done") {
 		t.Fatalf("unexpected incident finder tool output=%s err=%v", output, err)
+	}
+}
+
+func TestProjectOverviewJoinsOperationalEvidenceWithoutCrossProjectData(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		projects: []domain.Project{
+			{ID: "prj_invoices", Key: "invoices", Name: "Invoices", Description: "Invoice generation and delivery", Enabled: true},
+			{ID: "prj_other", Key: "other", Name: "Other", Enabled: true},
+		},
+		repos: []domain.Repository{
+			{ID: "repo_1", ProjectID: "prj_invoices", Owner: "ReindeerGames", Name: "invoices", Role: "application", DefaultBranch: "main", Enabled: true},
+			{ID: "repo_other", ProjectID: "prj_other", Owner: "ReindeerGames", Name: "other", Enabled: true},
+		},
+		services: []domain.Service{
+			{ID: "svc_fresh", ProjectID: "prj_invoices", Key: "invoice-web", Name: "Invoice web", Kind: "application", Criticality: "high", Enabled: true, HeartbeatTimeoutSeconds: 120},
+			{ID: "svc_stale", ProjectID: "prj_invoices", Key: "invoice-worker", Name: "Invoice worker", Kind: "worker", Criticality: "critical", Enabled: true, HeartbeatTimeoutSeconds: 60},
+			{ID: "svc_missing", ProjectID: "prj_invoices", Key: "invoice-cron", Name: "Invoice cron", Kind: "worker", Criticality: "medium", Enabled: true, HeartbeatTimeoutSeconds: 60},
+			{ID: "svc_untracked", ProjectID: "prj_invoices", Key: "invoice-admin", Name: "Invoice admin", Kind: "application", Criticality: "low", Enabled: true},
+			{ID: "svc_disabled", ProjectID: "prj_invoices", Key: "invoice-old", Name: "Invoice old", Kind: "application", Criticality: "low", Enabled: false, HeartbeatTimeoutSeconds: 60},
+			{ID: "svc_other", ProjectID: "prj_other", Key: "other", Name: "Other", Enabled: true, HeartbeatTimeoutSeconds: 60},
+		},
+		events: []domain.MonitorEvent{
+			{EventID: "evt_fresh", ServiceID: "svc_fresh", Source: "observer", Status: "healthy", Severity: "info", Summary: "ready", ObservedAt: now.Add(-30 * time.Second)},
+			{EventID: "evt_stale", ServiceID: "svc_stale", Source: "observer", Status: "degraded", Severity: "warning", Summary: "queue depth elevated", ObservedAt: now.Add(-2 * time.Minute)},
+			{EventID: "evt_other", ServiceID: "svc_other", Source: "observer", Status: "unhealthy", Severity: "critical", Summary: "must not appear", ObservedAt: now},
+		},
+		alerts: []domain.ServiceAlert{
+			{ServiceID: "svc_stale", ServiceName: "Invoice worker", ProjectID: "prj_invoices", Severity: "warning", Fingerprint: "queue-depth", Summary: "queue depth elevated", OpenedAt: now.Add(-time.Hour), LastSeenAt: now.Add(-2 * time.Minute)},
+			{ServiceID: "svc_other", ServiceName: "Other", ProjectID: "prj_other", Severity: "critical", Summary: "must not appear"},
+		},
+		incidents: []domain.Incident{
+			{ID: "inc_invoice", ProjectID: "prj_invoices", ProjectName: "Invoices", Status: "triaging", Severity: "high", Summary: "PDFs delayed", CreatedAt: now.Add(-time.Hour), UpdatedAt: now},
+			{ID: "inc_other", ProjectID: "prj_other", ProjectName: "Other", Status: "failed", Severity: "critical", Summary: "must not appear", CreatedAt: now},
+		},
+		deployments: []domain.Deployment{
+			{ID: "dep_invoice", IncidentID: "inc_invoice", ProjectID: "prj_invoices", Environment: "production", Operation: "deploy", ArtifactRef: "a75cdbdaad7917a104299753c32f8358b90a50e6", Status: "verified", Repository: "ReindeerGames/invoices", CreatedAt: now.Add(-45 * time.Minute)},
+			{ID: "dep_other", ProjectID: "prj_other", Environment: "production", Operation: "deploy", Status: "failed", CreatedAt: now},
+		},
+	}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "project invoices")
+	if err != nil || intent != "project" || !containsAll(answer, "Project: Invoices (invoices)", "Repositories: 1/1 enabled · ReindeerGames/invoices", "Services: 4/5 enabled", "Monitoring: 1 fresh · 1 stale · 1 missing · 1 without heartbeat policy · 1 disabled", "Open alerts: 1", "PDFs delayed", "Latest deployment: VERIFIED · deploy · production · 45m0s ago") {
+		t.Fatalf("unexpected project answer intent=%s body=%s err=%v", intent, answer, err)
+	}
+	if strings.Contains(answer, "must not appear") {
+		t.Fatalf("cross-project data leaked into answer: %s", answer)
+	}
+	output, err := responder.executeTool(context.Background(), "get_project", json.RawMessage(`{"project":"Invoices"}`))
+	if err != nil || !containsAll(output, `"found":true`, `"fresh":1`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"open_alert_count":1`, `"id":"inc_invoice"`, `"id":"dep_invoice"`) {
+		t.Fatalf("unexpected project tool output=%s err=%v", output, err)
+	}
+	if strings.Contains(output, "must not appear") || strings.Contains(output, "inc_other") || strings.Contains(output, "dep_other") || strings.Contains(output, "repo_other") {
+		t.Fatalf("cross-project data leaked into tool output: %s", output)
 	}
 }
 

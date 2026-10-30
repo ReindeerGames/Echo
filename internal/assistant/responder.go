@@ -24,10 +24,13 @@ type Reader interface {
 	ListServices(context.Context, string) ([]domain.Service, error)
 	ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error)
 	ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error)
+	ListLatestMonitorEvents(context.Context, string) ([]domain.MonitorEvent, error)
 	ListJobs(context.Context, string, int) ([]domain.Job, error)
 	ListDeployments(context.Context, string) ([]domain.Deployment, error)
+	ListProjectDeployments(context.Context, string, int) ([]domain.Deployment, error)
 	ListChangeSets(context.Context, string) ([]domain.ChangeSet, error)
 	ListIncidents(context.Context, int) ([]domain.Incident, error)
+	ListProjectIncidents(context.Context, string, int) ([]domain.Incident, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
 }
@@ -102,6 +105,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
 		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
+		ai.FunctionTool("get_project", "Get one project's configured repositories, monitored services and freshness, open alerts, recent incidents, and deployment state.", schema(map[string]any{"project": map[string]string{"type": "string", "description": "Exact project ID, key, or name."}}, []string{"project"})),
 		ai.FunctionTool("get_repository_status", "Inspect the configured repository default-branch head and its ten most recent GitHub Actions runs. This tool is read-only.", schema(map[string]any{"repository": map[string]string{"type": "string", "description": "Configured repository ID, name, or owner/name."}}, []string{"repository"})),
 		ai.FunctionTool("list_incidents", "Find recent incidents by optional status and project/summary text. Use this before get_incident when the exact ID is unknown.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Project or summary fragment, or empty string."}, "status": map[string]string{"type": "string", "description": "Exact incident status, or empty string."}}, []string{"query", "status"})),
 		ai.FunctionTool("get_incident", "Get an incident and its latest evidence-backed diagnosis by exact incident ID.", schema(map[string]any{"incident_id": map[string]string{"type": "string"}}, []string{"incident_id"})),
@@ -290,6 +294,28 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			views = append(views, map[string]any{"key": project.Key, "name": project.Name, "description": truncateRunes(project.Description, 500), "enabled": project.Enabled, "repositories": repos, "repository_count": repositoryCount, "repositories_truncated": repositoryCount > len(repos)})
 		}
 		return marshal(map[string]any{"projects": views, "count": len(projects), "truncated": len(projects) > len(views)})
+	case "get_project":
+		var arguments struct {
+			Project string `json:"project"`
+		}
+		if err := decodeArguments(raw, &arguments); err != nil {
+			return "", err
+		}
+		project, choices, err := r.resolveProject(ctx, arguments.Project)
+		if err != nil {
+			return "", err
+		}
+		if len(choices) > 0 {
+			return marshal(map[string]any{"found": false, "ambiguous": true, "choices": choices})
+		}
+		if project.ID == "" {
+			return marshal(map[string]any{"found": false})
+		}
+		overview, err := r.loadProjectOverview(ctx, project)
+		if err != nil {
+			return "", err
+		}
+		return marshal(projectOverviewView(r.now().UTC(), overview))
 	case "get_repository_status":
 		var arguments struct {
 			Repository string `json:"repository"`
@@ -644,6 +670,8 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.deployments(ctx)
 	case "projects":
 		answer, err = r.projects(ctx)
+	case "project":
+		answer, err = r.project(ctx, argument)
 	case "repository":
 		answer, err = r.repository(ctx, argument)
 	case "incidents":
@@ -654,7 +682,7 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “project <name>”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -674,6 +702,9 @@ func classify(text string) (string, string) {
 		if strings.HasPrefix(value, prefix) {
 			return "repository", strings.TrimSpace(strings.TrimPrefix(value, prefix))
 		}
+	}
+	if strings.HasPrefix(value, "project ") {
+		return "project", strings.TrimSpace(strings.TrimPrefix(value, "project "))
 	}
 	if strings.HasPrefix(value, "incident ") {
 		return "incident", strings.TrimSpace(strings.TrimPrefix(value, "incident "))
@@ -840,6 +871,28 @@ func (r *Responder) resolveRepository(ctx context.Context, query string) (domain
 		choices = append(choices, repository.Owner+"/"+repository.Name)
 	}
 	return domain.Repository{}, choices, nil
+}
+
+func (r *Responder) resolveProject(ctx context.Context, query string) (domain.Project, []string, error) {
+	projects, err := r.reader.ListProjects(ctx)
+	if err != nil {
+		return domain.Project{}, nil, err
+	}
+	matches := matchProjects(projects, query)
+	if len(matches) == 0 {
+		return domain.Project{}, nil, nil
+	}
+	if len(matches) == 1 {
+		return matches[0], nil, nil
+	}
+	choices := make([]string, 0, min(len(matches), 10))
+	for index, project := range matches {
+		if index == 10 {
+			break
+		}
+		choices = append(choices, project.Name+" ("+project.Key+")")
+	}
+	return domain.Project{}, choices, nil
 }
 
 func sortedUnreadyComponents(components map[string]string) []string {
@@ -1009,6 +1062,176 @@ func incidentSummaryView(incident domain.Incident) map[string]any {
 	}
 }
 
+type projectOverview struct {
+	Project                 domain.Project
+	Repositories            []domain.Repository
+	Services                []domain.Service
+	LatestSignals           map[string]domain.MonitorEvent
+	OpenAlerts              []domain.ServiceAlert
+	Incidents               []domain.Incident
+	Deployments             []domain.Deployment
+	IncidentSourceLimited   bool
+	DeploymentSourceLimited bool
+}
+
+func (r *Responder) loadProjectOverview(ctx context.Context, project domain.Project) (projectOverview, error) {
+	overview := projectOverview{Project: project, LatestSignals: map[string]domain.MonitorEvent{}}
+	var err error
+	repositories, err := r.reader.ListRepositories(ctx, project.ID)
+	if err != nil {
+		return projectOverview{}, err
+	}
+	for _, repository := range repositories {
+		if repository.ProjectID == project.ID {
+			overview.Repositories = append(overview.Repositories, repository)
+		}
+	}
+	services, err := r.reader.ListServices(ctx, project.ID)
+	if err != nil {
+		return projectOverview{}, err
+	}
+	for _, service := range services {
+		if service.ProjectID == project.ID {
+			overview.Services = append(overview.Services, service)
+		}
+	}
+	serviceIDs := make(map[string]struct{}, len(overview.Services))
+	for _, service := range overview.Services {
+		serviceIDs[service.ID] = struct{}{}
+	}
+	latestSignals, err := r.reader.ListLatestMonitorEvents(ctx, project.ID)
+	if err != nil {
+		return projectOverview{}, err
+	}
+	for _, event := range latestSignals {
+		if _, allowed := serviceIDs[event.ServiceID]; allowed {
+			overview.LatestSignals[event.ServiceID] = event
+		}
+	}
+	alerts, err := r.reader.ListServiceAlerts(ctx, "open")
+	if err != nil {
+		return projectOverview{}, err
+	}
+	for _, alert := range alerts {
+		if alert.ProjectID == project.ID {
+			overview.OpenAlerts = append(overview.OpenAlerts, alert)
+		}
+	}
+	incidents, err := r.reader.ListProjectIncidents(ctx, project.ID, 101)
+	if err != nil {
+		return projectOverview{}, err
+	}
+	overview.IncidentSourceLimited = len(incidents) > 100
+	if len(incidents) > 100 {
+		incidents = incidents[:100]
+	}
+	for _, incident := range incidents {
+		if incident.ProjectID == project.ID {
+			overview.Incidents = append(overview.Incidents, incident)
+		}
+	}
+	deployments, err := r.reader.ListProjectDeployments(ctx, project.ID, 201)
+	if err != nil {
+		return projectOverview{}, err
+	}
+	overview.DeploymentSourceLimited = len(deployments) > 200
+	if len(deployments) > 200 {
+		deployments = deployments[:200]
+	}
+	for _, deployment := range deployments {
+		if deployment.ProjectID == project.ID {
+			overview.Deployments = append(overview.Deployments, deployment)
+		}
+	}
+	return overview, nil
+}
+
+func projectOverviewView(now time.Time, overview projectOverview) map[string]any {
+	repositories := make([]map[string]any, 0, min(len(overview.Repositories), 50))
+	for index, repository := range overview.Repositories {
+		if index == 50 {
+			break
+		}
+		repositories = append(repositories, map[string]any{"id": repository.ID, "name": repository.Owner + "/" + repository.Name, "role": repository.Role, "default_branch": repository.DefaultBranch, "read_only": repository.ReadOnly, "enabled": repository.Enabled})
+	}
+	alertCounts := map[string]int{}
+	alerts := make([]map[string]any, 0, min(len(overview.OpenAlerts), 50))
+	for index, alert := range overview.OpenAlerts {
+		alertCounts[alert.ServiceID]++
+		if index == 50 {
+			continue
+		}
+		alerts = append(alerts, map[string]any{"service": truncateRunes(alert.ServiceName, 160), "service_id": alert.ServiceID, "severity": alert.Severity, "fingerprint": alert.Fingerprint, "summary": truncateRunes(alert.Summary, 300), "opened_at": alert.OpenedAt, "last_seen_at": alert.LastSeenAt})
+	}
+	services := make([]map[string]any, 0, min(len(overview.Services), 50))
+	for index, service := range overview.Services {
+		if index == 50 {
+			break
+		}
+		serviceView := map[string]any{"id": service.ID, "key": service.Key, "name": service.Name, "kind": service.Kind, "criticality": service.Criticality, "enabled": service.Enabled, "heartbeat_timeout_seconds": service.HeartbeatTimeoutSeconds, "open_alert_count": alertCounts[service.ID]}
+		if event, ok := overview.LatestSignals[service.ID]; ok {
+			serviceView["observer_freshness"] = observerFreshness(now, service, []domain.MonitorEvent{event})
+			serviceView["latest_signal"] = map[string]any{"status": event.Status, "severity": event.Severity, "summary": truncateRunes(event.Summary, 300), "source": truncateRunes(event.Source, 120), "observed_at": event.ObservedAt, "age_seconds": ageSeconds(now, event.ObservedAt)}
+		} else {
+			serviceView["observer_freshness"] = observerFreshness(now, service, nil)
+		}
+		services = append(services, serviceView)
+	}
+	incidents := make([]map[string]any, 0, min(len(overview.Incidents), 20))
+	for index, incident := range overview.Incidents {
+		if index == 20 {
+			break
+		}
+		incidents = append(incidents, incidentSummaryView(incident))
+	}
+	deployments := make([]map[string]any, 0, min(len(overview.Deployments), 20))
+	for index, deployment := range overview.Deployments {
+		if index == 20 {
+			break
+		}
+		deployments = append(deployments, deploymentView(deployment))
+	}
+	fresh, stale, missing, noPolicy, disabled := projectMonitoringCounts(now, overview)
+	return map[string]any{
+		"found":        true,
+		"generated_at": now,
+		"project": map[string]any{
+			"id": overview.Project.ID, "key": overview.Project.Key, "name": overview.Project.Name,
+			"description": truncateRunes(overview.Project.Description, 500), "enabled": overview.Project.Enabled,
+		},
+		"monitoring":   map[string]any{"fresh": fresh, "stale": stale, "missing": missing, "without_heartbeat_policy": noPolicy, "disabled": disabled},
+		"repositories": repositories, "repository_count": len(overview.Repositories), "repositories_truncated": len(overview.Repositories) > len(repositories),
+		"services": services, "service_count": len(overview.Services), "services_truncated": len(overview.Services) > len(services),
+		"open_alerts": alerts, "open_alert_count": len(overview.OpenAlerts), "alerts_truncated": len(overview.OpenAlerts) > len(alerts),
+		"recent_incidents": incidents, "recent_incident_count": len(overview.Incidents), "incidents_truncated": len(overview.Incidents) > len(incidents) || overview.IncidentSourceLimited,
+		"recent_deployments": deployments, "recent_deployment_count": len(overview.Deployments), "deployments_truncated": len(overview.Deployments) > len(deployments) || overview.DeploymentSourceLimited,
+	}
+}
+
+func projectMonitoringCounts(now time.Time, overview projectOverview) (fresh, stale, missing, noPolicy, disabled int) {
+	for _, service := range overview.Services {
+		if !service.Enabled {
+			disabled++
+			continue
+		}
+		if service.HeartbeatTimeoutSeconds <= 0 {
+			noPolicy++
+			continue
+		}
+		event, ok := overview.LatestSignals[service.ID]
+		if !ok {
+			missing++
+			continue
+		}
+		if ageSeconds(now, event.ObservedAt) > int64(service.HeartbeatTimeoutSeconds) {
+			stale++
+		} else {
+			fresh++
+		}
+	}
+	return fresh, stale, missing, noPolicy, disabled
+}
+
 func (r *Responder) service(ctx context.Context, query string) (string, error) {
 	if query == "" {
 		return "Please name the service, for example “service nudgie-web”.", nil
@@ -1121,6 +1344,98 @@ func (r *Responder) projects(ctx context.Context) (string, error) {
 	return fmt.Sprintf("Projects (%d)\n\n%s", len(projects), strings.Join(lines, "\n")), nil
 }
 
+func (r *Responder) project(ctx context.Context, query string) (string, error) {
+	if strings.TrimSpace(query) == "" {
+		return "Please name the project, for example “project invoices”.", nil
+	}
+	project, choices, err := r.resolveProject(ctx, query)
+	if err != nil {
+		return "", err
+	}
+	if len(choices) > 0 {
+		return "That project name is ambiguous. Try one of: " + strings.Join(choices, ", "), nil
+	}
+	if project.ID == "" {
+		return fmt.Sprintf("I could not find a project matching “%s”. Send “projects” to list the catalogue.", truncateRunes(query, 120)), nil
+	}
+	overview, err := r.loadProjectOverview(ctx, project)
+	if err != nil {
+		return "", err
+	}
+	state := "enabled"
+	if !project.Enabled {
+		state = "disabled"
+	}
+	lines := []string{"State: " + state}
+	if strings.TrimSpace(project.Description) != "" {
+		lines = append(lines, truncateRunes(project.Description, 500))
+	}
+	enabledRepositories := 0
+	repositoryNames := make([]string, 0, 5)
+	for _, repository := range overview.Repositories {
+		if !repository.Enabled {
+			continue
+		}
+		enabledRepositories++
+		if len(repositoryNames) < 5 {
+			repositoryNames = append(repositoryNames, repository.Owner+"/"+repository.Name)
+		}
+	}
+	repositoryLine := fmt.Sprintf("Repositories: %d/%d enabled", enabledRepositories, len(overview.Repositories))
+	if len(repositoryNames) > 0 {
+		repositoryLine += " · " + strings.Join(repositoryNames, ", ")
+		if enabledRepositories > len(repositoryNames) {
+			repositoryLine += fmt.Sprintf(" · +%d more", enabledRepositories-len(repositoryNames))
+		}
+	}
+	lines = append(lines, repositoryLine)
+	enabledServices := 0
+	for _, service := range overview.Services {
+		if service.Enabled {
+			enabledServices++
+		}
+	}
+	lines = append(lines, fmt.Sprintf("Services: %d/%d enabled", enabledServices, len(overview.Services)))
+	fresh, stale, missing, noPolicy, disabled := projectMonitoringCounts(r.now().UTC(), overview)
+	lines = append(lines, fmt.Sprintf("Monitoring: %d fresh · %d stale · %d missing · %d without heartbeat policy · %d disabled", fresh, stale, missing, noPolicy, disabled))
+	if len(overview.OpenAlerts) == 0 {
+		lines = append(lines, "Open alerts: none")
+	} else {
+		lines = append(lines, fmt.Sprintf("Open alerts: %d", len(overview.OpenAlerts)))
+		for index, alert := range overview.OpenAlerts {
+			if index == 5 {
+				lines = append(lines, fmt.Sprintf("…and %d more alerts in the control plane.", len(overview.OpenAlerts)-index))
+				break
+			}
+			lines = append(lines, fmt.Sprintf("• %s · %s · %s", strings.ToUpper(alert.Severity), truncateRunes(alert.ServiceName, 120), truncateRunes(alert.Summary, 240)))
+		}
+	}
+	openIncidents := make([]domain.Incident, 0, len(overview.Incidents))
+	for _, incident := range overview.Incidents {
+		if incident.Status != "resolved" && incident.Status != "closed" {
+			openIncidents = append(openIncidents, incident)
+		}
+	}
+	incidentCount := fmt.Sprintf("%d", len(openIncidents))
+	if overview.IncidentSourceLimited {
+		incidentCount = "at least " + incidentCount
+	}
+	lines = append(lines, "Open incidents in recent history: "+incidentCount)
+	for index, incident := range openIncidents {
+		if index == 3 {
+			break
+		}
+		lines = append(lines, fmt.Sprintf("• %s · %s · %s", strings.ToUpper(incident.Status), incident.ID, truncateRunes(incident.Summary, 240)))
+	}
+	if len(overview.Deployments) == 0 {
+		lines = append(lines, "Latest deployment: none recorded")
+	} else {
+		deployment := overview.Deployments[0]
+		lines = append(lines, fmt.Sprintf("Latest deployment: %s · %s · %s · %s ago", strings.ToUpper(deployment.Status), strings.ReplaceAll(deployment.Operation, "_", " "), deployment.Environment, formatAge(r.now(), deployment.CreatedAt)))
+	}
+	return fmt.Sprintf("Project: %s (%s)\n\n%s", project.Name, project.Key, strings.Join(lines, "\n")), nil
+}
+
 func (r *Responder) incident(ctx context.Context, incidentID string) (string, error) {
 	if incidentID == "" {
 		return "Please include the incident ID shown in Echo, for example “incident inc_…”.", nil
@@ -1204,6 +1519,26 @@ func matchServices(services []domain.Service, query string) []domain.Service {
 	return partial
 }
 
+func matchProjects(projects []domain.Project, query string) []domain.Project {
+	query = strings.ToLower(strings.TrimSpace(query))
+	var exact, partial []domain.Project
+	for _, project := range projects {
+		id := strings.ToLower(project.ID)
+		key := strings.ToLower(project.Key)
+		name := strings.ToLower(project.Name)
+		if query == id || query == key || query == name {
+			exact = append(exact, project)
+		} else if query != "" && (strings.Contains(key, query) || strings.Contains(name, query)) {
+			partial = append(partial, project)
+		}
+	}
+	if len(exact) > 0 {
+		return exact
+	}
+	sort.Slice(partial, func(i, j int) bool { return partial[i].Name < partial[j].Name })
+	return partial
+}
+
 func matchRepositories(repositories []domain.Repository, query string) []domain.Repository {
 	query = strings.ToLower(strings.TrimSpace(query))
 	var exact, partial []domain.Repository
@@ -1230,7 +1565,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• repo <name> — live default-branch and GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• repo <name> — live default-branch and GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

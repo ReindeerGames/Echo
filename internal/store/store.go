@@ -481,6 +481,37 @@ func (s *Store) ListMonitorEvents(ctx context.Context, serviceID string, limit i
 	return out, rows.Err()
 }
 
+func (s *Store) ListLatestMonitorEvents(ctx context.Context, projectID string) ([]domain.MonitorEvent, error) {
+	query := `SELECT e.id,e.event_id,e.service_id,s.name,e.source_name,e.health_status,e.severity,e.summary,e.fingerprint,e.details_json,e.observed_at,e.received_at
+	  FROM echo_monitor_events e
+	  JOIN echo_services s ON s.id=e.service_id
+	  WHERE e.id=(
+	    SELECT e2.id FROM echo_monitor_events e2
+	    WHERE e2.service_id=e.service_id AND e2.source_name<>'echo-watchdog'
+	    ORDER BY e2.observed_at DESC,e2.received_at DESC LIMIT 1
+	  )`
+	args := []any{}
+	if projectID != "" {
+		query += ` AND s.project_id=?`
+		args = append(args, projectID)
+	}
+	query += ` ORDER BY s.name,e.observed_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.MonitorEvent
+	for rows.Next() {
+		var item domain.MonitorEvent
+		if err := scanMonitorEvent(rows, &item); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListServiceAlerts(ctx context.Context, status string) ([]domain.ServiceAlert, error) {
 	query := `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id`
 	args := []any{}
@@ -872,6 +903,30 @@ func (s *Store) ListDeployments(ctx context.Context, incidentID string) ([]domai
 	return out, rows.Err()
 }
 
+func (s *Store) ListProjectDeployments(ctx context.Context, projectID string, limit int) ([]domain.Deployment, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	if limit < 1 || limit > 201 {
+		limit = 201
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,incident_id,COALESCE(approval_id,''),project_id,environment_name,operation_type,artifact_ref,COALESCE(source_deployment_id,''),status,workflow_url,repository_full_name,workflow_name,COALESCE(external_run_id,0),started_at,finished_at,created_at
+	  FROM echo_deployments WHERE project_id=? ORDER BY created_at DESC LIMIT ?`, projectID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Deployment
+	for rows.Next() {
+		var item domain.Deployment
+		if err := rows.Scan(&item.ID, &item.IncidentID, &item.ApprovalID, &item.ProjectID, &item.Environment, &item.Operation, &item.ArtifactRef, &item.SourceDeploymentID, &item.Status, &item.WorkflowURL, &item.Repository, &item.Workflow, &item.ExternalRunID, &item.StartedAt, &item.FinishedAt, &item.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) GetDeployment(ctx context.Context, deploymentID string) (domain.Deployment, error) {
 	var item domain.Deployment
 	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,COALESCE(approval_id,''),project_id,environment_name,operation_type,artifact_ref,COALESCE(source_deployment_id,''),status,workflow_url,repository_full_name,workflow_name,COALESCE(external_run_id,0),started_at,finished_at,created_at FROM echo_deployments WHERE id=?`, deploymentID).Scan(&item.ID, &item.IncidentID, &item.ApprovalID, &item.ProjectID, &item.Environment, &item.Operation, &item.ArtifactRef, &item.SourceDeploymentID, &item.Status, &item.WorkflowURL, &item.Repository, &item.Workflow, &item.ExternalRunID, &item.StartedAt, &item.FinishedAt, &item.CreatedAt)
@@ -978,6 +1033,31 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]domain.Incident
 		limit = 100
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.assigned_to,i.created_at,i.updated_at,i.resolved_at FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id ORDER BY i.created_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Incident
+	for rows.Next() {
+		var item domain.Incident
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListProjectIncidents(ctx context.Context, projectID string, limit int) ([]domain.Incident, error) {
+	if projectID == "" {
+		return nil, errors.New("project ID is required")
+	}
+	if limit < 1 || limit > 101 {
+		limit = 101
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.assigned_to,i.created_at,i.updated_at,i.resolved_at
+	  FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id
+	  WHERE i.project_id=? ORDER BY i.created_at DESC LIMIT ?`, projectID, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -224,6 +224,18 @@ func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	if err != nil || resolved.Status != "resolved" || resolved.ResolvedAt == nil {
 		t.Fatalf("repository-native success did not resolve incident: item=%#v err=%v", resolved, err)
 	}
+	projectIncidents, err := st.ListProjectIncidents(ctx, project.ID, 101)
+	if err != nil || len(projectIncidents) != 1 || projectIncidents[0].ID != first.ID {
+		t.Fatalf("project incident view: items=%#v err=%v", projectIncidents, err)
+	}
+	projectDeployments, err := st.ListProjectDeployments(ctx, project.ID, 201)
+	if err != nil || len(projectDeployments) != 3 || projectDeployments[0].ID != nativeDeployment.ID {
+		t.Fatalf("project deployment view: items=%#v err=%v", projectDeployments, err)
+	}
+	outsideDeployments, err := st.ListProjectDeployments(ctx, "prj_not_this_project", 201)
+	if err != nil || len(outsideDeployments) != 0 {
+		t.Fatalf("project deployment scope escaped: items=%#v err=%v", outsideDeployments, err)
+	}
 }
 
 func TestMariaDBMonitorEventLifecycle(t *testing.T) {
@@ -278,6 +290,18 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	var notifications int
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&notifications); err != nil || notifications != 3 {
 		t.Fatalf("alert transitions must enqueue atomically and once: count=%d err=%v", notifications, err)
+	}
+	watchdog := domain.MonitorEvent{EventID: "monitor-watchdog-later", ServiceID: service.ID, Source: "echo-watchdog", Status: "unhealthy", Severity: "critical", Summary: "observer heartbeat is stale", Fingerprint: "observer-silent", Details: json.RawMessage(`{}`), ObservedAt: observed.Add(3 * time.Minute)}
+	if _, err := st.RecordMonitorEvent(ctx, watchdog); err != nil {
+		t.Fatal(err)
+	}
+	latest, err := st.ListLatestMonitorEvents(ctx, project.ID)
+	if err != nil || len(latest) != 1 || latest[0].EventID != "monitor-3" {
+		t.Fatalf("latest observer evidence should exclude watchdog events: items=%#v err=%v", latest, err)
+	}
+	outside, err := st.ListLatestMonitorEvents(ctx, "prj_not_this_project")
+	if err != nil || len(outside) != 0 {
+		t.Fatalf("latest observer evidence escaped project scope: items=%#v err=%v", outside, err)
 	}
 	atomicFailure := unhealthy
 	atomicFailure.EventID = "monitor-atomic-failure"
