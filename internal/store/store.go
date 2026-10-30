@@ -1205,13 +1205,42 @@ func (s *Store) ClaimJob(ctx context.Context, worker string, lease time.Duration
 	return item, nil
 }
 
-func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, jobErr error) error {
-	if jobErr == nil {
-		_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status='complete',locked_by='',locked_until=NULL,last_error='' WHERE id=? AND status='running' AND attempts=?`, jobID, attempt)
+func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, jobErr error, terminalNotification *domain.OutboundMessage) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=? AND status='running' AND attempts=?`, truncate(jobErr.Error(), 1000), jobID, attempt)
-	return err
+	defer func() { _ = tx.Rollback() }()
+	var result sql.Result
+	if jobErr == nil {
+		result, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status='complete',locked_by='',locked_until=NULL,last_error='' WHERE id=? AND status='running' AND attempts=?`, jobID, attempt)
+	} else {
+		result, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=? AND status='running' AND attempts=?`, truncate(jobErr.Error(), 1000), jobID, attempt)
+	}
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 1 && jobErr != nil && terminalNotification != nil {
+		var status string
+		if err := tx.QueryRowContext(ctx, `SELECT status FROM echo_jobs WHERE id=?`, jobID).Scan(&status); err != nil {
+			return err
+		}
+		if status == "dead" {
+			chatJID := strings.TrimSpace(terminalNotification.ChatJID)
+			body := strings.TrimSpace(terminalNotification.Body)
+			if chatJID == "" || body == "" {
+				return errors.New("terminal job notification requires chat JID and body")
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), chatJID, body); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListJobs(ctx context.Context, status string, limit int) ([]domain.Job, error) {
@@ -1237,12 +1266,7 @@ func (s *Store) ListJobs(ctx context.Context, status string, limit int) ([]domai
 		if err := rows.Scan(&item.ID, &item.Type, &item.Payload, &item.Status, &item.Attempts, &item.MaxAttempts, &item.AvailableAt, &item.LockedBy, &item.LockedUntil, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
-		var context struct {
-			IncidentID string `json:"incidentId"`
-		}
-		if json.Unmarshal(item.Payload, &context) == nil && len(context.IncidentID) <= 80 {
-			item.IncidentID = context.IncidentID
-		}
+		item.IncidentID = domain.JobIncidentID(item.Payload)
 		out = append(out, item)
 	}
 	return out, rows.Err()

@@ -58,30 +58,38 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 			jobErr := r.execute(ctx, job)
-			if err := r.store.CompleteJob(ctx, job.ID, job.Attempts, jobErr); err != nil {
+			notification := r.terminalFailureNotification(ctx, job, jobErr)
+			if err := r.store.CompleteJob(ctx, job.ID, job.Attempts, jobErr, notification); err != nil {
 				slog.Error("complete worker job", "error", err)
 			}
 			if jobErr != nil {
 				slog.Error("worker job failed", "job_id", job.ID, "job_type", job.Type, "error", jobErr)
-				if job.Attempts >= job.MaxAttempts {
-					r.notifyTerminalFailure(ctx, job, jobErr)
-				}
 			}
 		}
 	}
 }
 
-func (r *Runner) notifyTerminalFailure(ctx context.Context, job domain.Job, jobErr error) {
-	var payload struct {
-		IncidentID string `json:"incidentId"`
+func (r *Runner) terminalFailureNotification(ctx context.Context, job domain.Job, jobErr error) *domain.OutboundMessage {
+	if jobErr == nil || job.Attempts < job.MaxAttempts || r.owners == nil {
+		return nil
 	}
-	if json.Unmarshal(job.Payload, &payload) != nil || payload.IncidentID == "" {
-		return
+	incidentID := domain.JobIncidentID(job.Payload)
+	if incidentID == "" {
+		return nil
 	}
-	message := fmt.Sprintf("Echo could not complete %s for %s after %d attempts.\n\nLast error: %s\n\nThe action has stopped and will not continue automatically. Review the incident in the control plane before retrying.", strings.ReplaceAll(job.Type, "_", " "), payload.IncidentID, job.MaxAttempts, truncateText(jobErr.Error(), 500))
-	if err := r.notifyOwner(ctx, message); err != nil {
-		slog.Error("notify owner of terminal job failure", "job_id", job.ID, "error", err)
+	ownerJID, err := r.owners.JID(ctx)
+	if err != nil || ownerJID == "" {
+		if err != nil {
+			slog.Error("resolve owner for terminal job failure", "job_id", job.ID, "error", err)
+		}
+		return nil
 	}
+	return &domain.OutboundMessage{ChatJID: ownerJID, Body: terminalFailureMessage(job, incidentID, jobErr)}
+}
+
+func terminalFailureMessage(job domain.Job, incidentID string, jobErr error) string {
+	category := strings.ReplaceAll(domain.JobErrorCategory(jobErr.Error()), "_", " ")
+	return fmt.Sprintf("Echo could not complete %s for %s after %d attempts.\n\nFailure category: %s.\n\nThe action has stopped and will not continue automatically. Review the incident in the control plane before retrying.", strings.ReplaceAll(job.Type, "_", " "), incidentID, job.MaxAttempts, category)
 }
 
 func (r *Runner) execute(ctx context.Context, job domain.Job) error {

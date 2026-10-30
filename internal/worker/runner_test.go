@@ -1,9 +1,9 @@
 package worker
 
 import (
+	"errors"
 	"strings"
 	"testing"
-	"unicode/utf8"
 
 	"github.com/ReindeerGames/echo/internal/ai"
 	"github.com/ReindeerGames/echo/internal/domain"
@@ -35,9 +35,12 @@ func TestAnalysisOwnerMessageExplainsApprovalFlow(t *testing.T) {
 	}
 }
 
-func TestTerminalFailureMessageTextIsBounded(t *testing.T) {
-	long := strings.Repeat("failure ", 200)
-	if got := truncateText(long, 500); utf8.RuneCountInString(got) > 500 {
-		t.Fatalf("terminal failure details exceed message limit: %d", utf8.RuneCountInString(got))
+func TestTerminalFailureMessageDoesNotExposeRawError(t *testing.T) {
+	message := terminalFailureMessage(domain.Job{Type: "prepare_patch", MaxAttempts: 5}, "inc_test", errors.New("status 403 bearer must-not-leak"))
+	if !strings.Contains(message, "authorization failed") || !strings.Contains(message, "inc_test") {
+		t.Fatalf("safe terminal failure context is missing: %s", message)
+	}
+	if strings.Contains(message, "must-not-leak") || strings.Contains(message, "bearer") {
+		t.Fatalf("raw terminal error leaked into owner message: %s", message)
 	}
 }

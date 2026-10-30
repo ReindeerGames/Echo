@@ -399,14 +399,14 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	if err != nil || firstJob.Attempts != 1 || reclaimedJob.ID != firstJob.ID || reclaimedJob.Status != "running" || reclaimedJob.Attempts != 2 || reclaimedJob.LockedBy != "worker-b" {
 		t.Fatalf("job lease was not reclaimed: first=%#v reclaimed=%#v err=%v", firstJob, reclaimedJob, err)
 	}
-	if err := st.CompleteJob(ctx, firstJob.ID, firstJob.Attempts, nil); err != nil {
+	if err := st.CompleteJob(ctx, firstJob.ID, firstJob.Attempts, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var leasedJobStatus, leasedJobWorker string
 	if err := st.db.QueryRowContext(ctx, `SELECT status,locked_by FROM echo_jobs WHERE id=?`, jobID).Scan(&leasedJobStatus, &leasedJobWorker); err != nil || leasedJobStatus != "running" || leasedJobWorker != "worker-b" {
 		t.Fatalf("stale job completion changed newer lease: status=%q worker=%q err=%v", leasedJobStatus, leasedJobWorker, err)
 	}
-	if err := st.CompleteJob(ctx, reclaimedJob.ID, reclaimedJob.Attempts, nil); err != nil {
+	if err := st.CompleteJob(ctx, reclaimedJob.ID, reclaimedJob.Attempts, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.db.QueryRowContext(ctx, `SELECT status,locked_by FROM echo_jobs WHERE id=?`, jobID).Scan(&leasedJobStatus, &leasedJobWorker); err != nil || leasedJobStatus != "complete" || leasedJobWorker != "" {
@@ -429,6 +429,27 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	dashboard, err := st.Dashboard(ctx)
 	if err != nil || dashboard.DeadJobs != 1 || dashboard.RetryingJobs != 0 || dashboard.RunningJobs != 0 {
 		t.Fatalf("dashboard job counts are wrong: dashboard=%#v err=%v", dashboard, err)
+	}
+
+	notifiedJobID := id.New("job")
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json,max_attempts) VALUES(?,?,?,?)`, notifiedJobID, "prepare_patch", `{"incidentId":"inc_notified"}`, 1); err != nil {
+		t.Fatal(err)
+	}
+	notifiedJob, err := st.ClaimJob(ctx, "worker-notifier", time.Minute)
+	if err != nil || notifiedJob.ID != notifiedJobID {
+		t.Fatalf("terminal notification job was not claimed: job=%#v err=%v", notifiedJob, err)
+	}
+	notification := &domain.OutboundMessage{ChatJID: "owner@s.whatsapp.net", Body: "Safe terminal failure for inc_notified"}
+	jobFailure := errors.New("status 403 bearer must-not-leak")
+	if err := st.CompleteJob(ctx, notifiedJob.ID, notifiedJob.Attempts, jobFailure, notification); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CompleteJob(ctx, notifiedJob.ID, notifiedJob.Attempts, jobFailure, notification); err != nil {
+		t.Fatal(err)
+	}
+	var terminalNotifications int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE body=?`, notification.Body).Scan(&terminalNotifications); err != nil || terminalNotifications != 1 {
+		t.Fatalf("terminal notification was not atomic and idempotent: count=%d err=%v", terminalNotifications, err)
 	}
 }
 

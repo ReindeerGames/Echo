@@ -25,3 +25,21 @@ func TestJobJSONOmitsActionPayload(t *testing.T) {
 		t.Fatalf("safe incident correlation is missing: %s", value)
 	}
 }
+
+func TestJobContextAndErrorCategoriesAreSafe(t *testing.T) {
+	if got := JobIncidentID(json.RawMessage(`{"incidentId":"inc_123"}`)); got != "inc_123" {
+		t.Fatalf("unexpected incident ID %q", got)
+	}
+	for _, payload := range []json.RawMessage{
+		json.RawMessage(`{"incidentId":"../../secret"}`),
+		json.RawMessage(`{"incidentId":"inc 123"}`),
+		json.RawMessage(`not-json`),
+	} {
+		if got := JobIncidentID(payload); got != "" {
+			t.Fatalf("unsafe incident ID accepted from %q: %q", payload, got)
+		}
+	}
+	if got := JobErrorCategory("request status 403 bearer must-not-leak"); got != "authorization_failed" {
+		t.Fatalf("unexpected error category %q", got)
+	}
+}
