@@ -169,6 +169,12 @@ func Load() (Config, error) {
 	if cfg.Monitor.WatchdogInterval < 5*time.Second || cfg.Monitor.WatchdogInterval > 5*time.Minute {
 		return Config{}, errors.New("ECHO_MONITOR_WATCHDOG_INTERVAL must be between 5s and 5m")
 	}
+	if cfg.Worker.PollInterval < 100*time.Millisecond || cfg.Worker.PollInterval > time.Minute {
+		return Config{}, errors.New("ECHO_WORKER_POLL_INTERVAL must be between 100ms and 1m")
+	}
+	if cfg.Worker.JobLease < 5*time.Second || cfg.Worker.JobLease > time.Hour {
+		return Config{}, errors.New("ECHO_WORKER_JOB_LEASE must be between 5s and 1h")
+	}
 	publicURL, err := url.ParseRequestURI(cfg.HTTP.PublicBaseURL)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid ECHO_PUBLIC_BASE_URL: %w", err)

@@ -392,6 +392,14 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	renewed, err := st.RenewJobLease(ctx, firstJob.ID, firstJob.Attempts, "worker-a", 2*time.Minute)
+	if err != nil || !renewed {
+		t.Fatalf("current job lease was not renewed: renewed=%v err=%v", renewed, err)
+	}
+	renewed, err = st.RenewJobLease(ctx, firstJob.ID, firstJob.Attempts, "worker-other", 2*time.Minute)
+	if err != nil || renewed {
+		t.Fatalf("wrong worker renewed job lease: renewed=%v err=%v", renewed, err)
+	}
 	if _, err := st.db.ExecContext(ctx, `UPDATE echo_jobs SET locked_until=DATE_SUB(NOW(6),INTERVAL 1 SECOND) WHERE id=?`, jobID); err != nil {
 		t.Fatal(err)
 	}
@@ -399,14 +407,18 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	if err != nil || firstJob.Attempts != 1 || reclaimedJob.ID != firstJob.ID || reclaimedJob.Status != "running" || reclaimedJob.Attempts != 2 || reclaimedJob.LockedBy != "worker-b" {
 		t.Fatalf("job lease was not reclaimed: first=%#v reclaimed=%#v err=%v", firstJob, reclaimedJob, err)
 	}
-	if err := st.CompleteJob(ctx, firstJob.ID, firstJob.Attempts, nil, nil); err != nil {
+	renewed, err = st.RenewJobLease(ctx, firstJob.ID, firstJob.Attempts, "worker-a", 2*time.Minute)
+	if err != nil || renewed {
+		t.Fatalf("stale job attempt renewed newer lease: renewed=%v err=%v", renewed, err)
+	}
+	if err := st.CompleteJob(ctx, firstJob.ID, firstJob.Attempts, "worker-a", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	var leasedJobStatus, leasedJobWorker string
 	if err := st.db.QueryRowContext(ctx, `SELECT status,locked_by FROM echo_jobs WHERE id=?`, jobID).Scan(&leasedJobStatus, &leasedJobWorker); err != nil || leasedJobStatus != "running" || leasedJobWorker != "worker-b" {
 		t.Fatalf("stale job completion changed newer lease: status=%q worker=%q err=%v", leasedJobStatus, leasedJobWorker, err)
 	}
-	if err := st.CompleteJob(ctx, reclaimedJob.ID, reclaimedJob.Attempts, nil, nil); err != nil {
+	if err := st.CompleteJob(ctx, reclaimedJob.ID, reclaimedJob.Attempts, "worker-b", nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.db.QueryRowContext(ctx, `SELECT status,locked_by FROM echo_jobs WHERE id=?`, jobID).Scan(&leasedJobStatus, &leasedJobWorker); err != nil || leasedJobStatus != "complete" || leasedJobWorker != "" {
@@ -441,10 +453,10 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	}
 	notification := &domain.OutboundMessage{ChatJID: "owner@s.whatsapp.net", Body: "Safe terminal failure for inc_notified"}
 	jobFailure := errors.New("status 403 bearer must-not-leak")
-	if err := st.CompleteJob(ctx, notifiedJob.ID, notifiedJob.Attempts, jobFailure, notification); err != nil {
+	if err := st.CompleteJob(ctx, notifiedJob.ID, notifiedJob.Attempts, "worker-notifier", jobFailure, notification); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.CompleteJob(ctx, notifiedJob.ID, notifiedJob.Attempts, jobFailure, notification); err != nil {
+	if err := st.CompleteJob(ctx, notifiedJob.ID, notifiedJob.Attempts, "worker-notifier", jobFailure, notification); err != nil {
 		t.Fatal(err)
 	}
 	var terminalNotifications int

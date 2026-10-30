@@ -114,6 +114,22 @@ func TestMonitorWatchdogIntervalIsBounded(t *testing.T) {
 	}
 }
 
+func TestWorkerTimingIsBounded(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "false")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	t.Setenv("ECHO_WORKER_POLL_INTERVAL", "0s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected zero worker poll interval to be rejected")
+	}
+	t.Setenv("ECHO_WORKER_POLL_INTERVAL", "1s")
+	t.Setenv("ECHO_WORKER_JOB_LEASE", "2s")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected unsafe short worker lease to be rejected")
+	}
+}
+
 func TestProductionAllowsOwnerToBeConfiguredInApplication(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "production")

@@ -1206,7 +1206,19 @@ func (s *Store) ClaimJob(ctx context.Context, worker string, lease time.Duration
 	return item, nil
 }
 
-func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, jobErr error, terminalNotification *domain.OutboundMessage) error {
+func (s *Store) RenewJobLease(ctx context.Context, jobID string, attempt int, worker string, lease time.Duration) (bool, error) {
+	if lease <= 0 {
+		return false, errors.New("job lease must be positive")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET locked_until=? WHERE id=? AND status='running' AND attempts=? AND locked_by=?`, time.Now().UTC().Add(lease), jobID, attempt, worker)
+	if err != nil {
+		return false, err
+	}
+	affected, err := result.RowsAffected()
+	return affected == 1, err
+}
+
+func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, worker string, jobErr error, terminalNotification *domain.OutboundMessage) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1214,9 +1226,9 @@ func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, jobE
 	defer func() { _ = tx.Rollback() }()
 	var result sql.Result
 	if jobErr == nil {
-		result, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status='complete',locked_by='',locked_until=NULL,last_error='' WHERE id=? AND status='running' AND attempts=?`, jobID, attempt)
+		result, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status='complete',locked_by='',locked_until=NULL,last_error='' WHERE id=? AND status='running' AND attempts=? AND locked_by=?`, jobID, attempt, worker)
 	} else {
-		result, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=? AND status='running' AND attempts=?`, truncate(jobErr.Error(), 1000), jobID, attempt)
+		result, err = tx.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=? AND status='running' AND attempts=? AND locked_by=?`, truncate(jobErr.Error(), 1000), jobID, attempt, worker)
 	}
 	if err != nil {
 		return err

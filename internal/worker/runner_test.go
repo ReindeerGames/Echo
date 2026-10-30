@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ReindeerGames/echo/internal/ai"
 	"github.com/ReindeerGames/echo/internal/domain"
@@ -42,5 +43,17 @@ func TestTerminalFailureMessageDoesNotExposeRawError(t *testing.T) {
 	}
 	if strings.Contains(message, "must-not-leak") || strings.Contains(message, "bearer") {
 		t.Fatalf("raw terminal error leaked into owner message: %s", message)
+	}
+}
+
+func TestLeaseHeartbeatIntervalIsBounded(t *testing.T) {
+	if got := leaseHeartbeatInterval(time.Second); got != time.Second {
+		t.Fatalf("short lease heartbeat interval = %s", got)
+	}
+	if got := leaseHeartbeatInterval(30 * time.Second); got != 10*time.Second {
+		t.Fatalf("ordinary lease heartbeat interval = %s", got)
+	}
+	if got := leaseHeartbeatInterval(10 * time.Minute); got != 30*time.Second {
+		t.Fatalf("long lease heartbeat interval = %s", got)
 	}
 }

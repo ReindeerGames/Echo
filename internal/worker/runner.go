@@ -57,9 +57,9 @@ func (r *Runner) Run(ctx context.Context) error {
 				slog.Error("claim worker job", "error", err)
 				continue
 			}
-			jobErr := r.execute(ctx, job)
+			jobErr := r.executeWithLease(ctx, job)
 			notification := r.terminalFailureNotification(ctx, job, jobErr)
-			if err := r.store.CompleteJob(ctx, job.ID, job.Attempts, jobErr, notification); err != nil {
+			if err := r.store.CompleteJob(ctx, job.ID, job.Attempts, r.workerID, jobErr, notification); err != nil {
 				slog.Error("complete worker job", "error", err)
 			}
 			if jobErr != nil {
@@ -67,6 +67,59 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (r *Runner) executeWithLease(ctx context.Context, job domain.Job) error {
+	jobCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	leaseFailure := make(chan error, 1)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(leaseHeartbeatInterval(r.lease))
+		defer ticker.Stop()
+		for {
+			select {
+			case <-jobCtx.Done():
+				return
+			case <-ticker.C:
+				renewed, err := r.store.RenewJobLease(jobCtx, job.ID, job.Attempts, r.workerID, r.lease)
+				if err != nil {
+					slog.Error("renew worker job lease", "job_id", job.ID, "error", err)
+					leaseFailure <- fmt.Errorf("renew job lease: %w", err)
+					cancel()
+					return
+				}
+				if !renewed {
+					slog.Warn("worker job lease ownership lost", "job_id", job.ID, "attempt", job.Attempts)
+					leaseFailure <- errors.New("job lease ownership lost")
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	jobErr := r.execute(jobCtx, job)
+	cancel()
+	<-done
+	select {
+	case leaseErr := <-leaseFailure:
+		if jobErr == nil || errors.Is(jobErr, context.Canceled) {
+			return leaseErr
+		}
+	default:
+	}
+	return jobErr
+}
+
+func leaseHeartbeatInterval(lease time.Duration) time.Duration {
+	interval := lease / 3
+	if interval < time.Second {
+		return time.Second
+	}
+	if interval > 30*time.Second {
+		return 30 * time.Second
+	}
+	return interval
 }
 
 func (r *Runner) terminalFailureNotification(ctx context.Context, job domain.Job, jobErr error) *domain.OutboundMessage {
