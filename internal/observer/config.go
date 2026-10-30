@@ -75,10 +75,14 @@ type ProcessProbe struct {
 }
 
 type DockerProbe struct {
-	Name      string `json:"name"`
-	ServiceID string `json:"serviceId"`
-	ProxyURL  string `json:"proxyUrl"`
-	Container string `json:"container"`
+	Name                  string  `json:"name"`
+	ServiceID             string  `json:"serviceId"`
+	ProxyURL              string  `json:"proxyUrl"`
+	Container             string  `json:"container"`
+	CPUWarningPercent     float64 `json:"cpuWarningPercent"`
+	CPUCriticalPercent    float64 `json:"cpuCriticalPercent"`
+	MemoryWarningPercent  float64 `json:"memoryWarningPercent"`
+	MemoryCriticalPercent float64 `json:"memoryCriticalPercent"`
 }
 
 type FreshnessProbe struct {
@@ -280,6 +284,12 @@ func normalizeConfig(cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("Docker probe %q proxyUrl: %w", probe.Name, err)
 		}
 		probe.ProxyURL = strings.TrimRight(proxyURL.String(), "/")
+		if !optionalOrderedThresholds(probe.CPUWarningPercent, probe.CPUCriticalPercent, 10000) {
+			return Config{}, fmt.Errorf("Docker probe %q CPU thresholds must both be zero or positive ordered percentages no greater than 10000", probe.Name)
+		}
+		if !optionalOrderedThresholds(probe.MemoryWarningPercent, probe.MemoryCriticalPercent, 100) {
+			return Config{}, fmt.Errorf("Docker probe %q memory thresholds must both be zero or positive ordered percentages no greater than 100", probe.Name)
+		}
 	}
 	for index := range cfg.FreshnessProbes {
 		probe := &cfg.FreshnessProbes[index]
@@ -311,6 +321,13 @@ func normalizeConfig(cfg Config) (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func optionalOrderedThresholds(warning, critical, maximum float64) bool {
+	if warning == 0 && critical == 0 {
+		return true
+	}
+	return warning > 0 && critical > warning && critical <= maximum
 }
 
 func validateLoopbackProxyURL(raw string, allowHTTP bool) (*url.URL, error) {

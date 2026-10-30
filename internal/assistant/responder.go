@@ -1011,10 +1011,10 @@ func marshal(value any) (string, error) {
 const maxEvidenceBytes = 64 << 10
 
 var evidenceFields = map[string]map[string]struct{}{
-	"":           setOf("probe", "method", "port", "statusCode", "latencyMs", "failure", "tls", "snapshot", "thresholds", "modifiedAt", "ageSeconds", "matchedFiles", "container", "processName", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
+	"":           setOf("probe", "method", "port", "statusCode", "latencyMs", "failure", "tls", "snapshot", "thresholds", "modifiedAt", "ageSeconds", "matchedFiles", "container", "processName", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "cpuAvailable", "cpuPercent", "memoryAvailable", "memoryUsageBytes", "memoryLimitBytes", "memoryUsedPercent", "pidsCurrent", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
 	"tls":        setOf("expiresAt", "daysRemaining"),
 	"snapshot":   setOf("diskPath", "diskTotalBytes", "diskAvailableBytes", "diskUsedPercent", "memoryTotalBytes", "memoryAvailableBytes", "memoryUsedPercent", "load1", "load5", "load15", "cpuCount", "load1PerCpu", "uptimeSeconds", "processCount", "runningCount", "sleepingCount", "stoppedCount", "zombieCount", "otherCount", "threadCount", "rssBytes"),
-	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu", "tlsWarningDays", "tlsCriticalDays", "warningAgeSeconds", "criticalAgeSeconds", "minimumCount", "maximumCount", "rssWarningMiB", "rssCriticalMiB"),
+	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "cpuWarningPercent", "cpuCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu", "tlsWarningDays", "tlsCriticalDays", "warningAgeSeconds", "criticalAgeSeconds", "minimumCount", "maximumCount", "rssWarningMiB", "rssCriticalMiB"),
 }
 
 func setOf(values ...string) map[string]struct{} {
@@ -1083,7 +1083,7 @@ func sanitizeEvidenceString(key, value string) (string, bool) {
 		value = strings.ToLower(value)
 		return value, stringIn(value, "healthy", "unhealthy", "starting", "unknown", "none")
 	case "failure":
-		return value, stringIn(value, "metrics_unavailable", "process_inspect_failed", "process_response_too_large", "invalid_process_response", "invalid_request", "timeout", "connection_failed", "unexpected_status", "inspect_status", "inspect_response_too_large", "invalid_inspect_response", "docker_unavailable", "container_inspect_failed", "proxy_request_failed", "path_missing", "path_unavailable", "no_matching_files", "scan_limit", "unsupported_path", "future_timestamp", "probe_cancelled")
+		return value, stringIn(value, "metrics_unavailable", "process_inspect_failed", "process_response_too_large", "invalid_process_response", "invalid_request", "timeout", "connection_failed", "unexpected_status", "inspect_status", "inspect_response_too_large", "invalid_inspect_response", "stats_status", "stats_response_too_large", "invalid_stats_response", "cpu_metrics_unavailable", "memory_metrics_unavailable", "docker_unavailable", "container_inspect_failed", "container_stats_failed", "proxy_request_failed", "path_missing", "path_unavailable", "no_matching_files", "scan_limit", "unsupported_path", "future_timestamp", "probe_cancelled")
 	case "container", "processName", "probe":
 		if value == "" || len(value) > 128 {
 			return "", false

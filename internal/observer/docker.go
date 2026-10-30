@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -38,6 +39,16 @@ type dockerState struct {
 type dockerHealth struct {
 	Status        string `json:"Status"`
 	FailingStreak int    `json:"FailingStreak"`
+}
+
+type dockerStats struct {
+	CPUAvailable      bool    `json:"cpuAvailable"`
+	CPUPercent        float64 `json:"cpuPercent"`
+	MemoryAvailable   bool    `json:"memoryAvailable"`
+	MemoryUsageBytes  uint64  `json:"memoryUsageBytes"`
+	MemoryLimitBytes  uint64  `json:"memoryLimitBytes"`
+	MemoryUsedPercent float64 `json:"memoryUsedPercent"`
+	PIDsCurrent       uint64  `json:"pidsCurrent"`
 }
 
 func (o *Observer) observeDocker(ctx context.Context, probe DockerProbe) domain.MonitorEvent {
@@ -84,7 +95,119 @@ func (o *Observer) observeDocker(ctx context.Context, probe DockerProbe) domain.
 		event.Details = dockerFailureDetails(probe.Container, "invalid_inspect_response", response.StatusCode)
 		return event
 	}
-	return dockerEventFromInspect(event, probe, inspect)
+	event = dockerEventFromInspect(event, probe, inspect)
+	if !dockerResourceMonitoringEnabled(probe) || event.Status == "unhealthy" || !inspect.State.Running || inspect.State.Paused || inspect.State.Restarting {
+		return event
+	}
+	return o.observeDockerResources(ctx, event, probe)
+}
+
+func (o *Observer) observeDockerResources(ctx context.Context, event domain.MonitorEvent, probe DockerProbe) domain.MonitorEvent {
+	endpoint := probe.ProxyURL + "/containers/" + url.PathEscape(probe.Container) + "/stats"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return dockerResourceFailure(event, probe, "invalid_request", 0)
+	}
+	request.Header.Set("User-Agent", "Echo-Observer/1.0")
+	response, err := o.probe.Do(request)
+	if err != nil {
+		return dockerResourceFailure(event, probe, classifyProbeError(err), 0)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
+		return dockerResourceFailure(event, probe, "stats_status", response.StatusCode)
+	}
+	if response.ContentLength > maxResponseBytes {
+		return dockerResourceFailure(event, probe, "stats_response_too_large", response.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	if err != nil || len(body) > maxResponseBytes {
+		return dockerResourceFailure(event, probe, "stats_response_too_large", response.StatusCode)
+	}
+	var stats dockerStats
+	if err := json.Unmarshal(body, &stats); err != nil || !validDockerStats(stats) {
+		return dockerResourceFailure(event, probe, "invalid_stats_response", response.StatusCode)
+	}
+	if probe.CPUCriticalPercent > 0 && !stats.CPUAvailable {
+		return dockerResourceFailure(event, probe, "cpu_metrics_unavailable", response.StatusCode)
+	}
+	if probe.MemoryCriticalPercent > 0 && !stats.MemoryAvailable {
+		return dockerResourceFailure(event, probe, "memory_metrics_unavailable", response.StatusCode)
+	}
+	return dockerEventWithResources(event, probe, stats)
+}
+
+func dockerResourceMonitoringEnabled(probe DockerProbe) bool {
+	return probe.CPUCriticalPercent > 0 || probe.MemoryCriticalPercent > 0
+}
+
+func dockerResourceFailure(event domain.MonitorEvent, probe DockerProbe, failure string, statusCode int) domain.MonitorEvent {
+	event.Status = "unhealthy"
+	event.Severity = "critical"
+	event.Summary = probe.Name + " container resource evidence is unavailable"
+	event.Details = dockerFailureDetails(probe.Container, failure, statusCode)
+	return event
+}
+
+func validDockerStats(stats dockerStats) bool {
+	if math.IsNaN(stats.CPUPercent) || math.IsInf(stats.CPUPercent, 0) || math.IsNaN(stats.MemoryUsedPercent) || math.IsInf(stats.MemoryUsedPercent, 0) {
+		return false
+	}
+	if stats.CPUPercent < 0 || stats.CPUPercent > 1_000_000 || stats.MemoryUsedPercent < 0 || stats.MemoryUsedPercent > 1_000_000 {
+		return false
+	}
+	if !stats.CPUAvailable && stats.CPUPercent != 0 {
+		return false
+	}
+	if !stats.MemoryAvailable {
+		return stats.MemoryUsageBytes == 0 && stats.MemoryLimitBytes == 0 && stats.MemoryUsedPercent == 0
+	}
+	return stats.MemoryLimitBytes > 0
+}
+
+func dockerEventWithResources(event domain.MonitorEvent, probe DockerProbe, stats dockerStats) domain.MonitorEvent {
+	details := make(map[string]any)
+	_ = json.Unmarshal(event.Details, &details)
+	details["cpuAvailable"] = stats.CPUAvailable
+	details["cpuPercent"] = stats.CPUPercent
+	details["memoryAvailable"] = stats.MemoryAvailable
+	details["memoryUsageBytes"] = stats.MemoryUsageBytes
+	details["memoryLimitBytes"] = stats.MemoryLimitBytes
+	details["memoryUsedPercent"] = stats.MemoryUsedPercent
+	details["pidsCurrent"] = stats.PIDsCurrent
+	details["thresholds"] = map[string]any{
+		"cpuWarningPercent": probe.CPUWarningPercent, "cpuCriticalPercent": probe.CPUCriticalPercent,
+		"memoryWarningPercent": probe.MemoryWarningPercent, "memoryCriticalPercent": probe.MemoryCriticalPercent,
+	}
+	event.Details, _ = json.Marshal(details)
+	cpuCritical := probe.CPUCriticalPercent > 0 && stats.CPUPercent >= probe.CPUCriticalPercent
+	memoryCritical := probe.MemoryCriticalPercent > 0 && stats.MemoryUsedPercent >= probe.MemoryCriticalPercent
+	if cpuCritical || memoryCritical {
+		event.Status = "unhealthy"
+		event.Severity = "critical"
+		event.Summary = dockerResourceSummary(probe.Name, stats, cpuCritical, memoryCritical, "critical")
+		return event
+	}
+	cpuWarning := probe.CPUWarningPercent > 0 && stats.CPUPercent >= probe.CPUWarningPercent
+	memoryWarning := probe.MemoryWarningPercent > 0 && stats.MemoryUsedPercent >= probe.MemoryWarningPercent
+	if cpuWarning || memoryWarning {
+		event.Status = "degraded"
+		event.Severity = "warning"
+		event.Summary = dockerResourceSummary(probe.Name, stats, cpuWarning, memoryWarning, "warning")
+	}
+	return event
+}
+
+func dockerResourceSummary(name string, stats dockerStats, includeCPU, includeMemory bool, severity string) string {
+	parts := make([]string, 0, 2)
+	if includeCPU {
+		parts = append(parts, fmt.Sprintf("CPU %.2f%%", stats.CPUPercent))
+	}
+	if includeMemory {
+		parts = append(parts, fmt.Sprintf("memory %.2f%%", stats.MemoryUsedPercent))
+	}
+	return fmt.Sprintf("%s container resource %s is above the %s threshold", name, strings.Join(parts, " and "), severity)
 }
 
 func dockerEventFromInspect(event domain.MonitorEvent, probe DockerProbe, inspect dockerInspect) domain.MonitorEvent {

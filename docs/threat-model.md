@@ -36,6 +36,8 @@ The bundled observer exposes no inbound API. Its TCP probe performs only a bound
 
 The separate Linux process proxy performs a bounded numeric `/proc` directory scan only after an exact configured `comm` name passes its allowlist. It reads only `comm` and the `State`, `Threads`, and `VmRSS` fields from `status`, rechecks the name to limit PID-reuse races, and emits aggregate counters over a loopback-only route. Local read and parse errors collapse to one fixed category; no raw operating-system error reaches the observer, Echo, or WhatsApp. The proxy has no Echo, GitHub, WhatsApp, AI, Docker, or webhook secret, while the observer retains a hidden process table. Neither component executes `ps`, `systemctl`, a shell, or any process-control operation.
 
+The Docker proxy exposes only exact-allowlist lifecycle and non-streaming stats routes. It parses the daemon response into fixed fields and returns normalized state plus optional aggregate CPU percentage, cache-adjusted memory counters, and task count. Network-interface, block-device, per-CPU, raw cgroup, environment, label, mount, configuration, health-log, and daemon-error data are discarded inside the socket-owning process. The observer never receives the socket and cannot select an unallowlisted container or arbitrary API route.
+
 ### Authorization
 
 The deterministic policy engine checks incident state, repository project membership, read-only status, environment ownership, protected-environment status, and immutable artifact provenance. Every approval has an expiry, action hash, one-time nonce, actor, incident, exact action type, and hashes of the repository and environment configuration snapshots. A configuration change invalidates the queued action instead of silently changing its meaning.

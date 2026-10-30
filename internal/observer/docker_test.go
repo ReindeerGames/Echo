@@ -65,6 +65,101 @@ func TestDockerProbeClassifiesLifecycleWithoutTrustingRawText(t *testing.T) {
 	}
 }
 
+func TestDockerProbeAddsSanitizedResourceEvidence(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/containers/web/json":
+			_, _ = w.Write([]byte(`{"Name":"web","State":{"Status":"running","Running":true,"Health":{"Status":"healthy"}}}`))
+		case "/containers/web/stats":
+			_, _ = w.Write([]byte(`{"cpuAvailable":true,"cpuPercent":92.5,"memoryAvailable":true,"memoryUsageBytes":104857600,"memoryLimitBytes":209715200,"memoryUsedPercent":50,"pidsCurrent":18,"networkInterfaces":{"eth0":"must-not-leak"}}`))
+		default:
+			t.Fatalf("unexpected proxy path %s", r.URL.Path)
+		}
+	}))
+	defer proxy.Close()
+	service, err := New(Config{EchoURL: "http://echo.test", Source: "observer", AllowInsecureHTTP: true, DockerProbes: []DockerProbe{{Name: "web", ServiceID: "svc_web", ProxyURL: proxy.URL, Container: "web", CPUWarningPercent: 80, CPUCriticalPercent: 120, MemoryWarningPercent: 85, MemoryCriticalPercent: 95}}}, "observer-test-secret-that-is-long-enough")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := service.observeDocker(t.Context(), service.config.DockerProbes[0])
+	if event.Status != "degraded" || event.Severity != "warning" || !strings.Contains(event.Summary, "CPU 92.50%") {
+		t.Fatalf("unexpected Docker resource event: %#v", event)
+	}
+	details := string(event.Details)
+	for _, expected := range []string{`"cpuPercent":92.5`, `"memoryUsageBytes":104857600`, `"memoryLimitBytes":209715200`, `"memoryUsedPercent":50`, `"pidsCurrent":18`, `"cpuWarningPercent":80`, `"memoryCriticalPercent":95`} {
+		if !strings.Contains(details, expected) {
+			t.Fatalf("resource evidence missing %s: %s", expected, details)
+		}
+	}
+	if strings.Contains(details, "eth0") || strings.Contains(details, "must-not-leak") {
+		t.Fatalf("unrecognized proxy evidence leaked: %s", details)
+	}
+}
+
+func TestDockerResourceThresholdClassification(t *testing.T) {
+	base := domain.MonitorEvent{Status: "healthy", Severity: "info", Details: json.RawMessage(`{"container":"web","state":"running"}`)}
+	probe := DockerProbe{Name: "web", Container: "web", CPUWarningPercent: 80, CPUCriticalPercent: 120, MemoryWarningPercent: 85, MemoryCriticalPercent: 95}
+	tests := []struct {
+		name     string
+		stats    dockerStats
+		status   string
+		severity string
+		contains string
+	}{
+		{name: "healthy", stats: dockerStats{CPUAvailable: true, CPUPercent: 20, MemoryAvailable: true, MemoryLimitBytes: 100, MemoryUsedPercent: 30}, status: "healthy", severity: "info", contains: ""},
+		{name: "cpu warning", stats: dockerStats{CPUAvailable: true, CPUPercent: 90, MemoryAvailable: true, MemoryLimitBytes: 100, MemoryUsedPercent: 30}, status: "degraded", severity: "warning", contains: "CPU 90.00%"},
+		{name: "memory critical", stats: dockerStats{CPUAvailable: true, CPUPercent: 20, MemoryAvailable: true, MemoryLimitBytes: 100, MemoryUsedPercent: 97}, status: "unhealthy", severity: "critical", contains: "memory 97.00%"},
+		{name: "both critical", stats: dockerStats{CPUAvailable: true, CPUPercent: 130, MemoryAvailable: true, MemoryLimitBytes: 100, MemoryUsedPercent: 99}, status: "unhealthy", severity: "critical", contains: "CPU 130.00% and memory 99.00%"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			event := dockerEventWithResources(base, probe, test.stats)
+			if event.Status != test.status || event.Severity != test.severity || (test.contains != "" && !strings.Contains(event.Summary, test.contains)) {
+				t.Fatalf("unexpected event: %#v", event)
+			}
+		})
+	}
+}
+
+func TestDockerResourceFailuresAreFixedAndDoNotExposeProxyBody(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/json") {
+			_, _ = w.Write([]byte(`{"State":{"Status":"running","Running":true}}`))
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte(`socket=/var/run/docker.sock token=must-not-leak`))
+	}))
+	defer proxy.Close()
+	service, err := New(Config{EchoURL: "http://echo.test", Source: "observer", AllowInsecureHTTP: true, DockerProbes: []DockerProbe{{Name: "web", ServiceID: "svc_web", ProxyURL: proxy.URL, Container: "web", CPUWarningPercent: 80, CPUCriticalPercent: 120}}}, "observer-test-secret-that-is-long-enough")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := service.observeDocker(t.Context(), service.config.DockerProbes[0])
+	if event.Status != "unhealthy" || !strings.Contains(string(event.Details), `"failure":"stats_status"`) || strings.Contains(event.Summary+string(event.Details), "must-not-leak") {
+		t.Fatalf("unsafe Docker stats failure event: %#v", event)
+	}
+}
+
+func TestDockerResourceProbeRequiresConfiguredMetrics(t *testing.T) {
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/json") {
+			_, _ = w.Write([]byte(`{"State":{"Status":"running","Running":true}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"cpuAvailable":false,"memoryAvailable":false}`))
+	}))
+	defer proxy.Close()
+	service, err := New(Config{EchoURL: "http://echo.test", Source: "observer", AllowInsecureHTTP: true, DockerProbes: []DockerProbe{{Name: "web", ServiceID: "svc_web", ProxyURL: proxy.URL, Container: "web", CPUWarningPercent: 80, CPUCriticalPercent: 120}}}, "observer-test-secret-that-is-long-enough")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := service.observeDocker(t.Context(), service.config.DockerProbes[0])
+	if event.Status != "unhealthy" || !strings.Contains(string(event.Details), `"failure":"cpu_metrics_unavailable"`) {
+		t.Fatalf("missing configured CPU evidence was accepted: %#v", event)
+	}
+}
+
 func TestDockerProxyFailureProducesAlertableGenericEvidence(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "socket path and secret", http.StatusForbidden)

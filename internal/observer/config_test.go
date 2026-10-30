@@ -218,9 +218,9 @@ func TestDockerProbeValidationAndCrossTypeUniqueness(t *testing.T) {
 	}
 	cfg, err = normalizeConfig(Config{
 		EchoURL: "https://echo.test", Source: "observer",
-		DockerProbes: []DockerProbe{{Name: "web-container", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test/", Container: "web-1"}},
+		DockerProbes: []DockerProbe{{Name: "web-container", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test/", Container: "web-1", CPUWarningPercent: 80, CPUCriticalPercent: 120, MemoryWarningPercent: 85, MemoryCriticalPercent: 95}},
 	})
-	if err != nil || cfg.DockerProbes[0].ProxyURL != "https://docker-proxy.test" {
+	if err != nil || cfg.DockerProbes[0].ProxyURL != "https://docker-proxy.test" || cfg.DockerProbes[0].CPUCriticalPercent != 120 || cfg.DockerProbes[0].MemoryCriticalPercent != 95 {
 		t.Fatalf("valid Docker probe rejected: cfg=%#v err=%v", cfg, err)
 	}
 	cfg, err = normalizeConfig(Config{
@@ -243,6 +243,15 @@ func TestDockerProbeValidationAndCrossTypeUniqueness(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "container") {
 		t.Fatalf("unsafe container name was not rejected: %v", err)
+	}
+	for _, probe := range []DockerProbe{
+		{Name: "web", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test", Container: "web", CPUWarningPercent: 80},
+		{Name: "web", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test", Container: "web", CPUWarningPercent: 80, CPUCriticalPercent: 80},
+		{Name: "web", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test", Container: "web", MemoryWarningPercent: 85, MemoryCriticalPercent: 101},
+	} {
+		if _, err := normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", DockerProbes: []DockerProbe{probe}}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "threshold") {
+			t.Fatalf("unsafe Docker resource thresholds were accepted: probe=%#v err=%v", probe, err)
+		}
 	}
 	_, err = normalizeConfig(Config{
 		EchoURL: "https://echo.test", Source: "observer",
