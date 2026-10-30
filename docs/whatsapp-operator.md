@@ -8,6 +8,7 @@ Service detail includes observer freshness, evidence age, alert fingerprints and
 
 Supported requests include:
 
+- `brief`, `daily brief`, or “good morning” for runtime health, monitoring coverage, open alerts and incidents, and deployments needing attention
 - `status` or “how are things?” for the estate summary
 - `alerts` or “anything wrong?” for open runtime conditions
 - `services` for the operations catalogue

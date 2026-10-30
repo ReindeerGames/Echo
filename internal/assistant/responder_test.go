@@ -124,6 +124,7 @@ func (f fakeReader) LatestAnalysis(context.Context, string) (domain.Analysis, er
 func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 	tests := map[string]string{
 		"anything wrong?":     "alerts",
+		"good morning":        "brief",
 		"how are things":      "status",
 		"service nudgie-web":  "service",
 		"what can you do?":    "help",
@@ -159,6 +160,60 @@ func TestStatusAndServiceAnswersUseStoredEvidence(t *testing.T) {
 	service, intent, err := responder.Answer(context.Background(), "service nudgie-web")
 	if err != nil || intent != "service" || !containsAll(service, "Nudgie web", "CRITICAL", "Latest signal: unhealthy") {
 		t.Fatalf("unexpected service answer intent=%s err=%v body=%s", intent, err, service)
+	}
+}
+
+func TestStatusReportsEstateMonitoringCoverage(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		services: []domain.Service{
+			{ID: "svc_fresh", Enabled: true, HeartbeatTimeoutSeconds: 120},
+			{ID: "svc_stale", Enabled: true, HeartbeatTimeoutSeconds: 60},
+			{ID: "svc_missing", Enabled: true, HeartbeatTimeoutSeconds: 60},
+			{ID: "svc_no_policy", Enabled: true},
+			{ID: "svc_disabled", Enabled: false, HeartbeatTimeoutSeconds: 60},
+		},
+		events: []domain.MonitorEvent{
+			{ServiceID: "svc_fresh", Source: "observer", Status: "healthy", ObservedAt: now.Add(-30 * time.Second)},
+			{ServiceID: "svc_stale", Source: "observer", Status: "healthy", ObservedAt: now.Add(-2 * time.Minute)},
+		},
+	}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "status")
+	if err != nil || intent != "status" || !containsAll(answer, "Services: 4 enabled", "Monitoring: 1 fresh · 1 stale · 1 missing · 1 without heartbeat policy") {
+		t.Fatalf("unexpected monitoring status intent=%s body=%s err=%v", intent, answer, err)
+	}
+	output, err := responder.executeTool(context.Background(), "get_status", json.RawMessage(`{}`))
+	if err != nil || !containsAll(output, `"monitoring":`, `"fresh":1`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"disabled":1`) {
+		t.Fatalf("monitoring coverage missing from status tool: output=%s err=%v", output, err)
+	}
+}
+
+func TestDailyBriefNamesCurrentAttentionItems(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		dashboard: domain.Dashboard{OpenAlerts: 1, OpenIncidents: 1, FailedDeployments: 1},
+		services:  []domain.Service{{ID: "svc_web", ProjectID: "prj_invoices", Name: "Invoice web", Enabled: true, HeartbeatTimeoutSeconds: 60}},
+		events:    []domain.MonitorEvent{{ServiceID: "svc_web", Source: "observer", Status: "unhealthy", ObservedAt: now.Add(-30 * time.Second)}},
+		alerts:    []domain.ServiceAlert{{ServiceID: "svc_web", ServiceName: "Invoice web", ProjectID: "prj_invoices", Severity: "critical", Summary: "readiness endpoint failed"}},
+		incidents: []domain.Incident{
+			{ID: "inc_open", ProjectID: "prj_invoices", ProjectName: "Invoices", Status: "triaging", Severity: "high", Summary: "PDFs are delayed", CreatedAt: now.Add(-time.Hour)},
+			{ID: "inc_resolved", ProjectID: "prj_invoices", ProjectName: "Invoices", Status: "resolved", Severity: "low", Summary: "old resolved item", CreatedAt: now.Add(-2 * time.Hour)},
+		},
+		deployments: []domain.Deployment{
+			{ID: "dep_failed", ProjectID: "prj_invoices", Environment: "production", Operation: "deploy", Repository: "ReindeerGames/invoices", Status: "failed", CreatedAt: now.Add(-20 * time.Minute)},
+			{ID: "dep_verified", ProjectID: "prj_invoices", Environment: "production", Operation: "deploy", Status: "verified", CreatedAt: now.Add(-time.Hour)},
+		},
+	}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "good morning")
+	if err != nil || intent != "brief" || !containsAll(answer, "Echo daily brief", "Monitoring: 1 fresh · 0 stale · 0 missing", "CRITICAL · Invoice web", "TRIAGING · Invoices · inc_open · PDFs are delayed", "FAILED · deploy · production · ReindeerGames/invoices · 20m0s ago") {
+		t.Fatalf("unexpected daily brief intent=%s body=%s err=%v", intent, answer, err)
+	}
+	if strings.Contains(answer, "old resolved item") || strings.Contains(answer, "dep_verified") {
+		t.Fatalf("non-actionable history leaked into daily brief: %s", answer)
 	}
 }
 

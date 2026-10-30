@@ -98,7 +98,7 @@ Prefer the smallest set of tools that answers the question. When a service name 
 
 func operatorTools() []ai.ToolDefinition {
 	return []ai.ToolDefinition{
-		ai.FunctionTool("get_status", "Get current Echo runtime-component state, operational counts, and enabled service count.", schema(nil, nil)),
+		ai.FunctionTool("get_status", "Get current Echo runtime-component state, operational counts, and monitoring freshness coverage.", schema(nil, nil)),
 		ai.FunctionTool("get_open_alerts", "List current Echo component and service alerts with severity and last observed time.", schema(nil, nil)),
 		ai.FunctionTool("list_services", "List services. Use an empty query for all services or a name/key fragment to filter.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Service name or key fragment, or empty string."}}, []string{"query"})),
 		ai.FunctionTool("get_service", "Get one service with its open alerts and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
@@ -139,7 +139,11 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 				enabled++
 			}
 		}
-		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
+		coverage, err := r.monitoringCoverage(ctx, services)
+		if err != nil {
+			return "", err
+		}
+		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "monitoring": coverage, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
 		if r.runtime != nil {
 			ready, components := r.runtime.ComponentReadiness(r.expectedComponents)
 			view["echo_runtime_ready"] = ready
@@ -660,6 +664,8 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer = helpText()
 	case "status":
 		answer, err = r.status(ctx)
+	case "brief":
+		answer, err = r.brief(ctx)
 	case "alerts":
 		answer, err = r.alerts(ctx)
 	case "services":
@@ -682,7 +688,7 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “project <name>”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “brief”, “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “project <name>”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -692,6 +698,9 @@ func classify(text string) (string, string) {
 	value = strings.Trim(value, "?!., ")
 	if value == "" || value == "help" || value == "commands" || strings.Contains(value, "what can you do") {
 		return "help", ""
+	}
+	if value == "brief" || value == "daily brief" || value == "morning brief" || value == "estate brief" || value == "good morning" || strings.Contains(value, "give me a briefing") {
+		return "brief", ""
 	}
 	for _, prefix := range []string{"service ", "check service ", "check app ", "app ", "application "} {
 		if strings.HasPrefix(value, prefix) {
@@ -733,6 +742,33 @@ func classify(text string) (string, string) {
 	return "unknown", ""
 }
 
+type monitoringCoverageView struct {
+	Fresh                  int `json:"fresh"`
+	Stale                  int `json:"stale"`
+	Missing                int `json:"missing"`
+	WithoutHeartbeatPolicy int `json:"without_heartbeat_policy"`
+	Disabled               int `json:"disabled"`
+}
+
+func (r *Responder) monitoringCoverage(ctx context.Context, services []domain.Service) (monitoringCoverageView, error) {
+	events, err := r.reader.ListLatestMonitorEvents(ctx, "")
+	if err != nil {
+		return monitoringCoverageView{}, err
+	}
+	serviceIDs := make(map[string]struct{}, len(services))
+	for _, service := range services {
+		serviceIDs[service.ID] = struct{}{}
+	}
+	overview := projectOverview{Services: services, LatestSignals: map[string]domain.MonitorEvent{}}
+	for _, event := range events {
+		if _, allowed := serviceIDs[event.ServiceID]; allowed {
+			overview.LatestSignals[event.ServiceID] = event
+		}
+	}
+	fresh, stale, missing, noPolicy, disabled := projectMonitoringCounts(r.now().UTC(), overview)
+	return monitoringCoverageView{Fresh: fresh, Stale: stale, Missing: missing, WithoutHeartbeatPolicy: noPolicy, Disabled: disabled}, nil
+}
+
 func (r *Responder) status(ctx context.Context) (string, error) {
 	dashboard, err := r.reader.Dashboard(ctx)
 	if err != nil {
@@ -747,6 +783,10 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 		if service.Enabled {
 			enabled++
 		}
+	}
+	coverage, err := r.monitoringCoverage(ctx, services)
+	if err != nil {
+		return "", err
 	}
 	runtimeAlerts := 0
 	runtimeLine := ""
@@ -772,7 +812,75 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 	if dashboard.DeadWhatsAppMessages > 0 {
 		delivery += " · needs attention in the control plane"
 	}
-	return fmt.Sprintf("Echo operational status\n%s%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, prefixLine(runtimeLine), enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
+	monitoring := fmt.Sprintf("Monitoring: %d fresh · %d stale · %d missing · %d without heartbeat policy", coverage.Fresh, coverage.Stale, coverage.Missing, coverage.WithoutHeartbeatPolicy)
+	return fmt.Sprintf("Echo operational status\n%s%s\n\nServices: %d enabled\n%s\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, prefixLine(runtimeLine), enabled, monitoring, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
+}
+
+func (r *Responder) brief(ctx context.Context) (string, error) {
+	status, err := r.status(ctx)
+	if err != nil {
+		return "", err
+	}
+	alerts, err := r.alerts(ctx)
+	if err != nil {
+		return "", err
+	}
+	incidents, err := r.reader.ListIncidents(ctx, 100)
+	if err != nil {
+		return "", err
+	}
+	openIncidents := make([]domain.Incident, 0, min(len(incidents), 5))
+	openIncidentCount := 0
+	for _, incident := range incidents {
+		if incident.Status == "resolved" || incident.Status == "closed" {
+			continue
+		}
+		openIncidentCount++
+		if len(openIncidents) < 5 {
+			openIncidents = append(openIncidents, incident)
+		}
+	}
+	incidentCount := fmt.Sprintf("%d", openIncidentCount)
+	if len(incidents) == 100 {
+		incidentCount = "at least " + incidentCount
+	}
+	incidentLines := []string{"Open incidents in recent history: " + incidentCount}
+	for _, incident := range openIncidents {
+		incidentLines = append(incidentLines, fmt.Sprintf("• %s · %s · %s · %s", strings.ToUpper(incident.Status), incident.ProjectName, incident.ID, truncateRunes(incident.Summary, 240)))
+	}
+	if openIncidentCount > len(openIncidents) {
+		incidentLines = append(incidentLines, fmt.Sprintf("…and %d more in the control plane.", openIncidentCount-len(openIncidents)))
+	}
+	deployments, err := r.reader.ListDeployments(ctx, "")
+	if err != nil {
+		return "", err
+	}
+	deploymentLines := []string{"Deployment attention: none"}
+	attention := make([]domain.Deployment, 0, 5)
+	attentionCount := 0
+	for _, deployment := range deployments {
+		if !stringIn(deployment.Status, "dispatching", "queued", "running", "failed") {
+			continue
+		}
+		attentionCount++
+		if len(attention) < 5 {
+			attention = append(attention, deployment)
+		}
+	}
+	if attentionCount > 0 {
+		deploymentLines = []string{fmt.Sprintf("Deployment attention: %d", attentionCount)}
+		for _, deployment := range attention {
+			target := deployment.Environment
+			if deployment.Repository != "" {
+				target += " · " + truncateRunes(deployment.Repository, 120)
+			}
+			deploymentLines = append(deploymentLines, fmt.Sprintf("• %s · %s · %s · %s ago", strings.ToUpper(deployment.Status), strings.ReplaceAll(deployment.Operation, "_", " "), target, formatAge(r.now(), deployment.CreatedAt)))
+		}
+		if attentionCount > len(attention) {
+			deploymentLines = append(deploymentLines, fmt.Sprintf("…and %d more in the control plane.", attentionCount-len(attention)))
+		}
+	}
+	return "Echo daily brief\n\n" + strings.TrimPrefix(status, "Echo operational status\n") + "\n\n" + alerts + "\n\n" + strings.Join(incidentLines, "\n") + "\n\n" + strings.Join(deploymentLines, "\n"), nil
 }
 
 func (r *Responder) alerts(ctx context.Context) (string, error) {
@@ -1565,7 +1673,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• repo <name> — live default-branch and GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• repo <name> — live default-branch and GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {
