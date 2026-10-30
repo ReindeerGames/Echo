@@ -29,9 +29,15 @@ type Reader interface {
 }
 
 type Responder struct {
-	reader Reader
-	model  ToolModel
-	now    func() time.Time
+	reader             Reader
+	model              ToolModel
+	runtime            RuntimeHealth
+	expectedComponents []string
+	now                func() time.Time
+}
+
+type RuntimeHealth interface {
+	ComponentReadiness([]string) (bool, map[string]string)
 }
 
 type ToolModel interface {
@@ -43,6 +49,13 @@ func New(reader Reader, models ...ToolModel) *Responder {
 	if len(models) > 0 {
 		responder.model = models[0]
 	}
+	return responder
+}
+
+func NewWithRuntime(reader Reader, runtime RuntimeHealth, expected []string, models ...ToolModel) *Responder {
+	responder := New(reader, models...)
+	responder.runtime = runtime
+	responder.expectedComponents = append([]string(nil), expected...)
 	return responder
 }
 
@@ -68,8 +81,8 @@ Prefer the smallest set of tools that answers the question. When a service name 
 
 func operatorTools() []ai.ToolDefinition {
 	return []ai.ToolDefinition{
-		ai.FunctionTool("get_status", "Get the current Echo-wide operational counts and enabled service count.", schema(nil, nil)),
-		ai.FunctionTool("get_open_alerts", "List current open service alerts with severity and last observed time.", schema(nil, nil)),
+		ai.FunctionTool("get_status", "Get current Echo runtime-component state, operational counts, and enabled service count.", schema(nil, nil)),
+		ai.FunctionTool("get_open_alerts", "List current Echo component and service alerts with severity and last observed time.", schema(nil, nil)),
 		ai.FunctionTool("list_services", "List services. Use an empty query for all services or a name/key fragment to filter.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Service name or key fragment, or empty string."}}, []string{"query"})),
 		ai.FunctionTool("get_service", "Get one service with its open alerts and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
 		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
@@ -105,7 +118,13 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 				enabled++
 			}
 		}
-		return marshal(map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages})
+		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
+		if r.runtime != nil {
+			ready, components := r.runtime.ComponentReadiness(r.expectedComponents)
+			view["echo_runtime_ready"] = ready
+			view["echo_runtime_components"] = components
+		}
+		return marshal(view)
 	case "get_open_alerts":
 		alerts, err := r.reader.ListServiceAlerts(ctx, "open")
 		if err != nil {
@@ -132,6 +151,15 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			return "", err
 		}
 		total := len(alerts)
+		if r.runtime != nil {
+			_, components := r.runtime.ComponentReadiness(r.expectedComponents)
+			for _, name := range sortedUnreadyComponents(components) {
+				total++
+				if len(views) < 50 {
+					views = append(views, alertView{Service: "Echo component", Severity: "critical", Summary: name + " is " + components[name], Fingerprint: "runtime-component-" + name})
+				}
+			}
+		}
 		if dashboard.WorkerQueueStalled {
 			total++
 			if len(views) < 50 {
@@ -543,15 +571,31 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 			enabled++
 		}
 	}
+	runtimeAlerts := 0
+	runtimeLine := ""
+	if r.runtime != nil {
+		ready, components := r.runtime.ComponentReadiness(r.expectedComponents)
+		unready := sortedUnreadyComponents(components)
+		runtimeAlerts = len(unready)
+		if ready {
+			runtimeLine = fmt.Sprintf("Echo runtime: ready · %d/%d components running", len(components), len(components))
+		} else {
+			states := make([]string, 0, len(unready))
+			for _, name := range unready {
+				states = append(states, name+" "+components[name])
+			}
+			runtimeLine = "Echo runtime: DEGRADED · " + strings.Join(states, ", ")
+		}
+	}
 	state := "No open runtime alerts."
-	if dashboard.OpenAlerts > 0 {
-		state = fmt.Sprintf("%d runtime alert(s) need attention.", dashboard.OpenAlerts)
+	if total := dashboard.OpenAlerts + runtimeAlerts; total > 0 {
+		state = fmt.Sprintf("%d runtime alert(s) need attention.", total)
 	}
 	delivery := fmt.Sprintf("WhatsApp delivery: %d pending · %d dead", dashboard.PendingWhatsAppMessages, dashboard.DeadWhatsAppMessages)
 	if dashboard.DeadWhatsAppMessages > 0 {
 		delivery += " · needs attention in the control plane"
 	}
-	return fmt.Sprintf("Echo operational status\n%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
+	return fmt.Sprintf("Echo operational status\n%s%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nJobs: %d queued · %d running · %d retrying · %d dead\n%s\nFailed deployments: %d\n%s", state, prefixLine(runtimeLine), enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.QueuedJobs, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, workerStatusLine(r.now(), dashboard), dashboard.FailedDeployments, delivery), nil
 }
 
 func (r *Responder) alerts(ctx context.Context) (string, error) {
@@ -563,10 +607,19 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(alerts) == 0 && !dashboard.WorkerQueueStalled {
+	componentStates := map[string]string{}
+	var unreadyComponents []string
+	if r.runtime != nil {
+		_, componentStates = r.runtime.ComponentReadiness(r.expectedComponents)
+		unreadyComponents = sortedUnreadyComponents(componentStates)
+	}
+	if len(alerts) == 0 && !dashboard.WorkerQueueStalled && len(unreadyComponents) == 0 {
 		return "No open service alerts. Echo will message you when a monitored condition opens, reopens, or resolves.", nil
 	}
 	var lines []string
+	for _, name := range unreadyComponents {
+		lines = append(lines, "• CRITICAL · Echo component\n  "+name+" is "+componentStates[name])
+	}
 	if dashboard.WorkerQueueStalled {
 		lines = append(lines, "• CRITICAL · Echo worker\n  "+dashboard.WorkerHealthSummary)
 	}
@@ -577,7 +630,25 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 		}
 		lines = append(lines, fmt.Sprintf("• %s · %s\n  %s", strings.ToUpper(alert.Severity), alert.ServiceName, alert.Summary))
 	}
-	return fmt.Sprintf("Open operational alerts (%d)\n\n%s", len(alerts)+map[bool]int{true: 1}[dashboard.WorkerQueueStalled], strings.Join(lines, "\n")), nil
+	return fmt.Sprintf("Open operational alerts (%d)\n\n%s", len(alerts)+len(unreadyComponents)+map[bool]int{true: 1}[dashboard.WorkerQueueStalled], strings.Join(lines, "\n")), nil
+}
+
+func sortedUnreadyComponents(components map[string]string) []string {
+	unready := make([]string, 0, len(components))
+	for name, status := range components {
+		if status != "running" {
+			unready = append(unready, name)
+		}
+	}
+	sort.Strings(unready)
+	return unready
+}
+
+func prefixLine(value string) string {
+	if value == "" {
+		return ""
+	}
+	return "\n" + value
 }
 
 func workerStatusLine(now time.Time, dashboard domain.Dashboard) string {

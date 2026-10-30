@@ -10,6 +10,7 @@ import (
 
 	"github.com/ReindeerGames/echo/internal/ai"
 	"github.com/ReindeerGames/echo/internal/domain"
+	runtimestate "github.com/ReindeerGames/echo/internal/runtime"
 	"github.com/ReindeerGames/echo/internal/store"
 )
 
@@ -215,6 +216,30 @@ func TestWorkerStallIsVisibleInStatusAndAlerts(t *testing.T) {
 	toolOutput, err := responder.executeTool(context.Background(), "get_open_alerts", json.RawMessage(`{}`))
 	if err != nil || !containsAll(toolOutput, `"service":"Echo worker"`, `"fingerprint":"worker-queue-stalled"`, `"count":1`) {
 		t.Fatalf("worker stall missing from alert tool: %s err=%v", toolOutput, err)
+	}
+}
+
+func TestRuntimeDegradationIsVisibleToDeterministicAndAIToolAnswers(t *testing.T) {
+	state := runtimestate.New()
+	state.UpdateComponent("monitor-watchdog", "running", "")
+	state.UpdateComponent("worker", "error", "raw detail must not be exposed")
+	responder := NewWithRuntime(fakeReader{}, state, []string{"monitor-watchdog", "worker"})
+
+	status, intent, err := responder.Answer(context.Background(), "status")
+	if err != nil || intent != "status" || !containsAll(status, "1 runtime alert", "Echo runtime: DEGRADED", "worker error") || strings.Contains(status, "raw detail") {
+		t.Fatalf("runtime status missing or unsafe: intent=%s body=%s err=%v", intent, status, err)
+	}
+	alerts, intent, err := responder.Answer(context.Background(), "alerts")
+	if err != nil || intent != "alerts" || !containsAll(alerts, "Open operational alerts (1)", "CRITICAL · Echo component", "worker is error") || strings.Contains(alerts, "raw detail") {
+		t.Fatalf("runtime alert missing or unsafe: intent=%s body=%s err=%v", intent, alerts, err)
+	}
+	toolOutput, err := responder.executeTool(context.Background(), "get_status", json.RawMessage(`{}`))
+	if err != nil || !containsAll(toolOutput, `"echo_runtime_ready":false`, `"worker":"error"`) || strings.Contains(toolOutput, "raw detail") {
+		t.Fatalf("runtime tool status missing or unsafe: output=%s err=%v", toolOutput, err)
+	}
+	alertOutput, err := responder.executeTool(context.Background(), "get_open_alerts", json.RawMessage(`{}`))
+	if err != nil || !containsAll(alertOutput, `"fingerprint":"runtime-component-worker"`, `"summary":"worker is error"`) || strings.Contains(alertOutput, "raw detail") {
+		t.Fatalf("runtime tool alert missing or unsafe: output=%s err=%v", alertOutput, err)
 	}
 }
 
