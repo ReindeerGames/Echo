@@ -42,6 +42,14 @@ Echo's internal watchdog checks heartbeat-enabled services every `ECHO_MONITOR_W
 
 The first timeout starts after the service policy is saved, giving a newly configured observer a full grace window. Watchdog events never count as observer heartbeats. Disabling the heartbeat policy or service resolves only the silence alert; it does not clear unrelated application-health alerts.
 
+## Planned maintenance
+
+The authenticated Monitoring screen can schedule a maintenance window for one enabled service. Start and end are converted from the browser's local time to UTC, the reason is bounded to 300 characters, duration must be between one minute and 30 days, the start must be within 365 days, and windows for the same service may not overlap. Creation and cancellation are audited.
+
+Maintenance never disables the webhook, observer, heartbeat watchdog, evidence retention, or alert lifecycle. Events and open alerts remain visible. Only owner WhatsApp notifications for that service's alert transitions are suppressed while the server clock is inside the exact window. The active window and affected alerts are labelled in the control plane and the `status`, `alerts`, `maintenance`, `service`, and AI investigation paths.
+
+When the window expires, the next unhealthy observation clears suppression and sends one `MAINTENANCE ENDED` notification if the condition persists. A healthy observation clears the suppressed condition without sending noise. Cancelling a current window atomically clears suppression and immediately notifies once for each still-open condition. An expired window cannot be cancelled, and a cancelled window cannot be reused.
+
 The body is limited to one MiB. Unknown and disabled services are rejected. Details are retained as evidence and must never contain credentials or unrestricted log dumps.
 
 ## Retention

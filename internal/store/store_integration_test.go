@@ -624,6 +624,108 @@ func TestMariaDBMonitorAlertSeverityEscalationNotifiesOnce(t *testing.T) {
 	}
 }
 
+func TestMariaDBMaintenanceSuppressesAndRestoresAlertNotifications(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "maintenance", Name: "Maintenance", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "api", Name: "API", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	preexisting := domain.MonitorEvent{EventID: "maintenance-preexisting", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "Existing condition", Fingerprint: "preexisting", Details: json.RawMessage(`{}`), ObservedAt: now.Add(-2 * time.Minute)}
+	if result, err := st.RecordMonitorEvent(ctx, preexisting, "owner@s.whatsapp.net"); err != nil || result.Transitions[0].Suppressed {
+		t.Fatalf("pre-maintenance alert was not delivered: result=%#v err=%v", result, err)
+	}
+	window, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{ServiceID: service.ID, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(time.Hour), Reason: "Planned database upgrade"}, "integration-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{ServiceID: service.ID, StartsAt: now, EndsAt: now.Add(2 * time.Hour), Reason: "Overlapping work"}, "integration-admin"); !errors.Is(err, ErrMaintenanceOverlap) {
+		t.Fatalf("overlapping maintenance was accepted: %v", err)
+	}
+	windows, err := st.ListMaintenanceWindows(ctx, service.ID, 10)
+	if err != nil || len(windows) != 1 || windows[0].ID != window.ID || windows[0].Reason != "Planned database upgrade" {
+		t.Fatalf("list maintenance windows: items=%#v err=%v", windows, err)
+	}
+	recovery := domain.MonitorEvent{EventID: "maintenance-preexisting-recovery", ServiceID: service.ID, Source: "integration", Status: "healthy", Severity: "info", Summary: "Existing condition recovered", Details: json.RawMessage(`{}`), ObservedAt: now.Add(10 * time.Second)}
+	result, err := st.RecordMonitorEvent(ctx, recovery, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "resolved" || result.Transitions[0].Suppressed {
+		t.Fatalf("pre-maintenance alert recovery was suppressed: result=%#v err=%v", result, err)
+	}
+	ephemeral := domain.MonitorEvent{EventID: "maintenance-ephemeral", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "Ephemeral condition", Fingerprint: "ephemeral", Details: json.RawMessage(`{}`), ObservedAt: now.Add(20 * time.Second)}
+	result, err = st.RecordMonitorEvent(ctx, ephemeral, "owner@s.whatsapp.net")
+	if err != nil || !result.Transitions[0].Suppressed {
+		t.Fatalf("maintenance opening was not suppressed: result=%#v err=%v", result, err)
+	}
+	recovery.EventID = "maintenance-ephemeral-recovery"
+	recovery.ObservedAt = now.Add(30 * time.Second)
+	result, err = st.RecordMonitorEvent(ctx, recovery, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || !result.Transitions[0].Suppressed {
+		t.Fatalf("maintenance-only recovery created noise: result=%#v err=%v", result, err)
+	}
+	unhealthy := domain.MonitorEvent{EventID: "maintenance-unhealthy", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "Readiness unavailable", Fingerprint: "readiness", Details: json.RawMessage(`{}`), ObservedAt: now.Add(40 * time.Second)}
+	result, err = st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" || !result.Transitions[0].Suppressed {
+		t.Fatalf("maintenance did not suppress opening notification: result=%#v err=%v", result, err)
+	}
+	alerts, err := st.ListServiceAlertsForService(ctx, service.ID, "open", 10)
+	if err != nil || len(alerts) != 1 || alerts[0].MaintenanceWindowID != window.ID || alerts[0].NotificationSuppressedUntil == nil {
+		t.Fatalf("alert suppression state missing: alerts=%#v err=%v", alerts, err)
+	}
+	var notifications int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&notifications); err != nil || notifications != 2 {
+		t.Fatalf("maintenance opening notification escaped: count=%d err=%v", notifications, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_service_maintenance_windows SET starts_at=?,ends_at=? WHERE id=?`, now.Add(-2*time.Hour), now.Add(-time.Hour), window.ID); err != nil {
+		t.Fatal(err)
+	}
+	unhealthy.EventID = "maintenance-persisted"
+	unhealthy.ObservedAt = now.Add(time.Minute)
+	result, err = st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "maintenance_ended" || result.Transitions[0].Suppressed {
+		t.Fatalf("persistent alert did not notify after maintenance: result=%#v err=%v", result, err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE body LIKE 'Echo alert MAINTENANCE ENDED%'`).Scan(&notifications); err != nil || notifications != 1 {
+		t.Fatalf("maintenance-ended notification count=%d err=%v", notifications, err)
+	}
+	alerts, err = st.ListServiceAlertsForService(ctx, service.ID, "open", 10)
+	if err != nil || alerts[0].MaintenanceWindowID != "" || alerts[0].NotificationSuppressedUntil != nil {
+		t.Fatalf("expired suppression was not cleared: alerts=%#v err=%v", alerts, err)
+	}
+	second, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{ServiceID: service.ID, StartsAt: now.Add(-time.Minute), EndsAt: now.Add(3 * time.Hour), Reason: "Planned platform work"}, "integration-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unhealthy.EventID = "maintenance-second-condition"
+	unhealthy.Fingerprint = "dependency"
+	unhealthy.Summary = "Dependency unavailable"
+	unhealthy.ObservedAt = now.Add(2 * time.Minute)
+	result, err = st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
+	if err != nil || !result.Transitions[0].Suppressed {
+		t.Fatalf("second maintenance did not suppress: result=%#v err=%v", result, err)
+	}
+	cancelled, restored, err := st.CancelMaintenanceWindow(ctx, second.ID, "owner@s.whatsapp.net")
+	if err != nil || cancelled.CancelledAt == nil || len(restored) != 2 {
+		t.Fatalf("cancel maintenance: window=%#v restored=%#v err=%v", cancelled, restored, err)
+	}
+	if _, _, err := st.CancelMaintenanceWindow(ctx, second.ID, "owner@s.whatsapp.net"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cancelled maintenance remained cancellable: %v", err)
+	}
+}
+
 func TestMariaDBServiceCreateAndEditAreUnambiguous(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -1014,7 +1116,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

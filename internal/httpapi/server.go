@@ -113,6 +113,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("POST /api/v1/services", s.services)
 	protected.HandleFunc("GET /api/v1/monitor/events", s.monitorEvents)
 	protected.HandleFunc("GET /api/v1/monitor/alerts", s.serviceAlerts)
+	protected.HandleFunc("GET /api/v1/maintenance", s.maintenanceWindows)
+	protected.HandleFunc("POST /api/v1/maintenance", s.maintenanceWindows)
+	protected.HandleFunc("DELETE /api/v1/maintenance/{id}", s.cancelMaintenanceWindow)
 	protected.HandleFunc("GET /api/v1/assistant/conversations", s.conversations)
 	protected.HandleFunc("GET /api/v1/assistant/conversations/{id}", s.conversation)
 	protected.HandleFunc("GET /api/v1/jobs", s.jobs)
@@ -549,6 +552,80 @@ func (s *Server) serviceAlerts(w http.ResponseWriter, r *http.Request) {
 	respond(w, items, err)
 }
 
+func (s *Server) maintenanceWindows(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		items, err := s.store.ListMaintenanceWindows(r.Context(), r.URL.Query().Get("serviceId"), 100)
+		respond(w, items, err)
+		return
+	}
+	var item domain.MaintenanceWindow
+	if err := decodeJSON(r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_maintenance_window", err.Error())
+		return
+	}
+	if err := validateMaintenanceWindow(item, time.Now().UTC()); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_maintenance_window", err.Error())
+		return
+	}
+	service, err := s.store.GetService(r.Context(), item.ServiceID)
+	if err != nil || !service.Enabled {
+		writeError(w, http.StatusBadRequest, "invalid_maintenance_window", "maintenance service must exist and be enabled")
+		return
+	}
+	saved, err := s.store.CreateMaintenanceWindow(r.Context(), item, actorFrom(r.Context()))
+	if errors.Is(err, store.ErrMaintenanceOverlap) {
+		writeError(w, http.StatusConflict, "maintenance_overlap", "maintenance window overlaps an existing window for this service")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "maintenance.scheduled", "maintenance_window", saved.ID, "succeeded", map[string]any{"serviceId": saved.ServiceID, "startsAt": saved.StartsAt, "endsAt": saved.EndsAt})
+	}
+	respondStatus(w, http.StatusCreated, saved, err)
+}
+
+func (s *Server) cancelMaintenanceWindow(w http.ResponseWriter, r *http.Request) {
+	ownerJID := ""
+	if s.owners != nil {
+		var err error
+		ownerJID, err = s.owners.JID(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "maintenance_cancel_failed", "notification owner could not be resolved")
+			return
+		}
+	}
+	window, transitions, err := s.store.CancelMaintenanceWindow(r.Context(), r.PathValue("id"), ownerJID)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "maintenance_not_found", "active or upcoming maintenance window was not found")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "maintenance.cancelled", "maintenance_window", window.ID, "succeeded", map[string]any{"serviceId": window.ServiceID, "restoredAlerts": len(transitions)})
+	}
+	respond(w, window, err)
+}
+
+func validateMaintenanceWindow(item domain.MaintenanceWindow, now time.Time) error {
+	reason := strings.TrimSpace(item.Reason)
+	if strings.TrimSpace(item.ServiceID) == "" || len(reason) < 3 || len(reason) > 300 {
+		return errors.New("serviceId and a reason between 3 and 300 characters are required")
+	}
+	startsAt, endsAt := item.StartsAt.UTC(), item.EndsAt.UTC()
+	if startsAt.IsZero() || endsAt.IsZero() || !endsAt.After(startsAt) {
+		return errors.New("endsAt must be after startsAt")
+	}
+	if startsAt.Before(now.Add(-5 * time.Minute)) {
+		return errors.New("startsAt cannot be more than five minutes in the past")
+	}
+	if startsAt.After(now.Add(365 * 24 * time.Hour)) {
+		return errors.New("startsAt must be within the next 365 days")
+	}
+	duration := endsAt.Sub(startsAt)
+	if duration < time.Minute || duration > 30*24*time.Hour {
+		return errors.New("maintenance duration must be between one minute and 30 days")
+	}
+	return nil
+}
+
 func (s *Server) jobs(w http.ResponseWriter, r *http.Request) {
 	status := strings.TrimSpace(r.URL.Query().Get("status"))
 	if status != "" && !oneOf(status, "queued", "running", "failed", "dead", "complete") {
@@ -810,7 +887,14 @@ func (s *Server) monitorWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !result.Duplicate {
-		_ = s.store.Audit(r.Context(), "system", event.Source, "monitor.event_recorded", "service", event.ServiceID, "succeeded", map[string]any{"eventId": event.EventID, "status": event.Status, "severity": event.Severity})
+		notificationSuppressed := false
+		for _, transition := range result.Transitions {
+			if transition.Suppressed {
+				notificationSuppressed = true
+				break
+			}
+		}
+		_ = s.store.Audit(r.Context(), "system", event.Source, "monitor.event_recorded", "service", event.ServiceID, "succeeded", map[string]any{"eventId": event.EventID, "status": event.Status, "severity": event.Severity, "notificationSuppressed": notificationSuppressed})
 	}
 	writeJSON(w, http.StatusAccepted, result)
 }

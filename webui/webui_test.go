@@ -153,6 +153,21 @@ func TestMonitoringSupportsServiceEvidenceAndPolicyEditing(t *testing.T) {
 	}
 }
 
+func TestMonitoringSupportsBoundedPlannedMaintenance(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/maintenance", "Planned maintenance", "Schedule maintenance", "maintenance-form", "Evidence collection continues", "data-cancel-maintenance", "alert notifications restored", "cannot overlap"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("planned maintenance workflow is missing %q", expected)
+		}
+	}
+	if strings.Contains(body, "data-disable-monitoring") {
+		t.Fatal("maintenance must not disable monitoring evidence collection")
+	}
+}
+
 func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

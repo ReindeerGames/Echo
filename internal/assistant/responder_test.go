@@ -24,6 +24,7 @@ type fakeReader struct {
 	repos       []domain.Repository
 	services    []domain.Service
 	alerts      []domain.ServiceAlert
+	maintenance []domain.MaintenanceWindow
 	events      []domain.MonitorEvent
 	jobs        []domain.Job
 	deliveries  []domain.OutboundDelivery
@@ -163,6 +164,19 @@ func (f fakeReader) ListServiceAlertsForService(_ context.Context, serviceID, st
 	}
 	return out, nil
 }
+func (f fakeReader) ListMaintenanceWindows(_ context.Context, serviceID string, limit int) ([]domain.MaintenanceWindow, error) {
+	var out []domain.MaintenanceWindow
+	for _, window := range f.maintenance {
+		if serviceID != "" && window.ServiceID != serviceID {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, window)
+	}
+	return out, nil
+}
 func (f fakeReader) ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error) {
 	return f.events, nil
 }
@@ -230,6 +244,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"github inventory":                    "unknown",
 		"what isn't monitored?":               "coverage",
 		"what happened?":                      "activity",
+		"planned maintenance":                 "maintenance",
 		"how are things":                      "status",
 		"service nudgie-web":                  "service",
 		"what can you do?":                    "help",
@@ -549,6 +564,34 @@ func TestDeliveryQueueAnswersExposeMechanicsWithoutMessageData(t *testing.T) {
 	answer, intent, err := responder.Answer(context.Background(), "why didn't WhatsApp send?")
 	if err != nil || intent != "deliveries" || !containsAll(answer, "WhatsApp delivery queue (1 active)", "RETRYING", "direct", "attempt 2/5", "next attempt in 1m0s", "authorization_failed", "message content and destinations are omitted") {
 		t.Fatalf("unexpected delivery answer intent=%s err=%v body=%s", intent, err, answer)
+	}
+}
+
+func TestMaintenanceIsVisibleWithoutExposingMutationTools(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	until := now.Add(time.Hour)
+	reader := fakeReader{
+		maintenance: []domain.MaintenanceWindow{{ID: "mnt_secret", ServiceID: "svc_1", ServiceName: "Invoices API", ProjectID: "prj_1", StartsAt: now.Add(-time.Minute), EndsAt: until, Reason: "Planned database upgrade"}},
+		alerts:      []domain.ServiceAlert{{ServiceID: "svc_1", ServiceName: "Invoices API", Severity: "critical", Summary: "Readiness unavailable", Fingerprint: "readiness", MaintenanceWindowID: "mnt_secret", NotificationSuppressedUntil: &until}},
+	}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	output, err := responder.executeTool(context.Background(), "get_maintenance_windows", json.RawMessage(`{}`))
+	if err != nil || !containsAll(output, `"service":"Invoices API"`, `"state":"active"`, `"reason":"Planned database upgrade"`, `"behavior":"monitoring evidence continues; alert notifications are suppressed only during the bounded window"`) || strings.Contains(output, "mnt_secret") {
+		t.Fatalf("unsafe maintenance tool output: %s err=%v", output, err)
+	}
+	answer, intent, err := responder.Answer(context.Background(), "planned maintenance")
+	if err != nil || intent != "maintenance" || !containsAll(answer, "Service maintenance (1)", "ACTIVE · Invoices API", "Planned database upgrade", "continues recording evidence") || strings.Contains(answer, "mnt_secret") {
+		t.Fatalf("unexpected maintenance answer intent=%s err=%v body=%s", intent, err, answer)
+	}
+	alerts, intent, err := responder.Answer(context.Background(), "alerts")
+	if err != nil || intent != "alerts" || !containsAll(alerts, "MAINTENANCE until 2026-10-30 13:00 UTC", "Readiness unavailable") {
+		t.Fatalf("maintenance suppression missing from alerts intent=%s err=%v body=%s", intent, err, alerts)
+	}
+	for _, tool := range operatorTools() {
+		if strings.Contains(tool.Name, "schedule") || strings.Contains(tool.Name, "cancel") || strings.Contains(tool.Name, "suppress") {
+			t.Fatalf("maintenance mutation tool exposed: %s", tool.Name)
+		}
 	}
 }
 

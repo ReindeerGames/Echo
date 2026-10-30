@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ReindeerGames/echo/internal/config"
 	"github.com/ReindeerGames/echo/internal/domain"
@@ -214,5 +215,26 @@ func TestOutboundDeliveriesRejectUnknownStatusBeforeStoreAccess(t *testing.T) {
 	server.outboundDeliveries(response, request)
 	if response.Code != 400 || !strings.Contains(response.Body.String(), "invalid_status") {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestMaintenanceWindowValidationIsBounded(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	valid := domain.MaintenanceWindow{ServiceID: "svc_1", StartsAt: now, EndsAt: now.Add(time.Hour), Reason: "Database upgrade"}
+	if err := validateMaintenanceWindow(valid, now); err != nil {
+		t.Fatalf("valid maintenance rejected: %v", err)
+	}
+	tests := []domain.MaintenanceWindow{
+		{ServiceID: "", StartsAt: now, EndsAt: now.Add(time.Hour), Reason: "Database upgrade"},
+		{ServiceID: "svc_1", StartsAt: now, EndsAt: now.Add(time.Hour), Reason: "x"},
+		{ServiceID: "svc_1", StartsAt: now.Add(-6 * time.Minute), EndsAt: now.Add(time.Hour), Reason: "Database upgrade"},
+		{ServiceID: "svc_1", StartsAt: now, EndsAt: now, Reason: "Database upgrade"},
+		{ServiceID: "svc_1", StartsAt: now, EndsAt: now.Add(31 * 24 * time.Hour), Reason: "Database upgrade"},
+		{ServiceID: "svc_1", StartsAt: now.Add(366 * 24 * time.Hour), EndsAt: now.Add(366*24*time.Hour + time.Hour), Reason: "Database upgrade"},
+	}
+	for _, item := range tests {
+		if err := validateMaintenanceWindow(item, now); err == nil {
+			t.Fatalf("invalid maintenance accepted: %#v", item)
+		}
 	}
 }

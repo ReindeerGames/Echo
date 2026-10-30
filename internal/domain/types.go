@@ -97,24 +97,40 @@ type MonitorEvent struct {
 }
 
 type ServiceAlert struct {
-	ID            string     `json:"id"`
-	ServiceID     string     `json:"serviceId"`
-	ServiceName   string     `json:"serviceName,omitempty"`
-	ProjectID     string     `json:"projectId,omitempty"`
-	Fingerprint   string     `json:"fingerprint"`
-	Status        string     `json:"status"`
-	Severity      string     `json:"severity"`
-	Title         string     `json:"title"`
-	Summary       string     `json:"summary"`
-	LatestEventID string     `json:"latestEventId"`
-	OpenedAt      time.Time  `json:"openedAt"`
-	LastSeenAt    time.Time  `json:"lastSeenAt"`
-	ResolvedAt    *time.Time `json:"resolvedAt,omitempty"`
+	ID                           string     `json:"id"`
+	ServiceID                    string     `json:"serviceId"`
+	ServiceName                  string     `json:"serviceName,omitempty"`
+	ProjectID                    string     `json:"projectId,omitempty"`
+	Fingerprint                  string     `json:"fingerprint"`
+	Status                       string     `json:"status"`
+	Severity                     string     `json:"severity"`
+	Title                        string     `json:"title"`
+	Summary                      string     `json:"summary"`
+	LatestEventID                string     `json:"latestEventId"`
+	OpenedAt                     time.Time  `json:"openedAt"`
+	LastSeenAt                   time.Time  `json:"lastSeenAt"`
+	ResolvedAt                   *time.Time `json:"resolvedAt,omitempty"`
+	MaintenanceWindowID          string     `json:"maintenanceWindowId,omitempty"`
+	NotificationSuppressedUntil  *time.Time `json:"notificationSuppressedUntil,omitempty"`
+	MaintenanceOpeningSuppressed bool       `json:"-"`
 }
 
 type AlertTransition struct {
-	Kind  string       `json:"kind"`
-	Alert ServiceAlert `json:"alert"`
+	Kind       string       `json:"kind"`
+	Alert      ServiceAlert `json:"alert"`
+	Suppressed bool         `json:"suppressed,omitempty"`
+}
+
+type MaintenanceWindow struct {
+	ID          string     `json:"id"`
+	ServiceID   string     `json:"serviceId"`
+	ServiceName string     `json:"serviceName"`
+	ProjectID   string     `json:"projectId"`
+	StartsAt    time.Time  `json:"startsAt"`
+	EndsAt      time.Time  `json:"endsAt"`
+	Reason      string     `json:"reason"`
+	CancelledAt *time.Time `json:"cancelledAt,omitempty"`
+	CreatedAt   time.Time  `json:"createdAt"`
 }
 
 type MonitorResult struct {
@@ -263,20 +279,22 @@ type AuditEvent struct {
 }
 
 type Dashboard struct {
-	OpenIncidents           int        `json:"openIncidents"`
-	OpenAlerts              int        `json:"openAlerts"`
-	PendingApprovals        int        `json:"pendingApprovals"`
-	QueuedJobs              int        `json:"queuedJobs"`
-	RunningJobs             int        `json:"runningJobs"`
-	RetryingJobs            int        `json:"retryingJobs"`
-	DeadJobs                int        `json:"deadJobs"`
-	FailedDeployments       int        `json:"failedDeployments"`
-	EnabledProjects         int        `json:"enabledProjects"`
-	PendingWhatsAppMessages int        `json:"pendingWhatsAppMessages"`
-	DeadWhatsAppMessages    int        `json:"deadWhatsAppMessages"`
-	WorkerLastSeenAt        *time.Time `json:"workerLastSeenAt,omitempty"`
-	WorkerQueueStalled      bool       `json:"workerQueueStalled"`
-	WorkerHealthSummary     string     `json:"workerHealthSummary,omitempty"`
+	OpenIncidents            int        `json:"openIncidents"`
+	OpenAlerts               int        `json:"openAlerts"`
+	SuppressedAlerts         int        `json:"suppressedAlerts"`
+	ActiveMaintenanceWindows int        `json:"activeMaintenanceWindows"`
+	PendingApprovals         int        `json:"pendingApprovals"`
+	QueuedJobs               int        `json:"queuedJobs"`
+	RunningJobs              int        `json:"runningJobs"`
+	RetryingJobs             int        `json:"retryingJobs"`
+	DeadJobs                 int        `json:"deadJobs"`
+	FailedDeployments        int        `json:"failedDeployments"`
+	EnabledProjects          int        `json:"enabledProjects"`
+	PendingWhatsAppMessages  int        `json:"pendingWhatsAppMessages"`
+	DeadWhatsAppMessages     int        `json:"deadWhatsAppMessages"`
+	WorkerLastSeenAt         *time.Time `json:"workerLastSeenAt,omitempty"`
+	WorkerQueueStalled       bool       `json:"workerQueueStalled"`
+	WorkerHealthSummary      string     `json:"workerHealthSummary,omitempty"`
 }
 
 type WorkerHealth struct {
