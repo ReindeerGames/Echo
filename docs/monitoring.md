@@ -58,7 +58,22 @@ On Linux, `systemProbes` read only `/proc/meminfo`, `/proc/loadavg`, `/proc/upti
 
 Run a system probe as a host service when host metrics are intended. If it runs inside a container, its kernel and filesystem namespace determine what it measures; do not assume containerized readings represent the host. The observer requires no root privileges, shell, Docker socket, or SSH credential.
 
-Each Echo service may have one aggregate probe across both HTTP and system probe classes. Use a separate service-catalogue entry for the host and each application health endpoint. Expose an aggregate readiness endpoint when one application depends on several internal checks.
+Each Echo service may have one aggregate probe across the HTTP, system, and Docker probe classes. Use separate service-catalogue entries for the host, each container, and each application health endpoint. Expose an aggregate readiness endpoint when one application depends on several internal checks.
+
+`dockerProbes` inspect the lifecycle of one explicitly named container through the bundled `echo-docker-proxy`. Echo records only the normalized running/paused/restarting/dead/OOM state, exit code, Docker health status and failing streak, restart count, and sanitized timestamps. The proxy discards environment variables, labels, mounts, logs, health-check output, image configuration, and raw daemon errors before the observer sees the response. Both processes cap inspect responses at one MiB and never copy unrecognized state text into alerts.
+
+Never give Echo or `echo-observer` the Docker socket. `echo-docker-proxy` is the only component that joins the Docker group. It binds only to a numeric loopback address, implements only its health endpoint and `GET /containers/{name}/json`, and makes a single upstream inspect request only for exact allowlisted names. It does not forward arbitrary Docker API calls. Plaintext Docker proxy URLs are accepted automatically only on `localhost` or a loopback IP; a non-loopback proxy requires HTTPS unless `allowInsecureHttp` is explicitly enabled for an isolated test environment. Do not substitute a broadly capable Docker socket proxy or expose this loopback service on a LAN or public interface.
+
+Build and configure the proxy beside Docker:
+
+```bash
+make build
+install -o root -g root -m 0755 bin/echo-docker-proxy /usr/local/bin/echo-docker-proxy
+install -o root -g root -m 0644 deploy/observer/echo-docker-proxy.service /etc/systemd/system/echo-docker-proxy.service
+install -o root -g root -m 0644 deploy/observer/echo-docker-proxy.env.example /etc/echo-docker-proxy.env
+```
+
+Set `ECHO_DOCKER_PROXY_CONTAINERS` in `/etc/echo-docker-proxy.env` to the comma-separated exact names used by `dockerProbes`; no wildcard is supported. Create a locked `echo-docker-proxy` system account, make it a supplementary member of the local Docker group through the unit, then start the proxy. Keep `ECHO_DOCKER_PROXY_LISTEN` at `127.0.0.1:23750`. The optional `ECHO_DOCKER_SOCKET` must be an absolute local Unix socket path.
 
 Run continuously:
 
@@ -69,4 +84,4 @@ ECHO_OBSERVER_WEBHOOK_SECRET='use-the-same-32-character-or-longer-secret' \
 
 Use `-once` for installation smoke tests. Create the matching services in Echo before starting the observer. Do not put the webhook secret or health-endpoint credentials in the JSON file; authenticated health endpoints are intentionally not supported by the bundled observer.
 
-For a Linux host installation, [`deploy/observer/echo-observer.service`](../deploy/observer/echo-observer.service) provides a hardened systemd unit. Create an unprivileged `echo-observer` system account, install the binary and JSON configuration as root-owned read-only files, and put only `ECHO_OBSERVER_WEBHOOK_SECRET=...` in `/etc/echo-observer.env` with mode `0600`. Validate with `-once` before enabling the unit. Installation is an explicit deployment step; Echo never installs observers or changes a server on its own.
+For a Linux host installation, [`deploy/observer/echo-observer.service`](../deploy/observer/echo-observer.service) and [`deploy/observer/echo-docker-proxy.service`](../deploy/observer/echo-docker-proxy.service) provide hardened systemd units. Create separate locked system accounts, install binaries and JSON configuration as root-owned read-only files, and put only `ECHO_OBSERVER_WEBHOOK_SECRET=...` in `/etc/echo-observer.env` with mode `0600`. The observer account does not belong to the Docker group; only the small allowlisting proxy may access the socket. Validate the observer with `-once` before enabling it. Installation is an explicit deployment step; Echo never installs observers or changes a server on its own.

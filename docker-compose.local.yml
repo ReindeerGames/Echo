@@ -91,7 +91,9 @@ services:
         VALUES ('svc_local_echo', 'prj_local_test', 'echo-local', 'Local Echo',
         'platform', 'low', 'Disposable health target for the local observer.', TRUE, 60, '{}'),
         ('svc_local_host', 'prj_local_test', 'host-local', 'Local Host',
-        'platform', 'low', 'Disposable host-resource target for the local observer.', TRUE, 60, '{}')"
+        'platform', 'low', 'Disposable host-resource target for the local observer.', TRUE, 60, '{}'),
+        ('svc_local_container', 'prj_local_test', 'container-local', 'Local Mock AI Container',
+        'platform', 'low', 'Disposable container-state target for the local observer.', TRUE, 60, '{}')"
     networks: [backend]
 
 volumes:

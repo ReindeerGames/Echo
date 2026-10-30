@@ -11,6 +11,8 @@ For every observer-managed service, configure a heartbeat timeout at least twice
 
 For host-resource monitoring, run `echo-observer` directly under the host's service manager as an unprivileged account. A containerized observer measures the namespaces and filesystem presented to that container. Keep host and application probes as separate Echo services so one healthy signal cannot clear the other's alert.
 
+Container-state probes use the bundled `echo-docker-proxy`, bound to numeric loopback and restricted in code to sanitized container inspection plus an explicit exact-name allowlist. Only its dedicated account belongs to the Docker group; the observer user must not. Treat any broader or remotely reachable plaintext Docker API as a critical security defect, not as a supported Echo configuration. If the proxy is unavailable, Echo raises `container-observer`; do not interpret that as proof the workload is down.
+
 ## Backup
 
 Back up `echo_whatsapp` and `echo_core` independently using encrypted storage. The session database contains cryptographic key material and must receive the stricter retention and access policy.

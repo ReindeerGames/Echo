@@ -94,3 +94,49 @@ func TestSystemProbeRejectsUnsafeThresholdsAndRelativePath(t *testing.T) {
 		t.Fatalf("inverted disk thresholds were not rejected: %v", err)
 	}
 }
+
+func TestDockerProbeValidationAndCrossTypeUniqueness(t *testing.T) {
+	cfg, err := normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		DockerProbes: []DockerProbe{{Name: "Web Container", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test", Container: "web-1"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid name") {
+		t.Fatalf("unsafe Docker probe name was not rejected: cfg=%#v err=%v", cfg, err)
+	}
+	cfg, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		DockerProbes: []DockerProbe{{Name: "web-container", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test/", Container: "web-1"}},
+	})
+	if err != nil || cfg.DockerProbes[0].ProxyURL != "https://docker-proxy.test" {
+		t.Fatalf("valid Docker probe rejected: cfg=%#v err=%v", cfg, err)
+	}
+	cfg, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		DockerProbes: []DockerProbe{{Name: "web-container", ServiceID: "svc_container", ProxyURL: "http://127.0.0.1:2375", Container: "web-1"}},
+	})
+	if err != nil {
+		t.Fatalf("loopback plaintext Docker proxy was rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		DockerProbes: []DockerProbe{{Name: "web-container", ServiceID: "svc_container", ProxyURL: "http://docker-proxy.test:2375", Container: "web-1"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("remote plaintext Docker proxy was not rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		DockerProbes: []DockerProbe{{Name: "web", ServiceID: "svc_container", ProxyURL: "https://docker-proxy.test", Container: "team/web"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "container") {
+		t.Fatalf("unsafe container name was not rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		SystemProbes: []SystemProbe{{Name: "host", ServiceID: "svc_same"}},
+		DockerProbes: []DockerProbe{{Name: "web", ServiceID: "svc_same", ProxyURL: "https://docker-proxy.test", Container: "web"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "one aggregate probe") {
+		t.Fatalf("cross-type Docker service duplicate was not rejected: %v", err)
+	}
+}

@@ -75,9 +75,9 @@ With the stack healthy on the default local port, run one signed observation cyc
 make local-observe
 ```
 
-The observer probes `/readyz` without reading its body, reads bounded kernel/filesystem counters from the local Linux environment, signs two normalized health events, and submits them to Echo. **Monitoring → Recent signals** should show `Local Echo` and `Local Host` as healthy. The local example explicitly permits plaintext HTTP because both endpoints bind to loopback; observer configuration requires HTTPS by default. Its deliberately high resource thresholds make this a data-path test rather than a workstation-capacity alarm.
+The target starts a temporary loopback-only `echo-docker-proxy`, probes `/readyz` without reading its body, reads bounded kernel/filesystem counters from the local Linux environment, inspects only the allowlisted mock-AI container's sanitized lifecycle state, signs three normalized health events, and submits them to Echo. The proxy exits when this one-shot test finishes. **Monitoring → Recent signals** should show `Local Echo`, `Local Host`, and `Local Mock AI Container` as healthy. The local example explicitly permits plaintext HTTP because both endpoints bind to loopback; observer configuration requires HTTPS by default. Its deliberately high resource thresholds make this a data-path test rather than a workstation-capacity alarm.
 
-Both seeded services expect a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens `observer-silent` warnings. Running `make local-observe` records fresh evidence and resolves those alerts.
+All three seeded services expect a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens `observer-silent` warnings. Running `make local-observe` records fresh evidence and resolves those alerts.
 
 To enable real analysis, open **System → OpenAI connection**, enter the OpenAI API key and model, and save. Echo validates the credentials before encrypting the key in MariaDB. Application settings override the local deterministic mock immediately without restarting the stack.
 

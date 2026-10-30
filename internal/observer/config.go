@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,6 +27,7 @@ type Config struct {
 	AllowInsecureHTTP bool          `json:"allowInsecureHttp"`
 	Probes            []HTTPProbe   `json:"probes"`
 	SystemProbes      []SystemProbe `json:"systemProbes"`
+	DockerProbes      []DockerProbe `json:"dockerProbes"`
 }
 
 type HTTPProbe struct {
@@ -47,6 +49,13 @@ type SystemProbe struct {
 	MemoryCriticalPercent float64 `json:"memoryCriticalPercent"`
 	LoadWarningPerCPU     float64 `json:"loadWarningPerCpu"`
 	LoadCriticalPerCPU    float64 `json:"loadCriticalPerCpu"`
+}
+
+type DockerProbe struct {
+	Name      string `json:"name"`
+	ServiceID string `json:"serviceId"`
+	ProxyURL  string `json:"proxyUrl"`
+	Container string `json:"container"`
 }
 
 type Duration struct{ time.Duration }
@@ -109,7 +118,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("invalid echoUrl: %w", err)
 	}
 	cfg.EchoURL = strings.TrimRight(echoURL.String(), "/")
-	totalProbes := len(cfg.Probes) + len(cfg.SystemProbes)
+	totalProbes := len(cfg.Probes) + len(cfg.SystemProbes) + len(cfg.DockerProbes)
 	if totalProbes == 0 || totalProbes > 100 {
 		return Config{}, errors.New("between 1 and 100 probes are required")
 	}
@@ -170,7 +179,40 @@ func normalizeConfig(cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("system probe %q load thresholds must be positive, ordered, and no greater than 20 per CPU", probe.Name)
 		}
 	}
+	for index := range cfg.DockerProbes {
+		probe := &cfg.DockerProbes[index]
+		probe.Name = strings.ToLower(strings.TrimSpace(probe.Name))
+		probe.ServiceID = strings.TrimSpace(probe.ServiceID)
+		probe.Container = strings.TrimSpace(probe.Container)
+		if err := registerProbe(probe.Name, probe.ServiceID, fmt.Sprintf("Docker probe %d", index+1), seenNames, seenServices); err != nil {
+			return Config{}, err
+		}
+		if !safeContainerName(probe.Container) || len(probe.Container) > 128 {
+			return Config{}, fmt.Errorf("Docker probe %q container must use letters, numbers, dot, dash, or underscore", probe.Name)
+		}
+		proxyURL, err := validateDockerProxyURL(strings.TrimSpace(probe.ProxyURL), cfg.AllowInsecureHTTP)
+		if err != nil {
+			return Config{}, fmt.Errorf("Docker probe %q proxyUrl: %w", probe.Name, err)
+		}
+		probe.ProxyURL = strings.TrimRight(proxyURL.String(), "/")
+	}
 	return cfg, nil
+}
+
+func validateDockerProxyURL(raw string, allowHTTP bool) (*url.URL, error) {
+	parsed, err := validateURL(raw, true)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Scheme != "http" || allowHTTP {
+		return parsed, nil
+	}
+	host := strings.ToLower(parsed.Hostname())
+	ip := net.ParseIP(host)
+	if host == "localhost" || (ip != nil && ip.IsLoopback()) {
+		return parsed, nil
+	}
+	return nil, errors.New("plaintext Docker proxy URLs must use loopback unless allowInsecureHttp is enabled")
 }
 
 func registerProbe(name, serviceID, label string, seenNames, seenServices map[string]struct{}) error {
@@ -245,6 +287,19 @@ func safeName(value string) bool {
 	}
 	for _, character := range value {
 		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.' || character == ':' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safeContainerName(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '-' || character == '_' || character == '.' {
 			continue
 		}
 		return false
