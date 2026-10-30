@@ -101,7 +101,7 @@ func TestFreshnessProbeUsesNewestMatchingFileWithoutExposingNames(t *testing.T) 
 		t.Fatal(err)
 	}
 	event = service.observeFreshness(t.Context(), service.config.FreshnessProbes[0])
-	if event.Status != "healthy" || event.Severity != "info" || event.Fingerprint != "" {
+	if event.Status != "healthy" || event.Severity != "info" || event.Fingerprint != "artifact-freshness" {
 		t.Fatalf("fresh backup did not resolve health: %#v", event)
 	}
 }

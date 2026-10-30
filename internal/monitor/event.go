@@ -44,6 +44,9 @@ func Normalize(event domain.MonitorEvent, now time.Time) (domain.MonitorEvent, e
 	if !printableASCII(event.ServiceID) || len(event.ServiceID) > 28 || !safeName(event.Source) || len(event.Source) > 120 {
 		return domain.MonitorEvent{}, fmt.Errorf("%w: serviceId and source must be valid ASCII identifiers", ErrInvalidEvent)
 	}
+	if event.Source == "echo-watchdog" {
+		return domain.MonitorEvent{}, fmt.Errorf("%w: source is reserved for Echo's heartbeat watchdog", ErrInvalidEvent)
+	}
 	if event.Summary == "" || len(event.Summary) > 1000 {
 		return domain.MonitorEvent{}, fmt.Errorf("%w: summary is required and must not exceed 1000 characters", ErrInvalidEvent)
 	}

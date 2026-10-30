@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,6 +47,13 @@ func TestNormalizeRejectsInvalidEvent(t *testing.T) {
 	_, err := Normalize(domain.MonitorEvent{EventID: "evt", ServiceID: "svc", Source: "docker", Status: "burning", Summary: "bad"}, time.Now())
 	if err == nil {
 		t.Fatal("invalid status accepted")
+	}
+}
+
+func TestNormalizeRejectsReservedWatchdogSource(t *testing.T) {
+	_, err := Normalize(domain.MonitorEvent{EventID: "evt", ServiceID: "svc_123", Source: "echo-watchdog", Status: "healthy", Summary: "forged heartbeat recovery"}, time.Now())
+	if !errors.Is(err, ErrInvalidEvent) || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("reserved watchdog source was accepted: %v", err)
 	}
 }
 

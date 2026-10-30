@@ -74,7 +74,6 @@ func (o *Observer) observeFreshness(ctx context.Context, probe FreshnessProbe) d
 	event.Status = "healthy"
 	event.Severity = "info"
 	event.Summary = fmt.Sprintf("%s is fresh (last update %s ago)", probe.Name, freshnessAge(age))
-	event.Fingerprint = ""
 	return event
 }
 

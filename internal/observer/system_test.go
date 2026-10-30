@@ -47,7 +47,7 @@ func TestSystemProbeMetricsFailureIsAlertable(t *testing.T) {
 	}
 	service.system = fakeSystemReader{err: errors.New("sensitive local path")}
 	event := service.observeSystem(t.Context(), service.config.SystemProbes[0])
-	if event.Status != "unhealthy" || event.Severity != "critical" || event.Fingerprint != "host-metrics-unavailable" || strings.Contains(string(event.Details), "sensitive") {
+	if event.Status != "unhealthy" || event.Severity != "critical" || event.Fingerprint != "host-resources" || strings.Contains(string(event.Details), "sensitive") {
 		t.Fatalf("unexpected metrics failure event: %#v", event)
 	}
 }

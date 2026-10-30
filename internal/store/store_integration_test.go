@@ -573,6 +573,65 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	}
 }
 
+func TestMariaDBMonitorRecoveryIsScopedAndClearsObserverSilence(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "scoped-recovery", Name: "Scoped recovery", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "api", Name: "API", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	watchdog := domain.MonitorEvent{EventID: "scoped-watchdog", ServiceID: service.ID, Source: "echo-watchdog", Status: "unhealthy", Severity: "critical", Summary: "observer is silent", Fingerprint: "observer-silent", Details: json.RawMessage(`{}`), ObservedAt: now}
+	if result, err := st.RecordMonitorEvent(ctx, watchdog); err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
+		t.Fatalf("open observer silence: result=%#v err=%v", result, err)
+	}
+	delayed := domain.MonitorEvent{EventID: "scoped-delayed", ServiceID: service.ID, Source: "local-observer", Status: "unhealthy", Severity: "critical", Summary: "database check failed", Fingerprint: "database", Details: json.RawMessage(`{}`), ObservedAt: now.Add(-time.Minute)}
+	if result, err := st.RecordMonitorEvent(ctx, delayed); err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
+		t.Fatalf("delayed evidence changed newer silence state: result=%#v err=%v", result, err)
+	}
+	fresh := delayed
+	fresh.EventID = "scoped-fresh"
+	fresh.ObservedAt = now.Add(time.Minute)
+	result, err := st.RecordMonitorEvent(ctx, fresh)
+	if err != nil || len(result.Transitions) != 2 || result.Transitions[0].Kind != "resolved" || result.Transitions[0].Alert.Fingerprint != "observer-silent" || result.Transitions[1].Kind != "updated" || result.Transitions[1].Alert.Fingerprint != "database" {
+		t.Fatalf("fresh unhealthy evidence did not resolve only observer silence: result=%#v err=%v", result, err)
+	}
+	queue := domain.MonitorEvent{EventID: "scoped-queue", ServiceID: service.ID, Source: "local-observer", Status: "degraded", Severity: "warning", Summary: "queue lag is elevated", Fingerprint: "queue", Details: json.RawMessage(`{}`), ObservedAt: now.Add(2 * time.Minute)}
+	if result, err := st.RecordMonitorEvent(ctx, queue); err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
+		t.Fatalf("open second condition: result=%#v err=%v", result, err)
+	}
+	databaseHealthy := domain.MonitorEvent{EventID: "scoped-database-healthy", ServiceID: service.ID, Source: "local-observer", Status: "healthy", Severity: "info", Summary: "database check recovered", Fingerprint: "database", Details: json.RawMessage(`{}`), ObservedAt: now.Add(3 * time.Minute)}
+	result, err = st.RecordMonitorEvent(ctx, databaseHealthy)
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "resolved" || result.Transitions[0].Alert.Fingerprint != "database" {
+		t.Fatalf("scoped recovery resolved the wrong conditions: result=%#v err=%v", result, err)
+	}
+	alerts, err := st.ListServiceAlertsForService(ctx, service.ID, "open", 10)
+	if err != nil || len(alerts) != 1 || alerts[0].Fingerprint != "queue" {
+		t.Fatalf("unrelated condition was cleared by scoped recovery: alerts=%#v err=%v", alerts, err)
+	}
+	aggregateHealthy := databaseHealthy
+	aggregateHealthy.EventID = "scoped-aggregate-healthy"
+	aggregateHealthy.Fingerprint = ""
+	aggregateHealthy.Summary = "aggregate service check recovered"
+	aggregateHealthy.ObservedAt = now.Add(4 * time.Minute)
+	if result, err := st.RecordMonitorEvent(ctx, aggregateHealthy); err != nil || len(result.Transitions) != 1 || result.Transitions[0].Alert.Fingerprint != "queue" {
+		t.Fatalf("legacy aggregate recovery did not clear remaining condition: result=%#v err=%v", result, err)
+	}
+}
+
 func TestMariaDBMonitorAlertSeverityEscalationNotifiesOnce(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {

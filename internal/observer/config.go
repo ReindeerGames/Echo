@@ -125,6 +125,9 @@ func normalizeConfig(cfg Config) (Config, error) {
 	if !safeName(cfg.Source) || len(cfg.Source) > 120 {
 		return Config{}, errors.New("source must use lowercase letters, numbers, dash, underscore, dot, or colon")
 	}
+	if cfg.Source == "echo-watchdog" {
+		return Config{}, errors.New("source echo-watchdog is reserved for Echo's heartbeat watchdog")
+	}
 	echoURL, err := validateURL(cfg.EchoURL, cfg.AllowInsecureHTTP)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid echoUrl: %w", err)

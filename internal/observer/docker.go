@@ -49,7 +49,7 @@ func (o *Observer) observeDocker(ctx context.Context, probe DockerProbe) domain.
 		Status:      "unhealthy",
 		Severity:    "critical",
 		Summary:     probe.Name + " container evidence is unavailable",
-		Fingerprint: "container-observer",
+		Fingerprint: "container-health",
 		ObservedAt:  observedAt,
 	}
 	endpoint := probe.ProxyURL + "/containers/" + url.PathEscape(probe.Container) + "/json"
@@ -90,6 +90,7 @@ func (o *Observer) observeDocker(ctx context.Context, probe DockerProbe) domain.
 func dockerEventFromInspect(event domain.MonitorEvent, probe DockerProbe, inspect dockerInspect) domain.MonitorEvent {
 	event.Status = "unhealthy"
 	event.Severity = "critical"
+	event.Fingerprint = "container-health"
 	state := normalizedContainerState(inspect.State.Status)
 	health := "none"
 	failingStreak := 0
@@ -115,7 +116,6 @@ func dockerEventFromInspect(event domain.MonitorEvent, probe DockerProbe, inspec
 		"finishedAt":    normalizedDockerTime(inspect.State.FinishedAt),
 	})
 	event.Details = details
-	event.Fingerprint = "container-runtime"
 	switch {
 	case inspect.State.OOMKilled:
 		event.Summary = probe.Name + " container was OOM-killed"
@@ -130,22 +130,18 @@ func dockerEventFromInspect(event domain.MonitorEvent, probe DockerProbe, inspec
 	case !inspect.State.Running || state != "running":
 		event.Summary = fmt.Sprintf("%s container is %s (exit %d)", probe.Name, state, inspect.State.ExitCode)
 	case health == "unhealthy":
-		event.Fingerprint = "container-health"
 		event.Summary = fmt.Sprintf("%s Docker health check is unhealthy (streak %d)", probe.Name, failingStreak)
 	case health == "starting":
 		event.Status = "degraded"
 		event.Severity = "warning"
-		event.Fingerprint = "container-health"
 		event.Summary = probe.Name + " Docker health check is still starting"
 	case health != "none" && health != "healthy":
 		event.Status = "degraded"
 		event.Severity = "warning"
-		event.Fingerprint = "container-health"
 		event.Summary = probe.Name + " Docker health state is unknown"
 	default:
 		event.Status = "healthy"
 		event.Severity = "info"
-		event.Fingerprint = ""
 		if health == "healthy" {
 			event.Summary = fmt.Sprintf("%s container is running and healthy (restarts %d)", probe.Name, restartCount)
 		} else {

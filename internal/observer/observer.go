@@ -187,7 +187,6 @@ func (o *Observer) observe(ctx context.Context, probe HTTPProbe) domain.MonitorE
 	event.Status = "healthy"
 	event.Severity = "info"
 	event.Summary = fmt.Sprintf("%s is healthy (HTTP %d)", probe.Name, response.StatusCode)
-	event.Fingerprint = ""
 	event.Details = details(probe, response.StatusCode, latency, "", response.TLS, observedAt)
 	return event
 }

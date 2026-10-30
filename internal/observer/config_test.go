@@ -48,6 +48,13 @@ func TestHTTPProbeRejectsUnsafeTLSExpiryThresholds(t *testing.T) {
 	}
 }
 
+func TestConfigRejectsReservedWatchdogSource(t *testing.T) {
+	cfg := Config{EchoURL: "https://echo.test", Source: "echo-watchdog", Probes: []HTTPProbe{{Name: "web", ServiceID: "svc_web", URL: "https://web.test/health"}}}
+	if _, err := normalizeConfig(cfg); err == nil || !strings.Contains(err.Error(), "reserved") {
+		t.Fatalf("reserved observer source was accepted: %v", err)
+	}
+}
+
 func TestConfigRejectsDuplicateServiceAndCredentials(t *testing.T) {
 	_, err := normalizeConfig(Config{
 		EchoURL:           "https://echo.test",

@@ -38,13 +38,13 @@ Send `POST /webhooks/monitor` with `Content-Type: application/json` and an `X-Ec
 }
 ```
 
-Allowed statuses are `healthy`, `degraded`, `unhealthy`, and `unknown`. Allowed severities are `info`, `warning`, and `critical`. A stable fingerprint should identify the condition, not a particular metric value. Echo generates a stable fallback when a failing event omits one.
+Allowed statuses are `healthy`, `degraded`, `unhealthy`, and `unknown`. Allowed severities are `info`, `warning`, and `critical`. A stable fingerprint should identify the condition, not a particular metric value. Echo generates a stable fallback when a failing event omits one. `echo-watchdog` is reserved as an internal source and is rejected at the signed webhook.
 
-`eventId` is an idempotency key. Retrying the exact event does not create another signal or notification. A degraded or unhealthy signal opens or updates its fingerprinted alert. A healthy signal resolves all older open alerts for that service; delayed healthy events cannot resolve a newer outage.
+`eventId` is an idempotency key. Retrying the exact event does not create another signal or notification. A degraded or unhealthy signal opens or updates its fingerprinted alert. A healthy signal that repeats a fingerprint resolves only that older condition; an empty fingerprint retains the aggregate-probe behavior and resolves all older conditions for the service. Delayed evidence cannot resolve a newer alert. The bundled observer always supplies one stable fingerprint per aggregate probe so an HTTP recovery cannot accidentally clear an unrelated host, container, or backup condition.
 
 ## Missing observer detection
 
-Echo's internal watchdog checks heartbeat-enabled services every `ECHO_MONITOR_WATCHDOG_INTERVAL` (30 seconds by default). If no non-watchdog signal arrives within the service's timeout, Echo opens an `observer-silent` alert. High and critical services produce a critical alert; low and medium services produce a warning. A later healthy observer event resolves it, and a second silence period reopens the same alert without notification noise.
+Echo's internal watchdog checks heartbeat-enabled services every `ECHO_MONITOR_WATCHDOG_INTERVAL` (30 seconds by default). If no non-watchdog signal arrives within the service's timeout, Echo opens an `observer-silent` alert. High and critical services produce a critical alert; low and medium services produce a warning. Any newer accepted observer event resolves the silence condition even when it reports that the workload is still unhealthy; that workload condition remains open under its own fingerprint. A delayed event cannot clear newer silence, and a second silence period reopens the same alert without notification noise.
 
 The first timeout starts after the service policy is saved, giving a newly configured observer a full grace window. Watchdog events never count as observer heartbeats. Disabling the heartbeat policy or service resolves only the silence alert; it does not clear unrelated application-health alerts.
 
@@ -90,7 +90,7 @@ On Linux, `systemProbes` read only `/proc/meminfo`, `/proc/loadavg`, `/proc/upti
 
 Run a system probe as a host service when host metrics are intended. If it runs inside a container, its kernel and filesystem namespace determine what it measures; do not assume containerized readings represent the host. The observer requires no root privileges, shell, Docker socket, or SSH credential.
 
-Each Echo service may have one aggregate probe across the HTTP, system, and Docker probe classes. Use separate service-catalogue entries for the host, each container, and each application health endpoint. Expose an aggregate readiness endpoint when one application depends on several internal checks.
+Each Echo service may have one aggregate probe across the HTTP, system, Docker, and freshness probe classes. Use separate service-catalogue entries for the host, each container, each backup stream, and each application health endpoint. Each built-in probe retains its stable fingerprint on healthy evidence, allowing recovery to resolve that probe's lifecycle only. Expose an aggregate readiness endpoint when one application depends on several internal checks.
 
 `dockerProbes` inspect the lifecycle of one explicitly named container through the bundled `echo-docker-proxy`. Echo records only the normalized running/paused/restarting/dead/OOM state, exit code, Docker health status and failing streak, restart count, and sanitized timestamps. The proxy discards environment variables, labels, mounts, logs, health-check output, image configuration, and raw daemon errors before the observer sees the response. Both processes cap inspect responses at one MiB and never copy unrecognized state text into alerts.
 

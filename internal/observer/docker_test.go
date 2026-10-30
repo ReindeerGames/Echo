@@ -34,7 +34,7 @@ func TestDockerProbeSendsSanitizedHealthyEvidence(t *testing.T) {
 	if err := service.RunOnce(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if received.Status != "healthy" || received.Severity != "info" || !strings.Contains(received.Summary, "restarts 2") || strings.Contains(string(received.Details), "must-not-leak") {
+	if received.Status != "healthy" || received.Severity != "info" || received.Fingerprint != "container-health" || !strings.Contains(received.Summary, "restarts 2") || strings.Contains(string(received.Details), "must-not-leak") {
 		t.Fatalf("unexpected Docker event: %#v", received)
 	}
 }
@@ -50,10 +50,10 @@ func TestDockerProbeClassifiesLifecycleWithoutTrustingRawText(t *testing.T) {
 		fingerprint string
 		contains    string
 	}{
-		{name: "oom", inspect: dockerInspect{State: dockerState{Status: "running", Running: true, OOMKilled: true}}, status: "unhealthy", severity: "critical", fingerprint: "container-runtime", contains: "OOM-killed"},
-		{name: "paused", inspect: dockerInspect{State: dockerState{Status: "paused", Running: true, Paused: true}}, status: "degraded", severity: "warning", fingerprint: "container-runtime", contains: "paused"},
+		{name: "oom", inspect: dockerInspect{State: dockerState{Status: "running", Running: true, OOMKilled: true}}, status: "unhealthy", severity: "critical", fingerprint: "container-health", contains: "OOM-killed"},
+		{name: "paused", inspect: dockerInspect{State: dockerState{Status: "paused", Running: true, Paused: true}}, status: "degraded", severity: "warning", fingerprint: "container-health", contains: "paused"},
 		{name: "health failure", inspect: dockerInspect{State: dockerState{Status: "running", Running: true, Health: &dockerHealth{Status: "unhealthy", FailingStreak: 3}}}, status: "unhealthy", severity: "critical", fingerprint: "container-health", contains: "streak 3"},
-		{name: "untrusted state", inspect: dockerInspect{State: dockerState{Status: "SECRET_TEXT", Running: false}}, status: "unhealthy", severity: "critical", fingerprint: "container-runtime", contains: "unknown"},
+		{name: "untrusted state", inspect: dockerInspect{State: dockerState{Status: "SECRET_TEXT", Running: false}}, status: "unhealthy", severity: "critical", fingerprint: "container-health", contains: "unknown"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -75,7 +75,7 @@ func TestDockerProxyFailureProducesAlertableGenericEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := service.observeDocker(t.Context(), service.config.DockerProbes[0])
-	if event.Status != "unhealthy" || event.Fingerprint != "container-observer" || strings.Contains(string(event.Details), "socket") || !strings.Contains(string(event.Details), "inspect_status") {
+	if event.Status != "unhealthy" || event.Fingerprint != "container-health" || strings.Contains(string(event.Details), "socket") || !strings.Contains(string(event.Details), "inspect_status") {
 		t.Fatalf("unexpected proxy failure event: %#v", event)
 	}
 }

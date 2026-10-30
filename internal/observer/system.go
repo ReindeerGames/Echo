@@ -39,7 +39,7 @@ func (o *Observer) observeSystem(_ context.Context, probe SystemProbe) domain.Mo
 		Status:      "unhealthy",
 		Severity:    "critical",
 		Summary:     probe.Name + " host resource metrics are unavailable",
-		Fingerprint: "host-metrics-unavailable",
+		Fingerprint: "host-resources",
 		ObservedAt:  observedAt,
 	}
 	snapshot, err := o.system.Snapshot(probe.DiskPath)
@@ -76,7 +76,6 @@ func (o *Observer) observeSystem(_ context.Context, probe SystemProbe) domain.Mo
 		event.Status = "healthy"
 		event.Severity = "info"
 		event.Summary = fmt.Sprintf("%s resources are healthy (disk %.1f%%, memory %.1f%%, load %.2f/CPU)", probe.Name, snapshot.DiskUsedPercent, snapshot.MemoryUsedPercent, snapshot.Load1PerCPU)
-		event.Fingerprint = ""
 		return event
 	}
 	parts := make([]string, 0, len(breaches))

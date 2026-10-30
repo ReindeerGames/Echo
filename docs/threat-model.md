@@ -28,6 +28,8 @@ Message text, GitHub metadata, repository contents, and operator-entered service
 
 Service investigation is correlation over existing normalized evidence, not remote collection. Signal, alert, dependency, incident, deployment, and repository collections have independent caps and truncation flags. Monitoring details retain only allowlisted typed fields, dependency and repository checks remain within the service's configured project, and upstream errors are reduced to availability state. The tool has no log, process, filesystem, Docker, shell, SSH, or mutation capability.
 
+The signed monitoring webhook rejects Echo's reserved watchdog source. Healthy evidence with a fingerprint can resolve only that older condition, while an empty fingerprint is an explicit aggregate recovery. Any fresh non-watchdog event independently resolves observer silence, so restoring evidence transport cannot either conceal a continuing workload failure or leave a stale silence alert behind.
+
 ### Authorization
 
 The deterministic policy engine checks incident state, repository project membership, read-only status, environment ownership, protected-environment status, and immutable artifact provenance. Every approval has an expiry, action hash, one-time nonce, actor, incident, exact action type, and hashes of the repository and environment configuration snapshots. A configuration change invalidates the queued action instead of silently changing its meaning.

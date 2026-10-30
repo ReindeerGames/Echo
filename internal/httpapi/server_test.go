@@ -170,6 +170,21 @@ func TestMonitorWebhookRejectsUnsignedPayload(t *testing.T) {
 	}
 }
 
+func TestMonitorWebhookRejectsReservedWatchdogSource(t *testing.T) {
+	const secret = "test-monitor-webhook-secret"
+	body := []byte(`{"eventId":"forged-watchdog","serviceId":"svc_123","source":"echo-watchdog","status":"unhealthy","severity":"critical","summary":"forged silence","fingerprint":"observer-silent"}`)
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	server := &Server{cfg: config.Config{Monitor: config.Monitor{WebhookSecret: secret}}}
+	request := httptest.NewRequest(http.MethodPost, "/webhooks/monitor", strings.NewReader(string(body)))
+	request.Header.Set("X-Echo-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
+	response := httptest.NewRecorder()
+	server.monitorWebhook(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "source is reserved") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestServiceRejectsUnsafeHeartbeatTimeout(t *testing.T) {
 	server := &Server{}
 	request := httptest.NewRequest("POST", "/api/v1/services", strings.NewReader(`{"projectId":"prj_1","key":"api","name":"API","heartbeatTimeoutSeconds":30,"metadata":{}}`))

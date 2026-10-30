@@ -163,10 +163,7 @@ func TestHTTPSProbeReportsCertificateExpiryBeforeOutage(t *testing.T) {
 			if !strings.Contains(string(event.Details), `"expiresAt":"2026-`) || !strings.Contains(string(event.Details), `"tlsWarningDays":30`) || !strings.Contains(string(event.Details), `"tlsCriticalDays":7`) {
 				t.Fatalf("TLS evidence missing from event: %s", event.Details)
 			}
-			if test.wantStatus == "healthy" && event.Fingerprint != "" {
-				t.Fatalf("healthy certificate retained an alert fingerprint: %#v", event)
-			}
-			if test.wantStatus != "healthy" && event.Fingerprint != "http-health" {
+			if event.Fingerprint != "http-health" {
 				t.Fatalf("certificate alert did not use aggregate HTTP fingerprint: %#v", event)
 			}
 		})
