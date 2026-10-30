@@ -104,6 +104,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("GET /api/v1/monitor/alerts", s.serviceAlerts)
 	protected.HandleFunc("GET /api/v1/assistant/conversations", s.conversations)
 	protected.HandleFunc("GET /api/v1/assistant/conversations/{id}", s.conversation)
+	protected.HandleFunc("GET /api/v1/jobs", s.jobs)
 	protected.HandleFunc("GET /api/v1/deployments", s.deployments)
 	protected.HandleFunc("GET /api/v1/incidents", s.incidents)
 	protected.HandleFunc("GET /api/v1/incidents/{id}", s.incident)
@@ -446,6 +447,16 @@ func monitorEventLimit(raw string) (int, error) {
 
 func (s *Server) serviceAlerts(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListServiceAlerts(r.Context(), r.URL.Query().Get("status"))
+	respond(w, items, err)
+}
+
+func (s *Server) jobs(w http.ResponseWriter, r *http.Request) {
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if status != "" && !oneOf(status, "queued", "running", "failed", "dead", "complete") {
+		writeError(w, http.StatusBadRequest, "invalid_status", "status must be queued, running, failed, dead, or complete")
+		return
+	}
+	items, err := s.store.ListJobs(r.Context(), status, 100)
 	respond(w, items, err)
 }
 

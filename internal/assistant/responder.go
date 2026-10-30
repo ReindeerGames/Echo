@@ -23,6 +23,7 @@ type Reader interface {
 	ListServices(context.Context, string) ([]domain.Service, error)
 	ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error)
 	ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error)
+	ListJobs(context.Context, string, int) ([]domain.Job, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
 }
@@ -71,6 +72,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_open_alerts", "List current open service alerts with severity and last observed time.", schema(nil, nil)),
 		ai.FunctionTool("list_services", "List services. Use an empty query for all services or a name/key fragment to filter.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Service name or key fragment, or empty string."}}, []string{"query"})),
 		ai.FunctionTool("get_service", "Get one service with its open alerts and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
+		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_incident", "Get an incident and its latest evidence-backed diagnosis by exact incident ID.", schema(map[string]any{"incident_id": map[string]string{"type": "string"}}, []string{"incident_id"})),
 	}
@@ -103,7 +105,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 				enabled++
 			}
 		}
-		return marshal(map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "running_jobs": dashboard.RunningJobs, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages})
+		return marshal(map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages})
 	case "get_open_alerts":
 		alerts, err := r.reader.ListServiceAlerts(ctx, "open")
 		if err != nil {
@@ -231,6 +233,34 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			views = append(views, map[string]any{"key": project.Key, "name": project.Name, "description": truncateRunes(project.Description, 500), "enabled": project.Enabled, "repositories": repos, "repository_count": repositoryCount, "repositories_truncated": repositoryCount > len(repos)})
 		}
 		return marshal(map[string]any{"projects": views, "count": len(projects), "truncated": len(projects) > len(views)})
+	case "get_work_queue":
+		jobs, err := r.reader.ListJobs(ctx, "", 100)
+		if err != nil {
+			return "", err
+		}
+		views := make([]map[string]any, 0, min(len(jobs), 50))
+		active := 0
+		for _, job := range jobs {
+			if job.Status == "complete" {
+				continue
+			}
+			active++
+			if len(views) == 50 {
+				continue
+			}
+			view := map[string]any{"id": job.ID, "type": job.Type, "status": job.Status, "attempts": job.Attempts, "max_attempts": job.MaxAttempts, "available_at": job.AvailableAt, "updated_at": job.UpdatedAt}
+			if job.LockedUntil != nil {
+				view["locked_until"] = job.LockedUntil
+			}
+			if incidentID := jobIncidentID(job.Payload); incidentID != "" {
+				view["incident_id"] = incidentID
+			}
+			if job.LastError != "" {
+				view["error_category"] = jobErrorCategory(job.LastError)
+			}
+			views = append(views, view)
+		}
+		return marshal(map[string]any{"jobs": views, "count": active, "truncated": active > len(views)})
 	case "get_incident":
 		var arguments struct {
 			IncidentID string `json:"incident_id"`
@@ -439,6 +469,8 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.alerts(ctx)
 	case "services":
 		answer, err = r.services(ctx)
+	case "jobs":
+		answer, err = r.jobs(ctx)
 	case "projects":
 		answer, err = r.projects(ctx)
 	case "service":
@@ -447,7 +479,7 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “projects”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “projects”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -471,6 +503,9 @@ func classify(text string) (string, string) {
 	}
 	if value == "services" || value == "apps" || value == "applications" || value == "list services" || value == "list apps" {
 		return "services", ""
+	}
+	if value == "jobs" || value == "work queue" || value == "queue" || value == "failed jobs" || value == "worker jobs" {
+		return "jobs", ""
 	}
 	if value == "projects" || value == "repos" || value == "repositories" || value == "list projects" {
 		return "projects", ""
@@ -504,7 +539,7 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 	if dashboard.DeadWhatsAppMessages > 0 {
 		delivery += " · needs attention in the control plane"
 	}
-	return fmt.Sprintf("Echo operational status\n%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nRunning jobs: %d\nFailed deployments: %d\n%s", state, enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.RunningJobs, dashboard.FailedDeployments, delivery), nil
+	return fmt.Sprintf("Echo operational status\n%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nJobs: %d running · %d retrying · %d dead\nFailed deployments: %d\n%s", state, enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.RunningJobs, dashboard.RetryingJobs, dashboard.DeadJobs, dashboard.FailedDeployments, delivery), nil
 }
 
 func (r *Responder) alerts(ctx context.Context) (string, error) {
@@ -558,6 +593,84 @@ func (r *Responder) services(ctx context.Context) (string, error) {
 		lines = append(lines, fmt.Sprintf("• %s (%s, %s) — %s", service.Name, service.Kind, service.Criticality, state))
 	}
 	return fmt.Sprintf("Service catalogue (%d)\n\n%s", len(services), strings.Join(lines, "\n")), nil
+}
+
+func (r *Responder) jobs(ctx context.Context) (string, error) {
+	jobs, err := r.reader.ListJobs(ctx, "", 100)
+	if err != nil {
+		return "", err
+	}
+	var active []domain.Job
+	for _, job := range jobs {
+		if job.Status != "complete" {
+			active = append(active, job)
+		}
+	}
+	if len(active) == 0 {
+		return "Echo work queue is clear. No queued, running, retrying, or dead jobs.", nil
+	}
+	lines := make([]string, 0, min(len(active), 10))
+	for index, job := range active {
+		if index == 10 {
+			lines = append(lines, fmt.Sprintf("…and %d more in the control plane.", len(active)-index))
+			break
+		}
+		status := job.Status
+		if status == "failed" {
+			status = "retrying"
+		}
+		context := ""
+		if incidentID := jobIncidentID(job.Payload); incidentID != "" {
+			context = " · " + incidentID
+		}
+		errorState := ""
+		if job.LastError != "" {
+			errorState = " · " + jobErrorCategory(job.LastError)
+		}
+		lines = append(lines, fmt.Sprintf("• %s · %s%s · attempt %d/%d%s", strings.ToUpper(status), strings.ReplaceAll(job.Type, "_", " "), context, job.Attempts, job.MaxAttempts, errorState))
+	}
+	return fmt.Sprintf("Echo work queue (%d active)\n\n%s", len(active), strings.Join(lines, "\n")), nil
+}
+
+func jobIncidentID(payload json.RawMessage) string {
+	if len(payload) == 0 || len(payload) > 64<<10 {
+		return ""
+	}
+	var value struct {
+		IncidentID string `json:"incidentId"`
+	}
+	if json.Unmarshal(payload, &value) != nil || len(value.IncidentID) > 80 {
+		return ""
+	}
+	for _, character := range value.IncidentID {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' {
+			continue
+		}
+		return ""
+	}
+	return value.IncidentID
+}
+
+func jobErrorCategory(value string) string {
+	value = strings.ToLower(value)
+	switch {
+	case strings.Contains(value, "deadline"), strings.Contains(value, "timeout"), strings.Contains(value, "timed out"):
+		return "timeout"
+	case strings.Contains(value, "rate limit"), strings.Contains(value, "too many requests"), strings.Contains(value, "status 429"):
+		return "rate_limited"
+	case strings.Contains(value, "unauthorized"), strings.Contains(value, "forbidden"), strings.Contains(value, "status 401"), strings.Contains(value, "status 403"):
+		return "authorization_failed"
+	case strings.Contains(value, "not configured"), strings.Contains(value, "configuration"):
+		return "configuration_missing"
+	case strings.Contains(value, "not found"), strings.Contains(value, "status 404"):
+		return "dependency_not_found"
+	case strings.Contains(value, "conflict"), strings.Contains(value, "status 409"), strings.Contains(value, "changed"):
+		return "state_conflict"
+	case strings.Contains(value, "lease expired"):
+		return "lease_expired"
+	default:
+		return "execution_failed"
+	}
 }
 
 func (r *Responder) service(ctx context.Context, query string) (string, error) {
@@ -714,7 +827,7 @@ func matchServices(services []domain.Service, query string) []domain.Service {
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• projects — project and repository map\n• incident <id> — incident and diagnosis\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• projects — project and repository map\n• incident <id> — incident and diagnosis\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

@@ -172,11 +172,13 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
       (SELECT COUNT(*) FROM echo_service_alerts WHERE alert_status='open'),
       (SELECT COUNT(*) FROM echo_approvals WHERE status='pending' AND expires_at > NOW(6)),
       (SELECT COUNT(*) FROM echo_jobs WHERE status='running'),
+	  (SELECT COUNT(*) FROM echo_jobs WHERE status='failed'),
+	  (SELECT COUNT(*) FROM echo_jobs WHERE status='dead'),
       (SELECT COUNT(*) FROM echo_deployments WHERE status='failed'),
 	  (SELECT COUNT(*) FROM echo_projects WHERE enabled=TRUE),
 	  (SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE status IN ('queued','sending','failed')),
 	  (SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE status='dead')`).Scan(
-		&out.OpenIncidents, &out.OpenAlerts, &out.PendingApprovals, &out.RunningJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages,
+		&out.OpenIncidents, &out.OpenAlerts, &out.PendingApprovals, &out.RunningJobs, &out.RetryingJobs, &out.DeadJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages,
 	)
 	return out, err
 }
@@ -1210,6 +1212,40 @@ func (s *Store) CompleteJob(ctx context.Context, jobID string, attempt int, jobE
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE echo_jobs SET status=IF(attempts>=max_attempts,'dead','failed'),locked_by='',locked_until=NULL,last_error=?,available_at=DATE_ADD(NOW(6),INTERVAL LEAST(attempts*attempts,300) SECOND) WHERE id=? AND status='running' AND attempts=?`, truncate(jobErr.Error(), 1000), jobID, attempt)
 	return err
+}
+
+func (s *Store) ListJobs(ctx context.Context, status string, limit int) ([]domain.Job, error) {
+	if limit < 1 || limit > 200 {
+		limit = 50
+	}
+	query := `SELECT id,job_type,payload_json,status,attempts,max_attempts,available_at,locked_by,locked_until,last_error,created_at,updated_at FROM echo_jobs`
+	args := []any{}
+	if status == "queued" || status == "running" || status == "failed" || status == "dead" || status == "complete" {
+		query += ` WHERE status=?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY FIELD(status,'dead','failed','running','queued','complete'),updated_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Job
+	for rows.Next() {
+		var item domain.Job
+		if err := rows.Scan(&item.ID, &item.Type, &item.Payload, &item.Status, &item.Attempts, &item.MaxAttempts, &item.AvailableAt, &item.LockedBy, &item.LockedUntil, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		var context struct {
+			IncidentID string `json:"incidentId"`
+		}
+		if json.Unmarshal(item.Payload, &context) == nil && len(context.IncidentID) <= 80 {
+			item.IncidentID = context.IncidentID
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) Audit(ctx context.Context, actorType, actorID, action, resourceType, resourceID, outcome string, metadata any) error {

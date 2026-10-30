@@ -252,6 +252,8 @@ type Dashboard struct {
 	OpenAlerts              int `json:"openAlerts"`
 	PendingApprovals        int `json:"pendingApprovals"`
 	RunningJobs             int `json:"runningJobs"`
+	RetryingJobs            int `json:"retryingJobs"`
+	DeadJobs                int `json:"deadJobs"`
 	FailedDeployments       int `json:"failedDeployments"`
 	EnabledProjects         int `json:"enabledProjects"`
 	PendingWhatsAppMessages int `json:"pendingWhatsAppMessages"`
@@ -308,11 +310,15 @@ type OutboundMessage struct {
 type Job struct {
 	ID          string          `json:"id"`
 	Type        string          `json:"type"`
-	Payload     json.RawMessage `json:"payload"`
+	Payload     json.RawMessage `json:"-"`
+	IncidentID  string          `json:"incidentId,omitempty"`
 	Status      string          `json:"status"`
 	Attempts    int             `json:"attempts"`
 	MaxAttempts int             `json:"maxAttempts"`
+	AvailableAt time.Time       `json:"availableAt"`
 	LockedBy    string          `json:"lockedBy,omitempty"`
 	LockedUntil *time.Time      `json:"lockedUntil,omitempty"`
+	LastError   string          `json:"lastError,omitempty"`
 	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
 }

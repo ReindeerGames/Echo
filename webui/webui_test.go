@@ -75,6 +75,21 @@ func TestWhatsAppDeliveryFailuresAreVisible(t *testing.T) {
 	}
 }
 
+func TestWorkerQueueFailuresAreVisibleWithoutRetryControl(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/jobs", "retryingJobs", "deadJobs", "Work queue", "Job queue", "dead work is never retried blindly"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("worker queue health is missing %q", expected)
+		}
+	}
+	if strings.Contains(body, "data-retry-job") {
+		t.Fatal("worker queue must not expose a blind retry control")
+	}
+}
+
 func TestMonitoringSupportsServiceEvidenceAndPolicyEditing(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

@@ -20,6 +20,7 @@ type fakeReader struct {
 	services  []domain.Service
 	alerts    []domain.ServiceAlert
 	events    []domain.MonitorEvent
+	jobs      []domain.Job
 }
 
 type fakeToolModel struct{}
@@ -58,6 +59,7 @@ func (f fakeReader) ListServiceAlerts(context.Context, string) ([]domain.Service
 func (f fakeReader) ListMonitorEvents(context.Context, string, int) ([]domain.MonitorEvent, error) {
 	return f.events, nil
 }
+func (f fakeReader) ListJobs(context.Context, string, int) ([]domain.Job, error) { return f.jobs, nil }
 func (f fakeReader) GetIncident(context.Context, string) (domain.Incident, error) {
 	return domain.Incident{}, store.ErrNotFound
 }
@@ -73,6 +75,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"what can you do?":    "help",
 		"list projects":       "projects",
 		"incident inc_123456": "incident",
+		"failed jobs":         "jobs",
 	}
 	for input, expected := range tests {
 		got, _ := classify(input)
@@ -85,14 +88,14 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 func TestStatusAndServiceAnswersUseStoredEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	reader := fakeReader{
-		dashboard: domain.Dashboard{OpenAlerts: 1, OpenIncidents: 2, PendingApprovals: 1, PendingWhatsAppMessages: 3, DeadWhatsAppMessages: 1},
+		dashboard: domain.Dashboard{OpenAlerts: 1, OpenIncidents: 2, PendingApprovals: 1, RunningJobs: 1, RetryingJobs: 2, DeadJobs: 1, PendingWhatsAppMessages: 3, DeadWhatsAppMessages: 1},
 		services:  []domain.Service{{ID: "svc_1", Key: "nudgie-web", Name: "Nudgie web", ProjectName: "Nudgie", Kind: "application", Criticality: "high", Enabled: true}},
 		alerts:    []domain.ServiceAlert{{ServiceID: "svc_1", ServiceName: "Nudgie web", Severity: "critical", Summary: "Health check failed"}},
 		events:    []domain.MonitorEvent{{ServiceID: "svc_1", ServiceName: "Nudgie web", Status: "unhealthy", Source: "docker", Summary: "Health check failed", ObservedAt: now}},
 	}
 	responder := New(reader)
 	status, intent, err := responder.Answer(context.Background(), "status")
-	if err != nil || intent != "status" || !containsAll(status, "1 runtime alert", "Open incidents: 2", "WhatsApp delivery: 3 pending · 1 dead", "needs attention") {
+	if err != nil || intent != "status" || !containsAll(status, "1 runtime alert", "Open incidents: 2", "Jobs: 1 running · 2 retrying · 1 dead", "WhatsApp delivery: 3 pending · 1 dead", "needs attention") {
 		t.Fatalf("unexpected status answer intent=%s err=%v body=%s", intent, err, status)
 	}
 	service, intent, err := responder.Answer(context.Background(), "service nudgie-web")
@@ -175,6 +178,23 @@ func TestToolArgumentsRejectTrailingData(t *testing.T) {
 	}
 	if err := decodeArguments(json.RawMessage(`{"service":"web"}{"service":"other"}`), &arguments); err == nil {
 		t.Fatal("trailing tool arguments were accepted")
+	}
+}
+
+func TestWorkQueueAnswersDoNotExposeRawErrorsOrPayloads(t *testing.T) {
+	now := time.Now().UTC()
+	reader := fakeReader{jobs: []domain.Job{{ID: "job_1", Type: "prepare_patch", Payload: json.RawMessage(`{"incidentId":"inc_123","token":"must-not-leak"}`), Status: "dead", Attempts: 5, MaxAttempts: 5, LastError: "request status 403 bearer must-not-leak", AvailableAt: now, UpdatedAt: now}}}
+	responder := New(reader)
+	output, err := responder.executeTool(context.Background(), "get_work_queue", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(output, `"incident_id":"inc_123"`, `"error_category":"authorization_failed"`, `"status":"dead"`) || strings.Contains(output, "must-not-leak") || strings.Contains(output, "token") || strings.Contains(output, "bearer") {
+		t.Fatalf("unsafe work queue output: %s", output)
+	}
+	answer, intent, err := responder.Answer(context.Background(), "jobs")
+	if err != nil || intent != "jobs" || !containsAll(answer, "DEAD", "prepare patch", "inc_123", "authorization_failed") || strings.Contains(answer, "must-not-leak") {
+		t.Fatalf("unexpected deterministic jobs answer intent=%s err=%v body=%s", intent, err, answer)
 	}
 }
 

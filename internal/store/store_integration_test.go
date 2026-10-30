@@ -385,7 +385,7 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	}
 
 	jobID := id.New("job")
-	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json,max_attempts) VALUES(?,?,?,?)`, jobID, "test", `{}`, 3); err != nil {
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json,max_attempts) VALUES(?,?,?,?)`, jobID, "test", `{"incidentId":"inc_lease"}`, 3); err != nil {
 		t.Fatal(err)
 	}
 	firstJob, err := st.ClaimJob(ctx, "worker-a", time.Minute)
@@ -421,6 +421,14 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 	var jobStatus, jobError string
 	if err := st.db.QueryRowContext(ctx, `SELECT status,last_error FROM echo_jobs WHERE id=?`, jobID).Scan(&jobStatus, &jobError); err != nil || jobStatus != "dead" || !strings.Contains(jobError, "lease expired") {
 		t.Fatalf("final job lease not finalized: status=%q error=%q err=%v", jobStatus, jobError, err)
+	}
+	jobs, err := st.ListJobs(ctx, "dead", 10)
+	if err != nil || len(jobs) != 1 || jobs[0].ID != jobID || jobs[0].IncidentID != "inc_lease" || jobs[0].LastError == "" {
+		t.Fatalf("dead job was not observable: jobs=%#v err=%v", jobs, err)
+	}
+	dashboard, err := st.Dashboard(ctx)
+	if err != nil || dashboard.DeadJobs != 1 || dashboard.RetryingJobs != 0 || dashboard.RunningJobs != 0 {
+		t.Fatalf("dashboard job counts are wrong: dashboard=%#v err=%v", dashboard, err)
 	}
 }
 
