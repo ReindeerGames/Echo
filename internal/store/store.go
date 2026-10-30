@@ -171,6 +171,7 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
       (SELECT COUNT(*) FROM echo_incidents WHERE status NOT IN ('resolved','closed')),
       (SELECT COUNT(*) FROM echo_service_alerts WHERE alert_status='open'),
       (SELECT COUNT(*) FROM echo_approvals WHERE status='pending' AND expires_at > NOW(6)),
+	  (SELECT COUNT(*) FROM echo_jobs WHERE status='queued'),
       (SELECT COUNT(*) FROM echo_jobs WHERE status='running'),
 	  (SELECT COUNT(*) FROM echo_jobs WHERE status='failed'),
 	  (SELECT COUNT(*) FROM echo_jobs WHERE status='dead'),
@@ -178,7 +179,7 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
 	  (SELECT COUNT(*) FROM echo_projects WHERE enabled=TRUE),
 	  (SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE status IN ('queued','sending','failed')),
 	  (SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE status='dead')`).Scan(
-		&out.OpenIncidents, &out.OpenAlerts, &out.PendingApprovals, &out.RunningJobs, &out.RetryingJobs, &out.DeadJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages,
+		&out.OpenIncidents, &out.OpenAlerts, &out.PendingApprovals, &out.QueuedJobs, &out.RunningJobs, &out.RetryingJobs, &out.DeadJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages,
 	)
 	return out, err
 }

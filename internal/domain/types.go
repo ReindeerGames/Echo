@@ -251,6 +251,7 @@ type Dashboard struct {
 	OpenIncidents           int `json:"openIncidents"`
 	OpenAlerts              int `json:"openAlerts"`
 	PendingApprovals        int `json:"pendingApprovals"`
+	QueuedJobs              int `json:"queuedJobs"`
 	RunningJobs             int `json:"runningJobs"`
 	RetryingJobs            int `json:"retryingJobs"`
 	DeadJobs                int `json:"deadJobs"`

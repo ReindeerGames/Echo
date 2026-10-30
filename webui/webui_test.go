@@ -80,7 +80,7 @@ func TestWorkerQueueFailuresAreVisibleWithoutRetryControl(t *testing.T) {
 	response := httptest.NewRecorder()
 	Handler().ServeHTTP(response, request)
 	body := response.Body.String()
-	for _, expected := range []string{"/api/v1/jobs", "retryingJobs", "deadJobs", "Work queue", "Job queue", "dead work is never retried blindly"} {
+	for _, expected := range []string{"/api/v1/jobs", "queuedJobs", "retryingJobs", "deadJobs", "Work queue", "Job queue", "dead work is never retried blindly"} {
 		if response.Code != 200 || !strings.Contains(body, expected) {
 			t.Fatalf("worker queue health is missing %q", expected)
 		}

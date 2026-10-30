@@ -427,7 +427,7 @@ func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
 		t.Fatalf("dead job was not observable: jobs=%#v err=%v", jobs, err)
 	}
 	dashboard, err := st.Dashboard(ctx)
-	if err != nil || dashboard.DeadJobs != 1 || dashboard.RetryingJobs != 0 || dashboard.RunningJobs != 0 {
+	if err != nil || dashboard.DeadJobs != 1 || dashboard.RetryingJobs != 0 || dashboard.RunningJobs != 0 || dashboard.QueuedJobs != 0 {
 		t.Fatalf("dashboard job counts are wrong: dashboard=%#v err=%v", dashboard, err)
 	}
 
