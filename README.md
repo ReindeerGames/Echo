@@ -111,7 +111,7 @@ Echo constructs the database DSNs internally, so passwords may contain DSN-reser
 
 1. Use **Guided setup** to pair the dedicated Echo number.
 2. Create or select a **Project**. A project is the hub that owns the team’s group bindings, repository graph and deployment environments.
-3. In **Guided setup**, enter a fine-grained GitHub token and add selected **Repositories** as read-only. This is required for code-aware diagnosis, but not for a message-intake smoke test.
+3. In **Guided setup**, enter a fine-grained GitHub token, discover the repositories visible to that token, and link selected **Repositories** as read-only. Discovery is bounded to 500 results and returns only repository identity, default branch, visibility, archive/fork state, and coarse write permission. Manual entry remains available. Repository access is required for code-aware diagnosis, but not for a message-intake smoke test.
 4. In WhatsApp, add Echo’s connected account to the partner group. Group membership cannot be changed from Echo.
 5. Return to **Guided setup → Bind group**, discover the joined group and bind it to the project with real mentions required. Manual JID entry remains available for recovery.
 6. Validate report intake and read-only diagnosis.

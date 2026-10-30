@@ -99,6 +99,65 @@ func TestConfigureTokenRejectsClassicToken(t *testing.T) {
 	}
 }
 
+func TestListAccessibleRepositoriesIsBoundedAndUsesTokenScope(t *testing.T) {
+	var pages []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/user/repos" || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer github_pat_test" {
+			t.Errorf("authorization header missing")
+		}
+		if r.URL.Query().Get("affiliation") != "owner,collaborator,organization_member" || r.URL.Query().Get("per_page") != "50" || r.URL.Query().Get("sort") != "full_name" {
+			t.Errorf("unsafe repository discovery query: %s", r.URL.RawQuery)
+		}
+		page := r.URL.Query().Get("page")
+		pages = append(pages, page)
+		if page == "1" {
+			items := make([]map[string]any, 50)
+			for index := range items {
+				items[index] = map[string]any{"name": fmt.Sprintf("repo-%03d", index), "default_branch": "main", "private": true, "owner": map[string]string{"login": "ReindeerGames"}, "permissions": map[string]bool{"push": false}}
+			}
+			writeJSON(t, w, items)
+			return
+		}
+		writeJSON(t, w, []map[string]any{{"name": "shared", "default_branch": "develop", "private": false, "archived": true, "fork": true, "owner": map[string]string{"login": "Partner"}, "permissions": map[string]bool{"maintain": true}}})
+	}))
+	defer server.Close()
+
+	client := newAuthenticatedTestClient(t, server)
+	discovery, err := client.ListAccessibleRepositories(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(discovery.Repositories) != 51 || discovery.Truncated || strings.Join(pages, ",") != "1,2" {
+		t.Fatalf("unexpected discovery: count=%d truncated=%v pages=%v", len(discovery.Repositories), discovery.Truncated, pages)
+	}
+	last := discovery.Repositories[50]
+	if last.FullName != "Partner/shared" || last.DefaultBranch != "develop" || !last.Archived || !last.Fork || !last.CanWrite {
+		t.Fatalf("unexpected discovered repository: %#v", last)
+	}
+}
+
+func TestListAccessibleRepositoriesStopsAtFiveHundred(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		items := make([]map[string]any, 50)
+		for index := range items {
+			items[index] = map[string]any{"name": fmt.Sprintf("repo-%s-%02d", r.URL.Query().Get("page"), index), "default_branch": "main", "owner": map[string]string{"login": "LargeOrg"}}
+		}
+		writeJSON(t, w, items)
+	}))
+	defer server.Close()
+
+	discovery, err := newAuthenticatedTestClient(t, server).ListAccessibleRepositories(context.Background())
+	if err != nil || len(discovery.Repositories) != 500 || !discovery.Truncated || requests != 10 {
+		t.Fatalf("unbounded discovery: count=%d truncated=%v requests=%d err=%v", len(discovery.Repositories), discovery.Truncated, requests, err)
+	}
+}
+
 func newAuthenticatedTestClient(t *testing.T, server *httptest.Server) *Client {
 	t.Helper()
 	backend := &tokenStore{}

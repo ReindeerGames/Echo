@@ -65,6 +65,22 @@ type RepositoryStatus struct {
 	WorkflowRuns    []RepositoryWorkflowRun `json:"workflowRuns"`
 }
 
+type AccessibleRepository struct {
+	Owner         string `json:"owner"`
+	Name          string `json:"name"`
+	FullName      string `json:"fullName"`
+	DefaultBranch string `json:"defaultBranch"`
+	Private       bool   `json:"private"`
+	Archived      bool   `json:"archived"`
+	Fork          bool   `json:"fork"`
+	CanWrite      bool   `json:"canWrite"`
+}
+
+type RepositoryDiscovery struct {
+	Repositories []AccessibleRepository `json:"repositories"`
+	Truncated    bool                   `json:"truncated"`
+}
+
 type Client struct {
 	vault           *security.Vault
 	baseURL         string
@@ -132,6 +148,59 @@ func (c *Client) RemoveToken(ctx context.Context) error {
 	} else {
 		return err
 	}
+}
+
+func (c *Client) ListAccessibleRepositories(ctx context.Context) (RepositoryDiscovery, error) {
+	token, err := c.token(ctx)
+	if err != nil {
+		return RepositoryDiscovery{}, err
+	}
+	const perPage = 50
+	const maxPages = 10
+	discovery := RepositoryDiscovery{Repositories: make([]AccessibleRepository, 0, perPage)}
+	for page := 1; page <= maxPages; page++ {
+		query := url.Values{
+			"affiliation": {"owner,collaborator,organization_member"},
+			"direction":   {"asc"},
+			"page":        {fmt.Sprint(page)},
+			"per_page":    {fmt.Sprint(perPage)},
+			"sort":        {"full_name"},
+		}
+		var response []struct {
+			Name          string `json:"name"`
+			DefaultBranch string `json:"default_branch"`
+			Private       bool   `json:"private"`
+			Archived      bool   `json:"archived"`
+			Fork          bool   `json:"fork"`
+			Owner         struct {
+				Login string `json:"login"`
+			} `json:"owner"`
+			Permissions struct {
+				Push     bool `json:"push"`
+				Admin    bool `json:"admin"`
+				Maintain bool `json:"maintain"`
+			} `json:"permissions"`
+		}
+		if err := c.doJSON(ctx, token, http.MethodGet, "/user/repos?"+query.Encode(), nil, &response); err != nil {
+			return RepositoryDiscovery{}, err
+		}
+		for _, repository := range response {
+			owner := strings.TrimSpace(repository.Owner.Login)
+			name := strings.TrimSpace(repository.Name)
+			branch := strings.TrimSpace(repository.DefaultBranch)
+			if owner == "" || name == "" || branch == "" {
+				continue
+			}
+			discovery.Repositories = append(discovery.Repositories, AccessibleRepository{Owner: owner, Name: name, FullName: owner + "/" + name, DefaultBranch: branch, Private: repository.Private, Archived: repository.Archived, Fork: repository.Fork, CanWrite: repository.Permissions.Push || repository.Permissions.Admin || repository.Permissions.Maintain})
+		}
+		if len(response) < perPage {
+			return discovery, nil
+		}
+		if page == maxPages {
+			discovery.Truncated = true
+		}
+	}
+	return discovery, nil
 }
 
 func (c *Client) token(ctx context.Context) (string, error) {

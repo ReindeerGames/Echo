@@ -91,6 +91,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("GET /api/v1/settings/github", s.githubSettings)
 	protected.HandleFunc("PUT /api/v1/settings/github", s.githubSettings)
 	protected.HandleFunc("DELETE /api/v1/settings/github", s.githubSettings)
+	protected.HandleFunc("GET /api/v1/github/repositories", s.githubRepositories)
 	protected.HandleFunc("GET /api/v1/settings/ai", s.aiSettings)
 	protected.HandleFunc("PUT /api/v1/settings/ai", s.aiSettings)
 	protected.HandleFunc("DELETE /api/v1/settings/ai", s.aiSettings)
@@ -249,6 +250,21 @@ func (s *Server) githubSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+func (s *Server) githubRepositories(w http.ResponseWriter, r *http.Request) {
+	if s.github == nil {
+		writeError(w, http.StatusServiceUnavailable, "github_unavailable", "GitHub integration is unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	discovery, err := s.github.ListAccessibleRepositories(ctx)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "github_discovery_failed", "GitHub repository discovery failed; verify the token and try again")
+		return
+	}
+	writeJSON(w, http.StatusOK, discovery)
 }
 
 func (s *Server) aiSettings(w http.ResponseWriter, r *http.Request) {

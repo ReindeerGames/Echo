@@ -37,6 +37,18 @@ func TestGitHubTokenSettingsAreExposedWithoutAppCredentials(t *testing.T) {
 	}
 }
 
+func TestGitHubRepositoryDiscoveryDefaultsToReadOnly(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"Discover from GitHub", "/api/v1/github/repositories", "github-discovery-form", "Read-only by default", "readOnly:true", "archived"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("GitHub repository discovery is missing %q", expected)
+		}
+	}
+}
+
 func TestWhatsAppOwnerDiscoveryUIIsExposed(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

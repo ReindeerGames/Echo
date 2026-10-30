@@ -2,6 +2,8 @@
 
 Echo uses a fine-grained personal access token entered from the authenticated **Repositories** or **Guided setup** screen. The token is validated against GitHub before it is encrypted and stored in MariaDB. Echo never returns the value to the browser after saving it.
 
+After connecting, choose **Discover from GitHub**. Echo reads the repositories visible to the token in deterministic pages, capped at 500, and shows only owner/name, default branch, public/private state, archive/fork state, and coarse write permission. Archived and already-linked repositories are excluded from the picker. Linking always starts in read-only mode; discovery cannot grant patch or deployment authority. Manual owner/name entry remains available for recovery.
+
 Create the token under the GitHub account that owns or can access the intended repositories. Prefer a dedicated automation account, choose only the required repositories, set an expiry, and rotate it before that date.
 
 ## Permissions
