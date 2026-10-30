@@ -34,6 +34,7 @@ type Reader interface {
 	ListProjectIncidents(context.Context, string, int) ([]domain.Incident, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
+	ListAudit(context.Context, int) ([]domain.AuditEvent, error)
 }
 
 type Responder struct {
@@ -109,6 +110,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_project", "Get one project's configured repositories, monitored services and freshness, open alerts, recent incidents, and deployment state.", schema(map[string]any{"project": map[string]string{"type": "string", "description": "Exact project ID, key, or name."}}, []string{"project"})),
 		ai.FunctionTool("get_repository_overview", "Inspect enabled configured repositories and summarize each default branch's current GitHub Actions health. This tool is read-only and bounded to twenty repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_repository_status", "Inspect the configured repository default-branch head and its ten most recent GitHub Actions runs. This tool is read-only.", schema(map[string]any{"repository": map[string]string{"type": "string", "description": "Configured repository ID, name, or owner/name."}}, []string{"repository"})),
+		ai.FunctionTool("get_recent_activity", "List recent operational audit events without actor identifiers, message bodies, or audit metadata.", schema(nil, nil)),
 		ai.FunctionTool("list_incidents", "Find recent incidents by optional status and project/summary text. Use this before get_incident when the exact ID is unknown.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Project or summary fragment, or empty string."}, "status": map[string]string{"type": "string", "description": "Exact incident status, or empty string."}}, []string{"query", "status"})),
 		ai.FunctionTool("get_incident", "Get an incident and its latest evidence-backed diagnosis by exact incident ID.", schema(map[string]any{"incident_id": map[string]string{"type": "string"}}, []string{"incident_id"})),
 	}
@@ -362,6 +364,24 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			return "", err
 		}
 		return marshal(repositoryEstateView(entries, total, truncated))
+	case "get_recent_activity":
+		activity, err := r.reader.ListAudit(ctx, 100)
+		if err != nil {
+			return "", err
+		}
+		views := make([]map[string]any, 0, min(len(activity), 50))
+		matched := 0
+		for _, event := range activity {
+			if event.Action == "assistant.query" {
+				continue
+			}
+			matched++
+			if len(views) == 50 {
+				continue
+			}
+			views = append(views, safeActivityView(event))
+		}
+		return marshal(map[string]any{"activity": views, "count": matched, "truncated": len(activity) == 100 || matched > len(views)})
 	case "get_work_queue":
 		jobs, err := r.reader.ListJobs(ctx, "", 100)
 		if err != nil {
@@ -693,6 +713,8 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.repository(ctx, argument)
 	case "repository_overview":
 		answer, err = r.repositoryOverview(ctx)
+	case "activity":
+		answer, err = r.activity(ctx)
 	case "incidents":
 		answer, err = r.incidents(ctx)
 	case "service":
@@ -701,7 +723,7 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “brief”, “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “project <name>”, “github status”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “brief”, “status”, “activity”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “project <name>”, “github status”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -717,6 +739,9 @@ func classify(text string) (string, string) {
 	}
 	if value == "github status" || value == "repo status" || value == "repository status" || value == "repositories status" || value == "code status" {
 		return "repository_overview", ""
+	}
+	if value == "activity" || value == "recent activity" || value == "audit" || value == "audit trail" || strings.Contains(value, "what happened") || strings.Contains(value, "what changed") {
+		return "activity", ""
 	}
 	for _, prefix := range []string{"service ", "check service ", "check app ", "app ", "application "} {
 		if strings.HasPrefix(value, prefix) {
@@ -946,6 +971,50 @@ func (r *Responder) briefRepositoryHealth(ctx context.Context) []string {
 		line += fmt.Sprintf(" · first 20 of %d repositories", total)
 	}
 	return append([]string{line}, issues...)
+}
+
+func safeActivityView(event domain.AuditEvent) map[string]any {
+	return map[string]any{
+		"action":        truncateRunes(event.Action, 120),
+		"resource_type": truncateRunes(event.ResourceType, 80),
+		"resource_id":   truncateRunes(event.ResourceID, 120),
+		"outcome":       truncateRunes(event.Outcome, 40),
+		"created_at":    event.CreatedAt,
+	}
+}
+
+func (r *Responder) activity(ctx context.Context) (string, error) {
+	events, err := r.reader.ListAudit(ctx, 100)
+	if err != nil {
+		return "", err
+	}
+	filtered := make([]domain.AuditEvent, 0, min(len(events), 10))
+	matched := 0
+	for _, event := range events {
+		if event.Action == "assistant.query" {
+			continue
+		}
+		matched++
+		if len(filtered) < 10 {
+			filtered = append(filtered, event)
+		}
+	}
+	if matched == 0 {
+		return "No recent operational activity is recorded yet.", nil
+	}
+	lines := make([]string, 0, len(filtered)+1)
+	for _, event := range filtered {
+		action := strings.ReplaceAll(strings.ReplaceAll(event.Action, ".", " "), "_", " ")
+		resource := strings.TrimSpace(event.ResourceType + " " + event.ResourceID)
+		if resource != "" {
+			resource = " · " + truncateRunes(resource, 180)
+		}
+		lines = append(lines, fmt.Sprintf("• %s · %s%s · %s ago", strings.ToUpper(truncateRunes(event.Outcome, 40)), truncateRunes(action, 120), resource, formatAge(r.now(), event.CreatedAt)))
+	}
+	if matched > len(filtered) || len(events) == 100 {
+		lines = append(lines, "…more activity is available in the control plane audit trail.")
+	}
+	return fmt.Sprintf("Recent operational activity (%d)\n\n%s", matched, strings.Join(lines, "\n")), nil
 }
 
 func (r *Responder) alerts(ctx context.Context) (string, error) {
@@ -1882,7 +1951,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• activity / what happened — recent safe audit events\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

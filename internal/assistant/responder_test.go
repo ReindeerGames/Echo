@@ -30,6 +30,7 @@ type fakeReader struct {
 	incident    domain.Incident
 	incidents   []domain.Incident
 	analysis    domain.Analysis
+	audit       []domain.AuditEvent
 }
 
 type fakeToolModel struct{}
@@ -138,12 +139,16 @@ func (f fakeReader) LatestAnalysis(context.Context, string) (domain.Analysis, er
 	}
 	return f.analysis, nil
 }
+func (f fakeReader) ListAudit(context.Context, int) ([]domain.AuditEvent, error) {
+	return f.audit, nil
+}
 
 func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 	tests := map[string]string{
 		"anything wrong?":     "alerts",
 		"good morning":        "brief",
 		"github status":       "repository_overview",
+		"what happened?":      "activity",
 		"how are things":      "status",
 		"service nudgie-web":  "service",
 		"what can you do?":    "help",
@@ -179,6 +184,61 @@ func TestStatusAndServiceAnswersUseStoredEvidence(t *testing.T) {
 	service, intent, err := responder.Answer(context.Background(), "service nudgie-web")
 	if err != nil || intent != "service" || !containsAll(service, "Nudgie web", "CRITICAL", "Latest signal: unhealthy") {
 		t.Fatalf("unexpected service answer intent=%s err=%v body=%s", intent, err, service)
+	}
+}
+
+func TestRecentActivityOmitsActorsMetadataAndAssistantNoise(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{audit: []domain.AuditEvent{
+		{
+			Action:       "assistant.query",
+			ResourceType: "whatsapp_message",
+			ResourceID:   "msg_secret",
+			Outcome:      "succeeded",
+			ActorType:    "whatsapp_contact",
+			ActorID:      "27820000000@s.whatsapp.net",
+			Metadata:     json.RawMessage(`{"body":"private operator question"}`),
+			CreatedAt:    now.Add(-time.Minute),
+		},
+		{
+			Action:       "deployment.verified",
+			ResourceType: "deployment",
+			ResourceID:   "dep_1",
+			Outcome:      "succeeded",
+			ActorType:    "system",
+			ActorID:      "must-not-leak-actor",
+			Metadata:     json.RawMessage(`{"token":"must-not-leak-token"}`),
+			CreatedAt:    now.Add(-2 * time.Minute),
+		},
+		{
+			Action:       "owner.selected",
+			ResourceType: "whatsapp_contact",
+			ResourceID:   "ctc_1",
+			Outcome:      "succeeded",
+			CreatedAt:    now.Add(-3 * time.Minute),
+		},
+	}}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+
+	answer, intent, err := responder.Answer(context.Background(), "what happened?")
+	if err != nil || intent != "activity" || !containsAll(answer, "Recent operational activity (2)", "SUCCEEDED · deployment verified · deployment dep_1 · 2m0s ago", "SUCCEEDED · owner selected · whatsapp_contact ctc_1 · 3m0s ago") {
+		t.Fatalf("unexpected activity answer intent=%s body=%s err=%v", intent, answer, err)
+	}
+	for _, secret := range []string{"assistant query", "27820000000", "private operator question", "must-not-leak-actor", "must-not-leak-token"} {
+		if strings.Contains(answer, secret) {
+			t.Fatalf("unsafe value %q leaked into activity answer: %s", secret, answer)
+		}
+	}
+
+	output, err := responder.executeTool(context.Background(), "get_recent_activity", json.RawMessage(`{}`))
+	if err != nil || !containsAll(output, `"count":2`, `"action":"deployment.verified"`, `"resource_id":"dep_1"`, `"action":"owner.selected"`) {
+		t.Fatalf("unexpected activity tool output=%s err=%v", output, err)
+	}
+	for _, unsafe := range []string{"assistant.query", "actor_type", "actor_id", "metadata", "27820000000", "private operator question", "must-not-leak-actor", "must-not-leak-token"} {
+		if strings.Contains(output, unsafe) {
+			t.Fatalf("unsafe value %q leaked into activity tool output: %s", unsafe, output)
+		}
 	}
 }
 
