@@ -35,5 +35,15 @@
       "proxyUrl": "http://127.0.0.1:23750",
       "container": "application"
     }
+  ],
+  "freshnessProbes": [
+    {
+      "name": "database-backup",
+      "serviceId": "svc_replace_with_backup_service_id",
+      "path": "/var/backups/application",
+      "matchSuffix": ".sql.gz",
+      "warningAge": "26h",
+      "criticalAge": "50h"
+    }
   ]
 }

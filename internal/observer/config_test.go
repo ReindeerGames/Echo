@@ -157,3 +157,37 @@ func TestDockerProbeValidationAndCrossTypeUniqueness(t *testing.T) {
 		t.Fatalf("cross-type Docker service duplicate was not rejected: %v", err)
 	}
 }
+
+func TestFreshnessProbeDefaultsAndValidation(t *testing.T) {
+	cfg, err := normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		FreshnessProbes: []FreshnessProbe{{Name: "Database-Backup", ServiceID: "svc_backup", Path: "/var/backups/application/", MatchSuffix: ".sql.gz"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := cfg.FreshnessProbes[0]
+	if probe.Name != "database-backup" || probe.Path != "/var/backups/application" || probe.WarningAge.Duration != 26*time.Hour || probe.CriticalAge.Duration != 50*time.Hour {
+		t.Fatalf("unexpected freshness defaults: %#v", probe)
+	}
+	_, err = normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", FreshnessProbes: []FreshnessProbe{{Name: "backup", ServiceID: "svc_backup", Path: "relative"}}})
+	if err == nil || !strings.Contains(err.Error(), "path must be absolute") {
+		t.Fatalf("relative freshness path was not rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", FreshnessProbes: []FreshnessProbe{{Name: "backup", ServiceID: "svc_backup", Path: "/", MatchSuffix: ".sql"}}})
+	if err == nil || !strings.Contains(err.Error(), "filesystem root") {
+		t.Fatalf("filesystem-root freshness scan was not rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", FreshnessProbes: []FreshnessProbe{{Name: "backup", ServiceID: "svc_backup", Path: "/var/backups", WarningAge: Duration{10 * time.Hour}, CriticalAge: Duration{5 * time.Hour}}}})
+	if err == nil || !strings.Contains(err.Error(), "age thresholds") {
+		t.Fatalf("inverted freshness thresholds were not rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		SystemProbes:    []SystemProbe{{Name: "host", ServiceID: "svc_same"}},
+		FreshnessProbes: []FreshnessProbe{{Name: "backup", ServiceID: "svc_same", Path: "/var/backups"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "one aggregate probe") {
+		t.Fatalf("cross-type freshness service duplicate was not rejected: %v", err)
+	}
+}

@@ -20,14 +20,15 @@ const (
 )
 
 type Config struct {
-	EchoURL           string        `json:"echoUrl"`
-	Source            string        `json:"source"`
-	Interval          Duration      `json:"interval"`
-	Timeout           Duration      `json:"timeout"`
-	AllowInsecureHTTP bool          `json:"allowInsecureHttp"`
-	Probes            []HTTPProbe   `json:"probes"`
-	SystemProbes      []SystemProbe `json:"systemProbes"`
-	DockerProbes      []DockerProbe `json:"dockerProbes"`
+	EchoURL           string           `json:"echoUrl"`
+	Source            string           `json:"source"`
+	Interval          Duration         `json:"interval"`
+	Timeout           Duration         `json:"timeout"`
+	AllowInsecureHTTP bool             `json:"allowInsecureHttp"`
+	Probes            []HTTPProbe      `json:"probes"`
+	SystemProbes      []SystemProbe    `json:"systemProbes"`
+	DockerProbes      []DockerProbe    `json:"dockerProbes"`
+	FreshnessProbes   []FreshnessProbe `json:"freshnessProbes"`
 }
 
 type HTTPProbe struct {
@@ -58,6 +59,15 @@ type DockerProbe struct {
 	ServiceID string `json:"serviceId"`
 	ProxyURL  string `json:"proxyUrl"`
 	Container string `json:"container"`
+}
+
+type FreshnessProbe struct {
+	Name        string   `json:"name"`
+	ServiceID   string   `json:"serviceId"`
+	Path        string   `json:"path"`
+	MatchSuffix string   `json:"matchSuffix"`
+	WarningAge  Duration `json:"warningAge"`
+	CriticalAge Duration `json:"criticalAge"`
 }
 
 type Duration struct{ time.Duration }
@@ -120,7 +130,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("invalid echoUrl: %w", err)
 	}
 	cfg.EchoURL = strings.TrimRight(echoURL.String(), "/")
-	totalProbes := len(cfg.Probes) + len(cfg.SystemProbes) + len(cfg.DockerProbes)
+	totalProbes := len(cfg.Probes) + len(cfg.SystemProbes) + len(cfg.DockerProbes) + len(cfg.FreshnessProbes)
 	if totalProbes == 0 || totalProbes > 100 {
 		return Config{}, errors.New("between 1 and 100 probes are required")
 	}
@@ -206,6 +216,35 @@ func normalizeConfig(cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("Docker probe %q proxyUrl: %w", probe.Name, err)
 		}
 		probe.ProxyURL = strings.TrimRight(proxyURL.String(), "/")
+	}
+	for index := range cfg.FreshnessProbes {
+		probe := &cfg.FreshnessProbes[index]
+		probe.Name = strings.ToLower(strings.TrimSpace(probe.Name))
+		probe.ServiceID = strings.TrimSpace(probe.ServiceID)
+		probe.Path = strings.TrimSpace(probe.Path)
+		probe.MatchSuffix = strings.TrimSpace(probe.MatchSuffix)
+		if err := registerProbe(probe.Name, probe.ServiceID, fmt.Sprintf("freshness probe %d", index+1), seenNames, seenServices); err != nil {
+			return Config{}, err
+		}
+		if !filepath.IsAbs(probe.Path) || strings.ContainsRune(probe.Path, '\x00') {
+			return Config{}, fmt.Errorf("freshness probe %q path must be absolute", probe.Name)
+		}
+		probe.Path = filepath.Clean(probe.Path)
+		if probe.Path == "/" {
+			return Config{}, fmt.Errorf("freshness probe %q path must not be the filesystem root", probe.Name)
+		}
+		if len(probe.MatchSuffix) > 80 || strings.ContainsAny(probe.MatchSuffix, "/\\\x00") {
+			return Config{}, fmt.Errorf("freshness probe %q matchSuffix is invalid", probe.Name)
+		}
+		if probe.WarningAge.Duration == 0 {
+			probe.WarningAge.Duration = 26 * time.Hour
+		}
+		if probe.CriticalAge.Duration == 0 {
+			probe.CriticalAge.Duration = 50 * time.Hour
+		}
+		if probe.WarningAge.Duration < time.Minute || probe.WarningAge.Duration > 365*24*time.Hour || probe.CriticalAge.Duration <= probe.WarningAge.Duration || probe.CriticalAge.Duration > 365*24*time.Hour {
+			return Config{}, fmt.Errorf("freshness probe %q age thresholds must be between 1m and 8760h with critical above warning", probe.Name)
+		}
 	}
 	return cfg, nil
 }

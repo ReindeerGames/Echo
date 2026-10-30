@@ -25,6 +25,8 @@ Back up `echo_whatsapp` and `echo_core` independently using encrypted storage. T
 
 Set `ECHO_MONITOR_RETENTION` to the operational history window you actually need (90 days by default, 24 hours to 365 days allowed). Echo's supervised retention component prunes only superseded monitoring events at startup and daily, preserves current freshness evidence and alert-referenced events, and participates in readiness. Database backups remain the recovery boundary for history beyond the live retention window.
 
+Treat backup creation and backup verification as separate controls. An entry under `freshnessProbes` can prove only that a matching artifact's modification time is recent; it does not prove that the artifact is complete, decryptable, or restorable. Keep restore tests in an isolated environment and use the freshness alert as an early signal that the scheduled backup pipeline may have stopped.
+
 At least quarterly, restore both databases to an isolated MariaDB server, start Echo without external egress, and verify schema validation and incident history.
 
 ## WhatsApp recovery
