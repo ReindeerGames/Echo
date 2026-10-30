@@ -24,7 +24,7 @@
 
 ### Untrusted content
 
-Message text and repository contents are labelled as evidence in AI prompts. Model output is parsed into bounded structures and is never interpreted as an authorization. Owner-initiated repository search is restricted to enabled repositories and the configured default branch, never executes source, excludes credential/key/dependency/generated paths, and returns only capped line-numbered excerpts after common-secret redaction. Search traversal, files, bytes, per-file size, matches, output, and wall time are bounded and truncation is explicit. Patch output is restricted to eight text files, one MiB each, with traversal, secret, workflow, lockfile, and deployment-path rejection.
+Message text, GitHub metadata, and repository contents are labelled as evidence in AI prompts. Model output is parsed into bounded structures and is never interpreted as an authorization. GitHub inventory exposes only capped repository identity, branch, visibility/archive/fork state, and Echo catalogue relationships; it cannot expand the token's scope or inspect unconfigured source. Owner-initiated repository search is restricted to enabled repositories and the configured default branch, never executes source, excludes credential/key/dependency/generated paths, and returns only capped line-numbered excerpts after common-secret redaction. Search traversal, files, bytes, per-file size, matches, output, and wall time are bounded and truncation is explicit. Patch output is restricted to eight text files, one MiB each, with traversal, secret, workflow, lockfile, and deployment-path rejection.
 
 ### Authorization
 

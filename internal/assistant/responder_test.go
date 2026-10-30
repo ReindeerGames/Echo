@@ -52,6 +52,12 @@ type fakeRepositorySearchInspector struct {
 	searchErr    error
 }
 
+type fakeRepositoryCatalogInspector struct {
+	fakeRepositoryInspector
+	discovery githubapp.RepositoryDiscovery
+	err       error
+}
+
 type estateRepositoryInspector struct {
 	mu       sync.Mutex
 	statuses map[string]githubapp.RepositoryStatus
@@ -77,6 +83,10 @@ func (f *fakeRepositorySearchInspector) SearchRepository(_ context.Context, repo
 	f.searchRepo = repo
 	f.searchQuery = query
 	return f.searchResult, f.searchErr
+}
+
+func (f *fakeRepositoryCatalogInspector) ListAccessibleRepositories(context.Context) (githubapp.RepositoryDiscovery, error) {
+	return f.discovery, f.err
 }
 
 func (fakeToolModel) RespondWithTools(ctx context.Context, instructions string, history []ai.ConversationMessage, tools []ai.ToolDefinition, execute ai.ToolExecutor) (string, []ai.ToolExecution, error) {
@@ -174,6 +184,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"anything wrong?":       "alerts",
 		"good morning":          "brief",
 		"github status":         "repository_overview",
+		"github inventory":      "unknown",
 		"what isn't monitored?": "coverage",
 		"what happened?":        "activity",
 		"how are things":        "status",
@@ -574,6 +585,43 @@ func TestRepositorySearchReportsUnavailableWithoutSearchCapability(t *testing.T)
 	output, err := NewOperator(reader, nil, nil, &fakeRepositoryInspector{}).executeTool(context.Background(), "search_repository", json.RawMessage(`{"repository":"Org/app","query":"where is authentication configured"}`))
 	if err != nil || !containsAll(output, `"found":true`, `"available":false`, `"reason":"repository search is unavailable"`) {
 		t.Fatalf("unexpected unavailable repository search: output=%s err=%v", output, err)
+	}
+}
+
+func TestGitHubInventoryComparesVisibleAndConfiguredRepositories(t *testing.T) {
+	reader := fakeReader{
+		projects: []domain.Project{{ID: "prj_1", Name: "Invoices"}},
+		repos: []domain.Repository{
+			{ID: "repo_1", ProjectID: "prj_1", Owner: "ReindeerGames", Name: "invoices", Role: "application", DefaultBranch: "main", ReadOnly: true, Enabled: true},
+			{ID: "repo_missing", ProjectID: "prj_1", Owner: "ReindeerGames", Name: "removed", Role: "infrastructure", DefaultBranch: "main", ReadOnly: true, Enabled: false},
+		},
+	}
+	inspector := &fakeRepositoryCatalogInspector{discovery: githubapp.RepositoryDiscovery{Repositories: []githubapp.AccessibleRepository{
+		{Owner: "ReindeerGames", Name: "invoices", FullName: "ReindeerGames/invoices", DefaultBranch: "main", Private: true},
+		{Owner: "ReindeerGames", Name: "tourism-awards", FullName: "ReindeerGames/tourism-awards", DefaultBranch: "main", Private: true},
+	}}}
+	output, err := NewOperator(reader, nil, nil, inspector).executeTool(context.Background(), "get_github_inventory", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(output, `"visible_count":2`, `"configured_visible_count":1`, `"unlinked_count":1`, `"configured_not_visible_count":1`, `"repository":"ReindeerGames/invoices"`, `"project":"Invoices"`, `"repository":"ReindeerGames/tourism-awards"`, `"configured":false`, `"untrusted_evidence":true`) {
+		t.Fatalf("unexpected GitHub inventory output: %s", output)
+	}
+}
+
+func TestGitHubInventoryOutputIsBoundedToOneHundredRepositories(t *testing.T) {
+	discovery := githubapp.RepositoryDiscovery{}
+	for index := 0; index < 101; index++ {
+		name := fmt.Sprintf("repo-%03d", index)
+		discovery.Repositories = append(discovery.Repositories, githubapp.AccessibleRepository{Owner: "Org", Name: name, FullName: "Org/" + name, DefaultBranch: "main"})
+	}
+	inspector := &fakeRepositoryCatalogInspector{discovery: discovery}
+	output, err := NewOperator(fakeReader{}, nil, nil, inspector).executeTool(context.Background(), "get_github_inventory", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsAll(output, `"visible_count":101`, `"unlinked_count":101`, `"truncated":true`) || strings.Count(output, `"repository":`) != 100 || strings.Contains(output, "repo-100") {
+		t.Fatalf("unbounded GitHub inventory output: %s", output)
 	}
 }
 
