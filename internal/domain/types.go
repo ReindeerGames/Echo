@@ -54,6 +54,63 @@ type Environment struct {
 	UpdatedAt        time.Time       `json:"updatedAt"`
 }
 
+type Service struct {
+	ID          string          `json:"id"`
+	ProjectID   string          `json:"projectId"`
+	ProjectName string          `json:"projectName,omitempty"`
+	Key         string          `json:"key"`
+	Name        string          `json:"name"`
+	Kind        string          `json:"kind"`
+	Criticality string          `json:"criticality"`
+	Description string          `json:"description"`
+	Enabled     bool            `json:"enabled"`
+	Metadata    json.RawMessage `json:"metadata"`
+	CreatedAt   time.Time       `json:"createdAt"`
+	UpdatedAt   time.Time       `json:"updatedAt"`
+}
+
+type MonitorEvent struct {
+	ID          string          `json:"id"`
+	EventID     string          `json:"eventId"`
+	ServiceID   string          `json:"serviceId"`
+	ServiceName string          `json:"serviceName,omitempty"`
+	Source      string          `json:"source"`
+	Status      string          `json:"status"`
+	Severity    string          `json:"severity"`
+	Summary     string          `json:"summary"`
+	Fingerprint string          `json:"fingerprint,omitempty"`
+	Details     json.RawMessage `json:"details"`
+	ObservedAt  time.Time       `json:"observedAt"`
+	ReceivedAt  time.Time       `json:"receivedAt"`
+}
+
+type ServiceAlert struct {
+	ID            string     `json:"id"`
+	ServiceID     string     `json:"serviceId"`
+	ServiceName   string     `json:"serviceName,omitempty"`
+	ProjectID     string     `json:"projectId,omitempty"`
+	Fingerprint   string     `json:"fingerprint"`
+	Status        string     `json:"status"`
+	Severity      string     `json:"severity"`
+	Title         string     `json:"title"`
+	Summary       string     `json:"summary"`
+	LatestEventID string     `json:"latestEventId"`
+	OpenedAt      time.Time  `json:"openedAt"`
+	LastSeenAt    time.Time  `json:"lastSeenAt"`
+	ResolvedAt    *time.Time `json:"resolvedAt,omitempty"`
+}
+
+type AlertTransition struct {
+	Kind  string       `json:"kind"`
+	Alert ServiceAlert `json:"alert"`
+}
+
+type MonitorResult struct {
+	Event       MonitorEvent      `json:"event"`
+	Duplicate   bool              `json:"duplicate"`
+	Transitions []AlertTransition `json:"transitions"`
+}
+
 type Incident struct {
 	ID              string     `json:"id"`
 	ProjectID       string     `json:"projectId"`
@@ -147,6 +204,7 @@ type AuditEvent struct {
 
 type Dashboard struct {
 	OpenIncidents     int `json:"openIncidents"`
+	OpenAlerts        int `json:"openAlerts"`
 	PendingApprovals  int `json:"pendingApprovals"`
 	RunningJobs       int `json:"runningJobs"`
 	FailedDeployments int `json:"failedDeployments"`

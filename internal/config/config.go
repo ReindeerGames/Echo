@@ -18,6 +18,7 @@ type Config struct {
 	Database    Database
 	WhatsApp    WhatsApp
 	GitHub      GitHub
+	Monitor     Monitor
 	AI          AI
 	Worker      Worker
 	Security    Security
@@ -47,6 +48,10 @@ type WhatsApp struct {
 
 type GitHub struct {
 	APIBaseURL    string
+	WebhookSecret string
+}
+
+type Monitor struct {
 	WebhookSecret string
 }
 
@@ -101,6 +106,9 @@ func Load() (Config, error) {
 		GitHub: GitHub{
 			APIBaseURL:    strings.TrimRight(env("ECHO_GITHUB_API_URL", "https://api.github.com"), "/"),
 			WebhookSecret: strings.TrimSpace(os.Getenv("ECHO_GITHUB_WEBHOOK_SECRET")),
+		},
+		Monitor: Monitor{
+			WebhookSecret: strings.TrimSpace(os.Getenv("ECHO_MONITOR_WEBHOOK_SECRET")),
 		},
 		AI: AI{
 			Enabled: boolean("ECHO_AI_ENABLED", false),

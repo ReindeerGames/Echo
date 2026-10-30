@@ -24,7 +24,7 @@ One externally managed MariaDB server hosts two isolated databases and accounts:
 - `echo_whatsapp` is owned by `mdbstore` and contains cryptographic WhatsApp session state.
 - `echo_core` contains Echo's projects, incidents, jobs, approvals, deployments, outbox, and audit events.
 
-See [the architecture](docs/architecture.md), [threat model](docs/threat-model.md), and [deployment contract](docs/deployment-contract.md).
+See [the architecture](docs/architecture.md), [threat model](docs/threat-model.md), [monitoring contract](docs/monitoring.md), and [deployment contract](docs/deployment-contract.md).
 
 ## Implemented workflow
 
@@ -38,6 +38,8 @@ See [the architecture](docs/architecture.md), [threat model](docs/threat-model.m
 8. With configured environments, staging approval dispatches a GitHub Actions workflow with an immutable commit SHA; a signed `workflow_run` webhook records verification.
 9. With no staging environment, a separate repository-native production approval is bound to the PR number, exact head SHA, base branch, repository identity, and repository-configuration hash. The worker refuses changed heads or incomplete/failing GitHub checks, marks a draft ready, and squash-merges that exact SHA.
 10. Echo then monitors the repository's existing push workflows for the resulting default-branch commit. It resolves the incident only after all matching runs finish successfully; a failed run marks the deployment and incident failed.
+
+Separately, the operations catalogue maps projects to runtime services. Signed, idempotent observer events maintain an alert lifecycle and privately notify the owner only when a condition opens, reopens, or resolves. Echo never needs a production Docker socket or SSH credential for monitoring.
 
 Approvals can be resolved in the UI or by replying privately from the configured owner JID with `approve <code>` or `reject <code>`.
 

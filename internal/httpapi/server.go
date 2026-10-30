@@ -18,6 +18,7 @@ import (
 	"github.com/ReindeerGames/echo/internal/config"
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/githubapp"
+	"github.com/ReindeerGames/echo/internal/monitor"
 	"github.com/ReindeerGames/echo/internal/owner"
 	"github.com/ReindeerGames/echo/internal/policy"
 	runtimestate "github.com/ReindeerGames/echo/internal/runtime"
@@ -74,6 +75,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /readyz", s.ready)
 	mux.HandleFunc("POST /api/v1/auth/login", s.auth.login)
 	mux.HandleFunc("POST /webhooks/github", s.githubWebhook)
+	mux.HandleFunc("POST /webhooks/monitor", s.monitorWebhook)
 	protected := http.NewServeMux()
 	protected.HandleFunc("POST /api/v1/auth/logout", s.auth.logout)
 	protected.HandleFunc("GET /api/v1/bootstrap", s.bootstrap)
@@ -95,6 +97,10 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("POST /api/v1/repositories", s.repositories)
 	protected.HandleFunc("GET /api/v1/environments", s.environments)
 	protected.HandleFunc("POST /api/v1/environments", s.environments)
+	protected.HandleFunc("GET /api/v1/services", s.services)
+	protected.HandleFunc("POST /api/v1/services", s.services)
+	protected.HandleFunc("GET /api/v1/monitor/events", s.monitorEvents)
+	protected.HandleFunc("GET /api/v1/monitor/alerts", s.serviceAlerts)
 	protected.HandleFunc("GET /api/v1/deployments", s.deployments)
 	protected.HandleFunc("GET /api/v1/incidents", s.incidents)
 	protected.HandleFunc("GET /api/v1/incidents/{id}", s.incident)
@@ -139,7 +145,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		status, aiErr := s.ai.Status(r.Context())
 		aiConfigured = aiErr == nil && status.Configured
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"actor": actorFrom(r.Context()), "environment": s.cfg.Environment, "features": map[string]any{"whatsapp": s.cfg.WhatsApp.Enabled, "ai": aiConfigured, "github": githubConfigured, "owner": ownerConfigured, "worker": s.cfg.Worker.Enabled}, "csrf": csrfFromRequest(r)})
+	writeJSON(w, http.StatusOK, map[string]any{"actor": actorFrom(r.Context()), "environment": s.cfg.Environment, "features": map[string]any{"whatsapp": s.cfg.WhatsApp.Enabled, "ai": aiConfigured, "github": githubConfigured, "owner": ownerConfigured, "worker": s.cfg.Worker.Enabled, "monitor": s.cfg.Monitor.WebhookSecret != ""}, "csrf": csrfFromRequest(r)})
 }
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.Dashboard(r.Context())
@@ -372,6 +378,47 @@ func (s *Server) environments(w http.ResponseWriter, r *http.Request) {
 	}
 	respondStatus(w, http.StatusCreated, saved, err)
 }
+
+func (s *Server) services(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		items, err := s.store.ListServices(r.Context(), r.URL.Query().Get("projectId"))
+		respond(w, items, err)
+		return
+	}
+	var item domain.Service
+	if err := decodeJSON(r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_service", err.Error())
+		return
+	}
+	item.Key = slug(item.Key)
+	if item.ProjectID == "" || item.Key == "" || strings.TrimSpace(item.Name) == "" || !json.Valid(item.Metadata) {
+		writeError(w, http.StatusBadRequest, "invalid_service", "projectId, key, name, and valid metadata are required")
+		return
+	}
+	if !oneOf(item.Kind, "", "application", "worker", "database", "platform", "external") {
+		writeError(w, http.StatusBadRequest, "invalid_service", "kind must be application, worker, database, platform, or external")
+		return
+	}
+	if !oneOf(item.Criticality, "", "low", "medium", "high", "critical") {
+		writeError(w, http.StatusBadRequest, "invalid_service", "criticality must be low, medium, high, or critical")
+		return
+	}
+	saved, err := s.store.SaveService(r.Context(), item)
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service.saved", "service", saved.ID, "succeeded", map[string]any{"key": saved.Key, "criticality": saved.Criticality})
+	}
+	respondStatus(w, http.StatusCreated, saved, err)
+}
+
+func (s *Server) monitorEvents(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListMonitorEvents(r.Context(), r.URL.Query().Get("serviceId"), 200)
+	respond(w, items, err)
+}
+
+func (s *Server) serviceAlerts(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListServiceAlerts(r.Context(), r.URL.Query().Get("status"))
+	respond(w, items, err)
+}
 func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListDeployments(r.Context(), r.URL.Query().Get("incidentId"))
 	respond(w, items, err)
@@ -540,6 +587,76 @@ func (s *Server) githubWebhook(w http.ResponseWriter, r *http.Request) {
 		_ = s.store.EnqueueOutbound(r.Context(), ownerJID, body)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) monitorWebhook(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.Monitor.WebhookSecret == "" {
+		writeError(w, http.StatusServiceUnavailable, "monitor_webhook_disabled", "monitor webhook secret is not configured")
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, monitor.MaxBodyBytes+1))
+	if err != nil || len(raw) > monitor.MaxBodyBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "invalid_monitor_event", "monitor event exceeds the one MiB limit")
+		return
+	}
+	if !monitor.VerifySignature(raw, r.Header.Get("X-Echo-Signature-256"), s.cfg.Monitor.WebhookSecret) {
+		writeError(w, http.StatusUnauthorized, "invalid_signature", "monitor event signature is invalid")
+		return
+	}
+	var event domain.MonitorEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_monitor_event", "monitor event is not valid JSON")
+		return
+	}
+	event, err = monitor.Normalize(event, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_monitor_event", err.Error())
+		return
+	}
+	service, err := s.store.GetService(r.Context(), event.ServiceID)
+	if err != nil || !service.Enabled {
+		writeError(w, http.StatusNotFound, "service_not_found", "enabled service was not found")
+		return
+	}
+	result, err := s.store.RecordMonitorEvent(r.Context(), event)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "monitor_event_failed", "monitor event could not be recorded")
+		return
+	}
+	if !result.Duplicate {
+		_ = s.store.Audit(r.Context(), "system", event.Source, "monitor.event_recorded", "service", event.ServiceID, "succeeded", map[string]any{"eventId": event.EventID, "status": event.Status, "severity": event.Severity})
+		s.notifyMonitorTransitions(r.Context(), result.Transitions)
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
+func (s *Server) notifyMonitorTransitions(ctx context.Context, transitions []domain.AlertTransition) {
+	if len(transitions) == 0 || s.owners == nil {
+		return
+	}
+	ownerJID, err := s.owners.JID(ctx)
+	if err != nil || ownerJID == "" {
+		return
+	}
+	for _, transition := range transitions {
+		if transition.Kind != "opened" && transition.Kind != "reopened" && transition.Kind != "resolved" {
+			continue
+		}
+		alert := transition.Alert
+		body := fmt.Sprintf("Echo alert %s · %s\n%s (%s)\n%s", strings.ToUpper(transition.Kind), strings.ToUpper(alert.Severity), alert.ServiceName, alert.Fingerprint, alert.Summary)
+		if err := s.store.EnqueueOutbound(ctx, ownerJID, body); err != nil {
+			slog.Error("monitor alert notification could not be queued", "alert", alert.ID, "transition", transition.Kind, "error", err)
+		}
+	}
+}
+
+func oneOf(value string, allowed ...string) bool {
+	for _, candidate := range allowed {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func verifyGitHubSignature(body []byte, header, secret string) bool {

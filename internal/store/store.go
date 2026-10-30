@@ -169,11 +169,12 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
 	var out domain.Dashboard
 	err := s.db.QueryRowContext(ctx, `SELECT
       (SELECT COUNT(*) FROM echo_incidents WHERE status NOT IN ('resolved','closed')),
+      (SELECT COUNT(*) FROM echo_service_alerts WHERE alert_status='open'),
       (SELECT COUNT(*) FROM echo_approvals WHERE status='pending' AND expires_at > NOW(6)),
       (SELECT COUNT(*) FROM echo_jobs WHERE status='running'),
       (SELECT COUNT(*) FROM echo_deployments WHERE status='failed'),
       (SELECT COUNT(*) FROM echo_projects WHERE enabled=TRUE)`).Scan(
-		&out.OpenIncidents, &out.PendingApprovals, &out.RunningJobs, &out.FailedDeployments, &out.EnabledProjects,
+		&out.OpenIncidents, &out.OpenAlerts, &out.PendingApprovals, &out.RunningJobs, &out.FailedDeployments, &out.EnabledProjects,
 	)
 	return out, err
 }
@@ -351,6 +352,253 @@ func (s *Store) GetEnvironment(ctx context.Context, environmentID string) (domai
 	var item domain.Environment
 	err := s.db.QueryRowContext(ctx, `SELECT id,project_id,name,kind,requires_approval,protected,config_json,created_at,updated_at FROM echo_environments WHERE id=?`, environmentID).Scan(&item.ID, &item.ProjectID, &item.Name, &item.Kind, &item.RequiresApproval, &item.Protected, &item.Config, &item.CreatedAt, &item.UpdatedAt)
 	return item, notFound(err)
+}
+
+func (s *Store) ListServices(ctx context.Context, projectID string) ([]domain.Service, error) {
+	query := `SELECT s.id,s.project_id,p.name,s.service_key,s.name,s.service_kind,s.criticality,s.description,s.enabled,s.metadata_json,s.created_at,s.updated_at FROM echo_services s JOIN echo_projects p ON p.id=s.project_id`
+	args := []any{}
+	if projectID != "" {
+		query += ` WHERE s.project_id=?`
+		args = append(args, projectID)
+	}
+	query += ` ORDER BY p.name,s.name`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.Service
+	for rows.Next() {
+		var item domain.Service
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Key, &item.Name, &item.Kind, &item.Criticality, &item.Description, &item.Enabled, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) SaveService(ctx context.Context, item domain.Service) (domain.Service, error) {
+	if item.ID == "" {
+		item.ID = id.New("svc")
+	}
+	if item.Kind == "" {
+		item.Kind = "application"
+	}
+	if item.Criticality == "" {
+		item.Criticality = "medium"
+	}
+	if len(item.Metadata) == 0 {
+		item.Metadata = json.RawMessage(`{}`)
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_services(id,project_id,service_key,name,service_kind,criticality,description,enabled,metadata_json) VALUES(?,?,?,?,?,?,?,?,?) ON DUPLICATE KEY UPDATE project_id=VALUES(project_id),service_key=VALUES(service_key),name=VALUES(name),service_kind=VALUES(service_kind),criticality=VALUES(criticality),description=VALUES(description),enabled=VALUES(enabled),metadata_json=VALUES(metadata_json)`, item.ID, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.Metadata)
+	if err != nil {
+		return domain.Service{}, err
+	}
+	return s.GetService(ctx, item.ID)
+}
+
+func (s *Store) GetService(ctx context.Context, serviceID string) (domain.Service, error) {
+	var item domain.Service
+	err := s.db.QueryRowContext(ctx, `SELECT s.id,s.project_id,p.name,s.service_key,s.name,s.service_kind,s.criticality,s.description,s.enabled,s.metadata_json,s.created_at,s.updated_at FROM echo_services s JOIN echo_projects p ON p.id=s.project_id WHERE s.id=?`, serviceID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Key, &item.Name, &item.Kind, &item.Criticality, &item.Description, &item.Enabled, &item.Metadata, &item.CreatedAt, &item.UpdatedAt)
+	return item, notFound(err)
+}
+
+func (s *Store) ListMonitorEvents(ctx context.Context, serviceID string, limit int) ([]domain.MonitorEvent, error) {
+	if limit < 1 || limit > 500 {
+		limit = 100
+	}
+	query := `SELECT e.id,e.event_id,e.service_id,s.name,e.source_name,e.health_status,e.severity,e.summary,e.fingerprint,e.details_json,e.observed_at,e.received_at FROM echo_monitor_events e JOIN echo_services s ON s.id=e.service_id`
+	args := []any{}
+	if serviceID != "" {
+		query += ` WHERE e.service_id=?`
+		args = append(args, serviceID)
+	}
+	query += ` ORDER BY e.observed_at DESC,e.received_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.MonitorEvent
+	for rows.Next() {
+		var item domain.MonitorEvent
+		if err := scanMonitorEvent(rows, &item); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListServiceAlerts(ctx context.Context, status string) ([]domain.ServiceAlert, error) {
+	query := `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id`
+	args := []any{}
+	if status == "open" || status == "resolved" {
+		query += ` WHERE a.alert_status=?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY FIELD(a.alert_status,'open','resolved'),FIELD(a.severity,'critical','warning'),a.last_seen_at DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []domain.ServiceAlert
+	for rows.Next() {
+		var item domain.ServiceAlert
+		if err := scanServiceAlert(rows, &item); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RecordMonitorEvent(ctx context.Context, event domain.MonitorEvent) (domain.MonitorResult, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.MonitorResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if event.ID == "" {
+		event.ID = id.New("evt")
+	}
+	result, err := tx.ExecContext(ctx, `INSERT IGNORE INTO echo_monitor_events(id,event_id,service_id,source_name,health_status,severity,summary,fingerprint,details_json,observed_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, event.ID, event.EventID, event.ServiceID, event.Source, event.Status, event.Severity, event.Summary, event.Fingerprint, event.Details, event.ObservedAt)
+	if err != nil {
+		return domain.MonitorResult{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return domain.MonitorResult{}, err
+	}
+	if affected == 0 {
+		var existing domain.MonitorEvent
+		err = tx.QueryRowContext(ctx, `SELECT e.id,e.event_id,e.service_id,s.name,e.source_name,e.health_status,e.severity,e.summary,e.fingerprint,e.details_json,e.observed_at,e.received_at FROM echo_monitor_events e JOIN echo_services s ON s.id=e.service_id WHERE e.event_id=?`, event.EventID).Scan(monitorEventScanArgs(&existing)...)
+		if err != nil {
+			return domain.MonitorResult{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return domain.MonitorResult{}, err
+		}
+		return domain.MonitorResult{Event: existing, Duplicate: true, Transitions: []domain.AlertTransition{}}, nil
+	}
+
+	transitions, err := updateAlerts(ctx, tx, event)
+	if err != nil {
+		return domain.MonitorResult{}, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT e.id,e.event_id,e.service_id,s.name,e.source_name,e.health_status,e.severity,e.summary,e.fingerprint,e.details_json,e.observed_at,e.received_at FROM echo_monitor_events e JOIN echo_services s ON s.id=e.service_id WHERE e.id=?`, event.ID).Scan(monitorEventScanArgs(&event)...); err != nil {
+		return domain.MonitorResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.MonitorResult{}, err
+	}
+	return domain.MonitorResult{Event: event, Transitions: transitions}, nil
+}
+
+type scanner interface {
+	Scan(dest ...any) error
+}
+
+func scanMonitorEvent(row scanner, item *domain.MonitorEvent) error {
+	return row.Scan(monitorEventScanArgs(item)...)
+}
+
+func monitorEventScanArgs(item *domain.MonitorEvent) []any {
+	return []any{&item.ID, &item.EventID, &item.ServiceID, &item.ServiceName, &item.Source, &item.Status, &item.Severity, &item.Summary, &item.Fingerprint, &item.Details, &item.ObservedAt, &item.ReceivedAt}
+}
+
+func scanServiceAlert(row scanner, item *domain.ServiceAlert) error {
+	return row.Scan(&item.ID, &item.ServiceID, &item.ServiceName, &item.ProjectID, &item.Fingerprint, &item.Status, &item.Severity, &item.Title, &item.Summary, &item.LatestEventID, &item.OpenedAt, &item.LastSeenAt, &item.ResolvedAt)
+}
+
+func updateAlerts(ctx context.Context, tx *sql.Tx, event domain.MonitorEvent) ([]domain.AlertTransition, error) {
+	if event.Status == "healthy" {
+		rows, err := tx.QueryContext(ctx, `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id WHERE a.service_id=? AND a.alert_status='open' AND a.last_seen_at<=? FOR UPDATE`, event.ServiceID, event.ObservedAt)
+		if err != nil {
+			return nil, err
+		}
+		var alerts []domain.ServiceAlert
+		for rows.Next() {
+			var alert domain.ServiceAlert
+			if err := scanServiceAlert(rows, &alert); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			alerts = append(alerts, alert)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		transitions := make([]domain.AlertTransition, 0, len(alerts))
+		for _, alert := range alerts {
+			if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET alert_status='resolved',latest_event_id=?,last_seen_at=?,resolved_at=? WHERE id=?`, event.EventID, event.ObservedAt, event.ObservedAt, alert.ID); err != nil {
+				return nil, err
+			}
+			alert.Status = "resolved"
+			alert.LatestEventID = event.EventID
+			alert.LastSeenAt = event.ObservedAt
+			resolved := event.ObservedAt
+			alert.ResolvedAt = &resolved
+			transitions = append(transitions, domain.AlertTransition{Kind: "resolved", Alert: alert})
+		}
+		return transitions, nil
+	}
+	if event.Status != "degraded" && event.Status != "unhealthy" {
+		return []domain.AlertTransition{}, nil
+	}
+	severity := event.Severity
+	if severity != "critical" {
+		severity = "warning"
+	}
+	var alert domain.ServiceAlert
+	err := tx.QueryRowContext(ctx, `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id WHERE a.service_id=? AND a.fingerprint=? FOR UPDATE`, event.ServiceID, event.Fingerprint).Scan(&alert.ID, &alert.ServiceID, &alert.ServiceName, &alert.ProjectID, &alert.Fingerprint, &alert.Status, &alert.Severity, &alert.Title, &alert.Summary, &alert.LatestEventID, &alert.OpenedAt, &alert.LastSeenAt, &alert.ResolvedAt)
+	title := alertTitle(event.Summary)
+	if errors.Is(err, sql.ErrNoRows) {
+		alert = domain.ServiceAlert{ID: id.New("alt"), ServiceID: event.ServiceID, Fingerprint: event.Fingerprint, Status: "open", Severity: severity, Title: title, Summary: event.Summary, LatestEventID: event.EventID, OpenedAt: event.ObservedAt, LastSeenAt: event.ObservedAt}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO echo_service_alerts(id,service_id,fingerprint,alert_status,severity,title,summary,latest_event_id,opened_at,last_seen_at) VALUES(?,?,?,'open',?,?,?,?,?,?)`, alert.ID, alert.ServiceID, alert.Fingerprint, alert.Severity, alert.Title, alert.Summary, alert.LatestEventID, alert.OpenedAt, alert.LastSeenAt); err != nil {
+			return nil, err
+		}
+		if err := tx.QueryRowContext(ctx, `SELECT name,project_id FROM echo_services WHERE id=?`, event.ServiceID).Scan(&alert.ServiceName, &alert.ProjectID); err != nil {
+			return nil, err
+		}
+		return []domain.AlertTransition{{Kind: "opened", Alert: alert}}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if event.ObservedAt.Before(alert.LastSeenAt) {
+		return []domain.AlertTransition{{Kind: "stale", Alert: alert}}, nil
+	}
+	kind := "updated"
+	if alert.Status == "resolved" {
+		kind = "reopened"
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET alert_status='open',severity=?,title=?,summary=?,latest_event_id=?,opened_at=IF(alert_status='resolved',?,opened_at),last_seen_at=?,resolved_at=NULL WHERE id=?`, severity, title, event.Summary, event.EventID, event.ObservedAt, event.ObservedAt, alert.ID); err != nil {
+		return nil, err
+	}
+	alert.Status = "open"
+	alert.Severity = severity
+	alert.Title = title
+	alert.Summary = event.Summary
+	alert.LatestEventID = event.EventID
+	alert.LastSeenAt = event.ObservedAt
+	alert.ResolvedAt = nil
+	if kind == "reopened" {
+		alert.OpenedAt = event.ObservedAt
+	}
+	return []domain.AlertTransition{{Kind: kind, Alert: alert}}, nil
+}
+
+func alertTitle(summary string) string {
+	summary = strings.TrimSpace(strings.SplitN(summary, "\n", 2)[0])
+	runes := []rune(summary)
+	if len(runes) > 300 {
+		return string(runes[:300])
+	}
+	return summary
 }
 
 func (s *Store) CreateChangeSet(ctx context.Context, item domain.ChangeSet) (domain.ChangeSet, error) {

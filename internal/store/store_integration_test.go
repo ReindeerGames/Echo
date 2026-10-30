@@ -109,9 +109,60 @@ func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMariaDBMonitorEventLifecycle(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "monitoring", Name: "Monitoring", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "web", Name: "Web", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := time.Now().UTC().Truncate(time.Microsecond)
+	unhealthy := domain.MonitorEvent{EventID: "monitor-1", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "Health endpoint failed", Fingerprint: "health-endpoint", Details: json.RawMessage(`{}`), ObservedAt: observed}
+	result, err := st.RecordMonitorEvent(ctx, unhealthy)
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
+		t.Fatalf("open alert: result=%#v err=%v", result, err)
+	}
+	duplicate, err := st.RecordMonitorEvent(ctx, unhealthy)
+	if err != nil || !duplicate.Duplicate || len(duplicate.Transitions) != 0 {
+		t.Fatalf("deduplicate event: result=%#v err=%v", duplicate, err)
+	}
+	healthy := domain.MonitorEvent{EventID: "monitor-2", ServiceID: service.ID, Source: "integration", Status: "healthy", Severity: "info", Summary: "Health endpoint recovered", Details: json.RawMessage(`{}`), ObservedAt: observed.Add(time.Minute)}
+	result, err = st.RecordMonitorEvent(ctx, healthy)
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "resolved" {
+		t.Fatalf("resolve alert: result=%#v err=%v", result, err)
+	}
+	unhealthy.EventID = "monitor-3"
+	unhealthy.ObservedAt = observed.Add(2 * time.Minute)
+	result, err = st.RecordMonitorEvent(ctx, unhealthy)
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "reopened" {
+		t.Fatalf("reopen alert: result=%#v err=%v", result, err)
+	}
+	alerts, err := st.ListServiceAlerts(ctx, "open")
+	if err != nil || len(alerts) != 1 || alerts[0].ServiceName != service.Name {
+		t.Fatalf("list alerts: items=%#v err=%v", alerts, err)
+	}
+	dashboard, err := st.Dashboard(ctx)
+	if err != nil || dashboard.OpenAlerts != 1 {
+		t.Fatalf("dashboard alert count: item=%#v err=%v", dashboard, err)
+	}
+}
+
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

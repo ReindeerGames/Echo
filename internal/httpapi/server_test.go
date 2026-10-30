@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ReindeerGames/echo/internal/config"
 	"github.com/ReindeerGames/echo/internal/domain"
 	runtimestate "github.com/ReindeerGames/echo/internal/runtime"
 )
@@ -64,5 +65,25 @@ func TestWhatsAppLinkStartsPairing(t *testing.T) {
 func TestSlug(t *testing.T) {
 	if got := slug(" Team Nudgie / ZA "); got != "team-nudgie-za" {
 		t.Fatalf("unexpected slug %q", got)
+	}
+}
+
+func TestMonitorWebhookFailsClosedWithoutSecret(t *testing.T) {
+	server := &Server{cfg: config.Config{}}
+	request := httptest.NewRequest("POST", "/webhooks/monitor", strings.NewReader(`{}`))
+	response := httptest.NewRecorder()
+	server.monitorWebhook(response, request)
+	if response.Code != 503 || !strings.Contains(response.Body.String(), "monitor_webhook_disabled") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestMonitorWebhookRejectsUnsignedPayload(t *testing.T) {
+	server := &Server{cfg: config.Config{Monitor: config.Monitor{WebhookSecret: "test-secret"}}}
+	request := httptest.NewRequest("POST", "/webhooks/monitor", strings.NewReader(`{}`))
+	response := httptest.NewRecorder()
+	server.monitorWebhook(response, request)
+	if response.Code != 401 || !strings.Contains(response.Body.String(), "invalid_signature") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 }
