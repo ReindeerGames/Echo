@@ -70,6 +70,20 @@ type Service struct {
 	UpdatedAt               time.Time       `json:"updatedAt"`
 }
 
+type ServiceDependency struct {
+	ID                   string    `json:"id"`
+	ProjectID            string    `json:"projectId"`
+	ServiceID            string    `json:"serviceId"`
+	ServiceKey           string    `json:"serviceKey"`
+	ServiceName          string    `json:"serviceName"`
+	DependsOnServiceID   string    `json:"dependsOnServiceId"`
+	DependsOnServiceKey  string    `json:"dependsOnServiceKey"`
+	DependsOnServiceName string    `json:"dependsOnServiceName"`
+	Kind                 string    `json:"kind"`
+	Description          string    `json:"description"`
+	CreatedAt            time.Time `json:"createdAt"`
+}
+
 type StaleServiceHeartbeat struct {
 	ServiceID       string     `json:"serviceId"`
 	ServiceName     string     `json:"serviceName"`

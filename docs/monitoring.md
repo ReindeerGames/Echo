@@ -10,6 +10,12 @@ Open **Monitoring → Add service** and map each runtime workload to its Echo pr
 
 Set `ECHO_MONITOR_WEBHOOK_SECRET` to a random value of at least 32 characters. Leaving it empty disables the public monitoring endpoint.
 
+## Service topology
+
+Open a service in **Monitoring** to declare what it directly depends on and which services depend on it. Relationships are directed, remain inside one project, and use a bounded type (`runtime`, `data`, `messaging`, `network`, or `other`) plus optional short context. Echo shows them in service detail and prioritizes them in investigations, but still requires alerts, signals, incidents, deployments, or repository evidence before suggesting a cause. A declared dependency does not make a remote request or grant Echo access to either workload.
+
+Keep the graph limited to direct operational dependencies and remove stale relationships promptly. A service with dependency relationships cannot be moved to another project until those relationships are removed, which prevents a project edit from silently leaking another project's catalogue into an investigation.
+
 ## Event contract
 
 Send `POST /webhooks/monitor` with `Content-Type: application/json` and an `X-Echo-Signature-256` header containing `sha256=<hex HMAC-SHA256 of the exact request body>`.

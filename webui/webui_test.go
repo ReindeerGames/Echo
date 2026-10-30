@@ -180,6 +180,18 @@ func TestMonitoringSupportsAlertAcknowledgementLifecycle(t *testing.T) {
 	}
 }
 
+func TestMonitoringSupportsProjectScopedServiceTopology(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/service-dependencies", "dependency-form", "Add dependency", "Declared topology", "Topology is evidence, not causation", "data-delete-dependency", "Service dependency added"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("service topology workflow is missing %q", expected)
+		}
+	}
+}
+
 func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

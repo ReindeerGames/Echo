@@ -447,7 +447,30 @@ func (s *Store) SaveService(ctx context.Context, item domain.Service) (domain.Se
 		item.ID = id.New("svc")
 		_, err = s.db.ExecContext(ctx, `INSERT INTO echo_services(id,project_id,service_key,name,service_kind,criticality,description,enabled,heartbeat_timeout_seconds,metadata_json) VALUES(?,?,?,?,?,?,?,?,?,?)`, item.ID, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.HeartbeatTimeoutSeconds, item.Metadata)
 	} else {
-		_, err = s.db.ExecContext(ctx, `UPDATE echo_services SET project_id=?,service_key=?,name=?,service_kind=?,criticality=?,description=?,enabled=?,heartbeat_timeout_seconds=?,metadata_json=? WHERE id=?`, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.HeartbeatTimeoutSeconds, item.Metadata, item.ID)
+		tx, beginErr := s.db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return domain.Service{}, beginErr
+		}
+		defer func() { _ = tx.Rollback() }()
+		var currentProjectID string
+		if scanErr := tx.QueryRowContext(ctx, `SELECT project_id FROM echo_services WHERE id=? FOR UPDATE`, item.ID).Scan(&currentProjectID); scanErr != nil {
+			return domain.Service{}, notFound(scanErr)
+		}
+		if currentProjectID != item.ProjectID {
+			var dependencyCount int
+			if countErr := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_service_dependencies WHERE service_id=? OR depends_on_service_id=?`, item.ID, item.ID).Scan(&dependencyCount); countErr != nil {
+				return domain.Service{}, countErr
+			}
+			if dependencyCount > 0 {
+				return domain.Service{}, ErrServiceHasDependencies
+			}
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE echo_services SET project_id=?,service_key=?,name=?,service_kind=?,criticality=?,description=?,enabled=?,heartbeat_timeout_seconds=?,metadata_json=? WHERE id=?`, item.ProjectID, item.Key, item.Name, item.Kind, item.Criticality, item.Description, item.Enabled, item.HeartbeatTimeoutSeconds, item.Metadata, item.ID); err != nil {
+			return domain.Service{}, err
+		}
+		if err = tx.Commit(); err != nil {
+			return domain.Service{}, err
+		}
 	}
 	if err != nil {
 		return domain.Service{}, err

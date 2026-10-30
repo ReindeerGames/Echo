@@ -111,6 +111,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("POST /api/v1/environments", s.environments)
 	protected.HandleFunc("GET /api/v1/services", s.services)
 	protected.HandleFunc("POST /api/v1/services", s.services)
+	protected.HandleFunc("GET /api/v1/service-dependencies", s.serviceDependencies)
+	protected.HandleFunc("POST /api/v1/service-dependencies", s.serviceDependencies)
+	protected.HandleFunc("DELETE /api/v1/service-dependencies/{id}", s.deleteServiceDependency)
 	protected.HandleFunc("GET /api/v1/monitor/events", s.monitorEvents)
 	protected.HandleFunc("GET /api/v1/monitor/alerts", s.serviceAlerts)
 	protected.HandleFunc("POST /api/v1/monitor/alerts/{id}/acknowledgement", s.serviceAlertAcknowledgement)
@@ -516,10 +519,62 @@ func (s *Server) services(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	saved, err := s.store.SaveService(r.Context(), item)
+	if errors.Is(err, store.ErrServiceHasDependencies) {
+		writeError(w, http.StatusConflict, "service_has_dependencies", "remove this service's dependency relationships before moving it to another project")
+		return
+	}
 	if err == nil {
 		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service.saved", "service", saved.ID, "succeeded", map[string]any{"key": saved.Key, "criticality": saved.Criticality})
 	}
 	respondStatus(w, http.StatusCreated, saved, err)
+}
+
+func (s *Server) serviceDependencies(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		items, err := s.store.ListServiceDependencies(r.Context(), r.URL.Query().Get("serviceId"), 500)
+		respond(w, items, err)
+		return
+	}
+	var item domain.ServiceDependency
+	if err := decodeJSON(r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_service_dependency", err.Error())
+		return
+	}
+	item.Kind = strings.ToLower(strings.TrimSpace(item.Kind))
+	item.Description = strings.TrimSpace(item.Description)
+	if item.ServiceID == "" || item.DependsOnServiceID == "" || item.ServiceID == item.DependsOnServiceID || !oneOf(item.Kind, "runtime", "data", "messaging", "network", "other") || len(item.Description) > 300 {
+		writeError(w, http.StatusBadRequest, "invalid_service_dependency", "two distinct services, a valid relationship kind, and a description of at most 300 characters are required")
+		return
+	}
+	saved, err := s.store.CreateServiceDependency(r.Context(), item)
+	if errors.Is(err, store.ErrDependencyExists) {
+		writeError(w, http.StatusConflict, "service_dependency_exists", "that service dependency is already configured")
+		return
+	}
+	if errors.Is(err, store.ErrDependencyProjectMismatch) {
+		writeError(w, http.StatusBadRequest, "service_dependency_project_mismatch", "service dependencies must belong to the same project")
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusBadRequest, "service_dependency_not_found", "both services must exist")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_dependency.created", "service_dependency", saved.ID, "succeeded", map[string]any{"serviceId": saved.ServiceID, "dependsOnServiceId": saved.DependsOnServiceID, "kind": saved.Kind})
+	}
+	respondStatus(w, http.StatusCreated, saved, err)
+}
+
+func (s *Server) deleteServiceDependency(w http.ResponseWriter, r *http.Request) {
+	deleted, err := s.store.DeleteServiceDependency(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "service_dependency_not_found", "service dependency was not found")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_dependency.deleted", "service_dependency", deleted.ID, "succeeded", map[string]any{"serviceId": deleted.ServiceID, "dependsOnServiceId": deleted.DependsOnServiceID, "kind": deleted.Kind})
+	}
+	respond(w, deleted, err)
 }
 
 func (s *Server) monitorEvents(w http.ResponseWriter, r *http.Request) {

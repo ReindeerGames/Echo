@@ -18,24 +18,25 @@ import (
 )
 
 type fakeReader struct {
-	dashboard   domain.Dashboard
-	projects    []domain.Project
-	groups      []domain.GroupBinding
-	repos       []domain.Repository
-	services    []domain.Service
-	alerts      []domain.ServiceAlert
-	maintenance []domain.MaintenanceWindow
-	events      []domain.MonitorEvent
-	jobs        []domain.Job
-	deliveries  []domain.OutboundDelivery
-	deployments []domain.Deployment
-	changes     []domain.ChangeSet
-	incident    domain.Incident
-	incidents   []domain.Incident
-	analysis    domain.Analysis
-	audit       []domain.AuditEvent
-	attachments []domain.IncidentAttachment
-	messages    []domain.IncidentMessage
+	dashboard    domain.Dashboard
+	projects     []domain.Project
+	groups       []domain.GroupBinding
+	repos        []domain.Repository
+	services     []domain.Service
+	dependencies []domain.ServiceDependency
+	alerts       []domain.ServiceAlert
+	maintenance  []domain.MaintenanceWindow
+	events       []domain.MonitorEvent
+	jobs         []domain.Job
+	deliveries   []domain.OutboundDelivery
+	deployments  []domain.Deployment
+	changes      []domain.ChangeSet
+	incident     domain.Incident
+	incidents    []domain.Incident
+	analysis     domain.Analysis
+	audit        []domain.AuditEvent
+	attachments  []domain.IncidentAttachment
+	messages     []domain.IncidentMessage
 }
 
 type fakeToolModel struct{}
@@ -147,6 +148,19 @@ func (f fakeReader) ListRepositories(context.Context, string) ([]domain.Reposito
 }
 func (f fakeReader) ListServices(context.Context, string) ([]domain.Service, error) {
 	return f.services, nil
+}
+func (f fakeReader) ListServiceDependencies(_ context.Context, serviceID string, limit int) ([]domain.ServiceDependency, error) {
+	var out []domain.ServiceDependency
+	for _, dependency := range f.dependencies {
+		if serviceID != "" && dependency.ServiceID != serviceID && dependency.DependsOnServiceID != serviceID {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, dependency)
+	}
+	return out, nil
 }
 func (f fakeReader) ListServiceAlerts(context.Context, string) ([]domain.ServiceAlert, error) {
 	return f.alerts, nil
@@ -843,7 +857,8 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 			{ID: "svc_database", ProjectID: "prj_1", ProjectName: "Invoices", Key: "invoices-database", Name: "Invoices database", Kind: "database", Criticality: "critical", Enabled: true, HeartbeatTimeoutSeconds: 120},
 			{ID: "svc_unrelated", ProjectID: "prj_2", ProjectName: "Other", Key: "other-database", Name: "Unrelated database", Kind: "database", Criticality: "critical", Enabled: true},
 		},
-		events: []domain.MonitorEvent{{ServiceID: "svc_api", Status: "unhealthy", Severity: "critical", Summary: "Readiness returned HTTP 503", Source: "observer-01", Fingerprint: "http-health", ObservedAt: now.Add(-2 * time.Minute), Details: json.RawMessage(`{"statusCode":503,"latencyMs":42,"secret":"must-not-leak"}`)}},
+		dependencies: []domain.ServiceDependency{{ID: "sdp_1", ProjectID: "prj_1", ServiceID: "svc_api", ServiceKey: "invoices-api", ServiceName: "Invoices API", DependsOnServiceID: "svc_database", DependsOnServiceKey: "invoices-database", DependsOnServiceName: "Invoices database", Kind: "data", Description: "primary relational store"}},
+		events:       []domain.MonitorEvent{{ServiceID: "svc_api", Status: "unhealthy", Severity: "critical", Summary: "Readiness returned HTTP 503", Source: "observer-01", Fingerprint: "http-health", ObservedAt: now.Add(-2 * time.Minute), Details: json.RawMessage(`{"statusCode":503,"latencyMs":42,"secret":"must-not-leak"}`)}},
 		alerts: []domain.ServiceAlert{
 			{ServiceID: "svc_api", ServiceName: "Invoices API", ProjectID: "prj_1", Status: "open", Severity: "critical", Summary: "Readiness returned HTTP 503", Fingerprint: "http-health", OpenedAt: now.Add(-2 * time.Minute), LastSeenAt: now.Add(-time.Minute)},
 			{ServiceID: "svc_database", ServiceName: "Invoices database", ProjectID: "prj_1", Status: "open", Severity: "warning", Summary: "Database backup is stale", Fingerprint: "artifact-freshness", OpenedAt: now.Add(-time.Hour), LastSeenAt: now.Add(-5 * time.Minute)},
@@ -870,7 +885,7 @@ func TestServiceInvestigationCorrelatesBoundedOperationalEvidence(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`, `"summary":"Reduce checkout database timeout"`, `"commits_truncated":false`, `"name":"Invoices database"`, `"state":"attention"`, `"open_alert_count":1`, `"related_services_truncated":false`) {
+	if !containsAll(output, `"found":true`, `"limitations":["no logs","no shell","no SSH","no source download","no mutation"]`, `"name":"Invoices API"`, `"summary":"Readiness returned HTTP 503"`, `"statusCode":503`, `"id":"dep_1"`, `"id":"inc_1"`, `"repository":"ReindeerGames/invoices"`, `"workflow_state":"attention"`, `1 latest workflow(s) failed`, `"summary":"Reduce checkout database timeout"`, `"commits_truncated":false`, `"name":"Invoices database"`, `"state":"attention"`, `"open_alert_count":1`, `"direction":"depends_on"`, `"kind":"data"`, `"description":"primary relational store"`, `"dependency_relations"`, `"related_services_truncated":false`) {
 		t.Fatalf("incomplete service investigation output: %s", output)
 	}
 	for _, forbidden := range []string{"must-not-leak", "must-not-appear", "old-invoices", "Other/other", "Unrelated database"} {
@@ -898,12 +913,16 @@ func TestRelatedServiceViewsPrioritizeAttentionAndRemainBounded(t *testing.T) {
 		events = append(events, domain.MonitorEvent{ServiceID: serviceID, Status: "healthy", Severity: "info", Summary: "healthy", ObservedAt: now.Add(-time.Minute)})
 	}
 	alerts := []domain.ServiceAlert{{ServiceID: "svc_13", Status: "open", Severity: "critical", Summary: "dependency failed"}, {ServiceID: "svc_other_project", Status: "open"}}
-	views, truncated := relatedServiceViews(now, target, services, events, alerts, 12)
+	dependencies := []domain.ServiceDependency{{ServiceID: target.ID, DependsOnServiceID: "svc_00", Kind: "runtime", Description: "direct dependency"}}
+	views, truncated := relatedServiceViews(now, target, services, events, alerts, dependencies, 12)
 	if len(views) != 12 || !truncated {
 		t.Fatalf("related service context was not bounded: count=%d truncated=%v", len(views), truncated)
 	}
-	if views[0]["id"] != "svc_13" || views[0]["state"] != "attention" || views[0]["open_alert_count"] != 1 {
-		t.Fatalf("attention service was not prioritized: %#v", views[0])
+	if views[0]["id"] != "svc_00" || views[0]["dependency_relations"] == nil {
+		t.Fatalf("declared dependency was not prioritized: %#v", views[0])
+	}
+	if views[1]["id"] != "svc_13" || views[1]["state"] != "attention" || views[1]["open_alert_count"] != 1 {
+		t.Fatalf("attention service was not prioritized after direct dependencies: %#v", views[1])
 	}
 	for _, view := range views {
 		if view["id"] == "svc_other_project" || view["id"] == target.ID {

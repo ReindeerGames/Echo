@@ -877,6 +877,72 @@ func TestMariaDBServiceCreateAndEditAreUnambiguous(t *testing.T) {
 	}
 }
 
+func TestMariaDBServiceDependenciesStayExplicitAndProjectScoped(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "topology", Name: "Topology", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherProject, err := st.SaveProject(ctx, domain.Project{Key: "other-topology", Name: "Other topology", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "web", Name: "Web", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "database", Name: "Database", Kind: "database", Criticality: "critical", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := st.SaveService(ctx, domain.Service{ProjectID: otherProject.ID, Key: "external", Name: "External", Kind: "external", Criticality: "medium", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependency, err := st.CreateServiceDependency(ctx, domain.ServiceDependency{ServiceID: web.ID, DependsOnServiceID: database.ID, Kind: "data", Description: "  primary   relational store "})
+	if err != nil || dependency.ProjectID != project.ID || dependency.ServiceName != "Web" || dependency.DependsOnServiceName != "Database" || dependency.Description != "primary relational store" {
+		t.Fatalf("create dependency: dependency=%#v err=%v", dependency, err)
+	}
+	items, err := st.ListServiceDependencies(ctx, database.ID, 10)
+	if err != nil || len(items) != 1 || items[0].ID != dependency.ID {
+		t.Fatalf("list dependency from target: items=%#v err=%v", items, err)
+	}
+	if _, err := st.CreateServiceDependency(ctx, domain.ServiceDependency{ServiceID: web.ID, DependsOnServiceID: database.ID, Kind: "runtime"}); !errors.Is(err, ErrDependencyExists) {
+		t.Fatalf("duplicate dependency accepted: %v", err)
+	}
+	if _, err := st.CreateServiceDependency(ctx, domain.ServiceDependency{ServiceID: web.ID, DependsOnServiceID: external.ID, Kind: "network"}); !errors.Is(err, ErrDependencyProjectMismatch) {
+		t.Fatalf("cross-project dependency accepted: %v", err)
+	}
+	web.ProjectID = otherProject.ID
+	if _, err := st.SaveService(ctx, web); !errors.Is(err, ErrServiceHasDependencies) {
+		t.Fatalf("service moved across projects with live dependency: %v", err)
+	}
+	unchanged, err := st.GetService(ctx, web.ID)
+	if err != nil || unchanged.ProjectID != project.ID {
+		t.Fatalf("failed move changed service: service=%#v err=%v", unchanged, err)
+	}
+	deleted, err := st.DeleteServiceDependency(ctx, dependency.ID)
+	if err != nil || deleted.ID != dependency.ID {
+		t.Fatalf("delete dependency: dependency=%#v err=%v", deleted, err)
+	}
+	if _, err := st.DeleteServiceDependency(ctx, dependency.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted dependency remained available: %v", err)
+	}
+	if moved, err := st.SaveService(ctx, web); err != nil || moved.ProjectID != otherProject.ID {
+		t.Fatalf("service move remained blocked after dependency removal: service=%#v err=%v", moved, err)
+	}
+}
+
 func TestMariaDBHeartbeatWatchdogLifecycle(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -1231,7 +1297,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_service_dependencies", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)
