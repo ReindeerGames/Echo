@@ -118,6 +118,21 @@ func TestAttachmentRetentionIsBounded(t *testing.T) {
 	}
 }
 
+func TestWhatsAppOutboxRetentionIsBounded(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "false")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	t.Setenv("ECHO_WHATSAPP_OUTBOX_RETENTION", "1h")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected unsafe short outbox retention to be rejected")
+	}
+	t.Setenv("ECHO_WHATSAPP_OUTBOX_RETENTION", "8761h")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected oversized outbox retention to be rejected")
+	}
+}
+
 func TestMonitorWatchdogIntervalIsBounded(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "development")

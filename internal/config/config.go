@@ -40,11 +40,12 @@ type Database struct {
 }
 
 type WhatsApp struct {
-	Enabled       bool
-	OwnerJID      string
-	DeviceName    string
-	HistorySync   bool
-	ContextWindow int
+	Enabled         bool
+	OwnerJID        string
+	DeviceName      string
+	HistorySync     bool
+	ContextWindow   int
+	OutboxRetention time.Duration
 }
 
 type GitHub struct {
@@ -109,11 +110,12 @@ func Load() (Config, error) {
 		},
 		Database: database,
 		WhatsApp: WhatsApp{
-			Enabled:       boolean("ECHO_WHATSAPP_ENABLED", true),
-			OwnerJID:      strings.TrimSpace(os.Getenv("ECHO_OWNER_JID")),
-			DeviceName:    env("ECHO_WHATSAPP_DEVICE_NAME", "Echo"),
-			HistorySync:   boolean("ECHO_WHATSAPP_HISTORY_SYNC", false),
-			ContextWindow: integer("ECHO_WHATSAPP_CONTEXT_WINDOW", 5),
+			Enabled:         boolean("ECHO_WHATSAPP_ENABLED", true),
+			OwnerJID:        strings.TrimSpace(os.Getenv("ECHO_OWNER_JID")),
+			DeviceName:      env("ECHO_WHATSAPP_DEVICE_NAME", "Echo"),
+			HistorySync:     boolean("ECHO_WHATSAPP_HISTORY_SYNC", false),
+			ContextWindow:   integer("ECHO_WHATSAPP_CONTEXT_WINDOW", 5),
+			OutboxRetention: duration("ECHO_WHATSAPP_OUTBOX_RETENTION", 30*24*time.Hour),
 		},
 		GitHub: GitHub{
 			APIBaseURL:    strings.TrimRight(env("ECHO_GITHUB_API_URL", "https://api.github.com"), "/"),
@@ -178,6 +180,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Assistant.AttachmentRetention < 24*time.Hour || cfg.Assistant.AttachmentRetention > 365*24*time.Hour {
 		return Config{}, errors.New("ECHO_ATTACHMENT_RETENTION must be between 24h and 8760h")
+	}
+	if cfg.WhatsApp.OutboxRetention < 24*time.Hour || cfg.WhatsApp.OutboxRetention > 365*24*time.Hour {
+		return Config{}, errors.New("ECHO_WHATSAPP_OUTBOX_RETENTION must be between 24h and 8760h")
 	}
 	if cfg.Monitor.WatchdogInterval < 5*time.Second || cfg.Monitor.WatchdogInterval > 5*time.Minute {
 		return Config{}, errors.New("ECHO_MONITOR_WATCHDOG_INTERVAL must be between 5s and 5m")

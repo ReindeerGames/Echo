@@ -62,7 +62,7 @@ func run() error {
 	owners := owner.New(st, cfg.WhatsApp.OwnerJID)
 	reporter := &runtimeComponentReporter{store: st, owners: owners, recoveryWindow: 30 * time.Second}
 	resolveDisabledComponentAlerts(ctx, st, owners, cfg.Worker.Enabled, cfg.WhatsApp.Enabled)
-	retention := maintenance.NewRetention(st, cfg.Assistant.Retention, cfg.Assistant.AttachmentRetention, cfg.Monitor.Retention, 24*time.Hour)
+	retention := maintenance.NewRetention(st, cfg.Assistant.Retention, cfg.Assistant.AttachmentRetention, cfg.Monitor.Retention, cfg.WhatsApp.OutboxRetention, 24*time.Hour)
 	go superviseComponent(ctx, state, "retention-maintenance", func() error { return retention.Run(ctx) }, reporter)
 
 	vault, err := security.NewVault(st, cfg.Security.EncryptionKey)

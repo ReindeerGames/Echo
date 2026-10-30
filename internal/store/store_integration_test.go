@@ -776,6 +776,24 @@ func TestMariaDBAssistantConversationIsIdempotent(t *testing.T) {
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&outboxCount); err != nil || outboxCount != 1 {
 		t.Fatalf("failed completion changed outbox: count=%d err=%v", outboxCount, err)
 	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	old := now.Add(-60 * 24 * time.Hour)
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_whatsapp_outbox SET status='sent',sent_at=?,created_at=? WHERE id=?`, old, old, outbound.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body,status,created_at,sent_at) VALUES
+      ('out-retention-recent','owner@s.whatsapp.net','recent sent body','sent',?,?),
+      ('out-retention-dead','owner@s.whatsapp.net','dead body','dead',?,NULL),
+      ('out-retention-queued','owner@s.whatsapp.net','queued body','queued',?,NULL)`, now.Add(-time.Hour), now.Add(-time.Hour), old, old); err != nil {
+		t.Fatal(err)
+	}
+	prunedOutbox, err := st.PruneSentOutbound(ctx, now.Add(-30*24*time.Hour))
+	if err != nil || prunedOutbox != 1 {
+		t.Fatalf("prune sent outbox: count=%d err=%v", prunedOutbox, err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE id IN ('out-retention-recent','out-retention-dead','out-retention-queued')`).Scan(&outboxCount); err != nil || outboxCount != 3 {
+		t.Fatalf("outbox retention removed actionable or recent deliveries: count=%d err=%v", outboxCount, err)
+	}
 }
 
 func TestMariaDBExpiredLeasesAreRecoveredOrFinalized(t *testing.T) {
