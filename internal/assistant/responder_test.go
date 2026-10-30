@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -36,6 +38,22 @@ type fakeRepositoryInspector struct {
 	status githubapp.RepositoryStatus
 	repo   domain.Repository
 	err    error
+}
+
+type estateRepositoryInspector struct {
+	mu       sync.Mutex
+	statuses map[string]githubapp.RepositoryStatus
+	errors   map[string]error
+	calls    []string
+}
+
+func (f *estateRepositoryInspector) InspectRepository(_ context.Context, repo domain.Repository) (githubapp.RepositoryStatus, error) {
+	name := repo.Owner + "/" + repo.Name
+	f.mu.Lock()
+	f.calls = append(f.calls, name)
+	status, err := f.statuses[name], f.errors[name]
+	f.mu.Unlock()
+	return status, err
 }
 
 func (f *fakeRepositoryInspector) InspectRepository(_ context.Context, repo domain.Repository) (githubapp.RepositoryStatus, error) {
@@ -125,6 +143,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 	tests := map[string]string{
 		"anything wrong?":     "alerts",
 		"good morning":        "brief",
+		"github status":       "repository_overview",
 		"how are things":      "status",
 		"service nudgie-web":  "service",
 		"what can you do?":    "help",
@@ -390,6 +409,66 @@ func TestRepositoryStatusReportsAmbiguousConfiguredMatchesWithoutGitHubCall(t *t
 	answer, intent, err := NewOperator(reader, nil, nil, inspector).Answer(context.Background(), "repo site")
 	if err != nil || intent != "repository" || !containsAll(answer, "ambiguous", "One/site", "Two/site") || inspector.repo.ID != "" {
 		t.Fatalf("unexpected ambiguous answer intent=%s body=%s repo=%#v err=%v", intent, answer, inspector.repo, err)
+	}
+}
+
+func TestRepositoryOverviewReportsLatestWorkflowHealthAndPartialFailures(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{repos: []domain.Repository{
+		{ID: "repo_healthy", Owner: "ReindeerGames", Name: "healthy", DefaultBranch: "main", Enabled: true},
+		{ID: "repo_failed", Owner: "ReindeerGames", Name: "failed", DefaultBranch: "main", Enabled: true},
+		{ID: "repo_unavailable", Owner: "ReindeerGames", Name: "unavailable", DefaultBranch: "main", Enabled: true},
+		{ID: "repo_disabled", Owner: "ReindeerGames", Name: "disabled", DefaultBranch: "main", Enabled: false},
+	}}
+	inspector := &estateRepositoryInspector{
+		statuses: map[string]githubapp.RepositoryStatus{
+			"ReindeerGames/healthy": {
+				Repository: "ReindeerGames/healthy", DefaultBranch: "main", HeadSHA: strings.Repeat("a", 40), HeadCommittedAt: now.Add(-time.Hour),
+				WorkflowRuns: []githubapp.RepositoryWorkflowRun{
+					{Name: "CI", Status: "completed", Conclusion: "success", UpdatedAt: now.Add(-time.Minute)},
+					{Name: "CI", Status: "completed", Conclusion: "failure", UpdatedAt: now.Add(-time.Hour)},
+				},
+			},
+			"ReindeerGames/failed": {
+				Repository: "ReindeerGames/failed", DefaultBranch: "main", HeadSHA: strings.Repeat("b", 40), HeadCommittedAt: now.Add(-2 * time.Hour),
+				WorkflowRuns: []githubapp.RepositoryWorkflowRun{{Name: "Deploy", Status: "completed", Conclusion: "failure", UpdatedAt: now.Add(-time.Minute)}},
+			},
+		},
+		errors: map[string]error{"ReindeerGames/unavailable": errors.New("secret upstream error must not leak")},
+	}
+	responder := NewOperator(reader, nil, nil, inspector)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "github status")
+	if err != nil || intent != "repository_overview" || !containsAll(answer, "GitHub repository status (3 enabled)", "HEALTHY · ReindeerGames/healthy · 1 latest workflow(s) healthy", "ATTENTION · ReindeerGames/failed · 1 latest workflow(s) failed", "UNAVAILABLE · ReindeerGames/unavailable") {
+		t.Fatalf("unexpected repository overview intent=%s body=%s err=%v", intent, answer, err)
+	}
+	if strings.Contains(answer, "secret upstream") || strings.Contains(answer, "ReindeerGames/disabled") {
+		t.Fatalf("unsafe repository overview: %s", answer)
+	}
+	output, err := responder.executeTool(context.Background(), "get_repository_overview", json.RawMessage(`{}`))
+	if err != nil || !containsAll(output, `"configured_count":3`, `"inspected_count":2`, `"failed_count":1`, `"workflow_state":"healthy"`, `"workflow_state":"attention"`, `"reason":"inspection_failed"`) || strings.Contains(output, "secret upstream") {
+		t.Fatalf("unexpected repository overview tool output=%s err=%v", output, err)
+	}
+}
+
+func TestRepositoryOverviewIsBoundedToTwenty(t *testing.T) {
+	reader := fakeReader{}
+	inspector := &estateRepositoryInspector{statuses: map[string]githubapp.RepositoryStatus{}, errors: map[string]error{}}
+	for index := 0; index < 21; index++ {
+		name := fmt.Sprintf("repo-%02d", index)
+		reader.repos = append(reader.repos, domain.Repository{ID: "id_" + name, Owner: "Org", Name: name, DefaultBranch: "main", Enabled: true})
+		inspector.statuses["Org/"+name] = githubapp.RepositoryStatus{Repository: "Org/" + name, DefaultBranch: "main", HeadSHA: strings.Repeat("a", 40), HeadCommittedAt: time.Now().UTC()}
+	}
+	responder := NewOperator(reader, nil, nil, inspector)
+	output, err := responder.executeTool(context.Background(), "get_repository_overview", json.RawMessage(`{}`))
+	if err != nil || !containsAll(output, `"configured_count":21`, `"truncated":true`) {
+		t.Fatalf("unexpected bounded overview output=%s err=%v", output, err)
+	}
+	inspector.mu.Lock()
+	calls := len(inspector.calls)
+	inspector.mu.Unlock()
+	if calls != 20 {
+		t.Fatalf("repository overview made %d calls, want 20", calls)
 	}
 }
 

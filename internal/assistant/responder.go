@@ -9,6 +9,7 @@ import (
 	"io"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/ai"
@@ -106,6 +107,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_project", "Get one project's configured repositories, monitored services and freshness, open alerts, recent incidents, and deployment state.", schema(map[string]any{"project": map[string]string{"type": "string", "description": "Exact project ID, key, or name."}}, []string{"project"})),
+		ai.FunctionTool("get_repository_overview", "Inspect enabled configured repositories and summarize each default branch's current GitHub Actions health. This tool is read-only and bounded to twenty repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_repository_status", "Inspect the configured repository default-branch head and its ten most recent GitHub Actions runs. This tool is read-only.", schema(map[string]any{"repository": map[string]string{"type": "string", "description": "Configured repository ID, name, or owner/name."}}, []string{"repository"})),
 		ai.FunctionTool("list_incidents", "Find recent incidents by optional status and project/summary text. Use this before get_incident when the exact ID is unknown.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Project or summary fragment, or empty string."}, "status": map[string]string{"type": "string", "description": "Exact incident status, or empty string."}}, []string{"query", "status"})),
 		ai.FunctionTool("get_incident", "Get an incident and its latest evidence-backed diagnosis by exact incident ID.", schema(map[string]any{"incident_id": map[string]string{"type": "string"}}, []string{"incident_id"})),
@@ -351,6 +353,15 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			runs = append(runs, map[string]any{"name": truncateRunes(run.Name, 120), "event": truncateRunes(run.Event, 40), "status": truncateRunes(run.Status, 40), "conclusion": truncateRunes(run.Conclusion, 40), "head_sha": truncateRunes(run.HeadSHA, 64), "created_at": run.CreatedAt, "updated_at": run.UpdatedAt, "url": truncateRunes(run.URL, 500)})
 		}
 		return marshal(map[string]any{"found": true, "available": true, "repository": status.Repository, "default_branch": status.DefaultBranch, "head_sha": truncateRunes(status.HeadSHA, 64), "head_committed_at": status.HeadCommittedAt, "workflow_runs": runs})
+	case "get_repository_overview":
+		if r.github == nil {
+			return marshal(map[string]any{"available": false, "reason": "GitHub inspection is unavailable"})
+		}
+		entries, total, truncated, err := r.inspectRepositoryEstate(ctx)
+		if err != nil {
+			return "", err
+		}
+		return marshal(repositoryEstateView(entries, total, truncated))
 	case "get_work_queue":
 		jobs, err := r.reader.ListJobs(ctx, "", 100)
 		if err != nil {
@@ -680,6 +691,8 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.project(ctx, argument)
 	case "repository":
 		answer, err = r.repository(ctx, argument)
+	case "repository_overview":
+		answer, err = r.repositoryOverview(ctx)
 	case "incidents":
 		answer, err = r.incidents(ctx)
 	case "service":
@@ -688,7 +701,7 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “brief”, “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “project <name>”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “brief”, “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “project <name>”, “github status”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -701,6 +714,9 @@ func classify(text string) (string, string) {
 	}
 	if value == "brief" || value == "daily brief" || value == "morning brief" || value == "estate brief" || value == "good morning" || strings.Contains(value, "give me a briefing") {
 		return "brief", ""
+	}
+	if value == "github status" || value == "repo status" || value == "repository status" || value == "repositories status" || value == "code status" {
+		return "repository_overview", ""
 	}
 	for _, prefix := range []string{"service ", "check service ", "check app ", "app ", "application "} {
 		if strings.HasPrefix(value, prefix) {
@@ -979,6 +995,150 @@ func (r *Responder) resolveRepository(ctx context.Context, query string) (domain
 		choices = append(choices, repository.Owner+"/"+repository.Name)
 	}
 	return domain.Repository{}, choices, nil
+}
+
+type repositoryInspection struct {
+	Repository domain.Repository
+	Status     githubapp.RepositoryStatus
+	Failed     bool
+}
+
+func (r *Responder) inspectRepositoryEstate(ctx context.Context) ([]repositoryInspection, int, bool, error) {
+	repositories, err := r.reader.ListRepositories(ctx, "")
+	if err != nil {
+		return nil, 0, false, err
+	}
+	enabled := make([]domain.Repository, 0, len(repositories))
+	for _, repository := range repositories {
+		if repository.Enabled {
+			enabled = append(enabled, repository)
+		}
+	}
+	sort.Slice(enabled, func(i, j int) bool {
+		return enabled[i].Owner+"/"+enabled[i].Name < enabled[j].Owner+"/"+enabled[j].Name
+	})
+	total := len(enabled)
+	truncated := total > 20
+	if truncated {
+		enabled = enabled[:20]
+	}
+	entries := make([]repositoryInspection, len(enabled))
+	for index, repository := range enabled {
+		entries[index] = repositoryInspection{Repository: repository, Failed: true}
+	}
+	if len(entries) == 0 {
+		return entries, total, truncated, nil
+	}
+	workCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	jobs := make(chan int, len(entries))
+	for index := range entries {
+		jobs <- index
+	}
+	close(jobs)
+	workers := min(4, len(entries))
+	var wait sync.WaitGroup
+	wait.Add(workers)
+	for range workers {
+		go func() {
+			defer wait.Done()
+			for index := range jobs {
+				if workCtx.Err() != nil {
+					continue
+				}
+				inspectCtx, inspectCancel := context.WithTimeout(workCtx, 12*time.Second)
+				status, inspectErr := r.github.InspectRepository(inspectCtx, entries[index].Repository)
+				inspectCancel()
+				if inspectErr != nil {
+					continue
+				}
+				entries[index].Status = status
+				entries[index].Failed = false
+			}
+		}()
+	}
+	wait.Wait()
+	return entries, total, truncated, nil
+}
+
+func repositoryWorkflowHealth(status githubapp.RepositoryStatus) (string, string) {
+	if len(status.WorkflowRuns) == 0 {
+		return "unknown", "no recent default-branch workflows returned"
+	}
+	latest := map[string]githubapp.RepositoryWorkflowRun{}
+	for _, run := range status.WorkflowRuns {
+		name := strings.TrimSpace(run.Name)
+		if name == "" {
+			name = "unnamed workflow"
+		}
+		previous, ok := latest[name]
+		if !ok || run.UpdatedAt.After(previous.UpdatedAt) {
+			latest[name] = run
+		}
+	}
+	running, failed, healthy := 0, 0, 0
+	for _, run := range latest {
+		if run.Status != "completed" {
+			running++
+			continue
+		}
+		if stringIn(run.Conclusion, "success", "neutral", "skipped") {
+			healthy++
+		} else {
+			failed++
+		}
+	}
+	if failed > 0 {
+		return "attention", fmt.Sprintf("%d latest workflow(s) failed; %d running; %d healthy", failed, running, healthy)
+	}
+	if running > 0 {
+		return "running", fmt.Sprintf("%d workflow(s) running; %d healthy", running, healthy)
+	}
+	return "healthy", fmt.Sprintf("%d latest workflow(s) healthy", healthy)
+}
+
+func repositoryEstateView(entries []repositoryInspection, total int, truncated bool) map[string]any {
+	views := make([]map[string]any, 0, len(entries))
+	failed := 0
+	for _, entry := range entries {
+		name := entry.Repository.Owner + "/" + entry.Repository.Name
+		if entry.Failed {
+			failed++
+			views = append(views, map[string]any{"repository": name, "available": false, "reason": "inspection_failed"})
+			continue
+		}
+		state, summary := repositoryWorkflowHealth(entry.Status)
+		views = append(views, map[string]any{"repository": name, "available": true, "default_branch": entry.Status.DefaultBranch, "head_sha": truncateRunes(entry.Status.HeadSHA, 64), "head_committed_at": entry.Status.HeadCommittedAt, "workflow_state": state, "workflow_summary": summary})
+	}
+	return map[string]any{"available": true, "repositories": views, "configured_count": total, "inspected_count": len(entries) - failed, "failed_count": failed, "truncated": truncated}
+}
+
+func (r *Responder) repositoryOverview(ctx context.Context) (string, error) {
+	if r.github == nil {
+		return "GitHub inspection is unavailable. Configure the GitHub connection in Echo's control plane.", nil
+	}
+	entries, total, truncated, err := r.inspectRepositoryEstate(ctx)
+	if err != nil {
+		return "", err
+	}
+	if total == 0 {
+		return "No enabled repositories are configured yet.", nil
+	}
+	lines := make([]string, 0, len(entries)+1)
+	for _, entry := range entries {
+		name := entry.Repository.Owner + "/" + entry.Repository.Name
+		if entry.Failed {
+			lines = append(lines, "• UNAVAILABLE · "+name+" · inspection failed or timed out")
+			continue
+		}
+		state, summary := repositoryWorkflowHealth(entry.Status)
+		head := truncateRunes(entry.Status.HeadSHA, 8)
+		lines = append(lines, fmt.Sprintf("• %s · %s · %s · head %s · %s ago", strings.ToUpper(state), name, summary, head, formatAge(r.now(), entry.Status.HeadCommittedAt)))
+	}
+	if truncated {
+		lines = append(lines, fmt.Sprintf("…showing 20 of %d enabled repositories. Ask about a repository by name for its complete recent workflow list.", total))
+	}
+	return fmt.Sprintf("GitHub repository status (%d enabled)\n\n%s", total, strings.Join(lines, "\n")), nil
 }
 
 func (r *Responder) resolveProject(ctx context.Context, query string) (domain.Project, []string, error) {
@@ -1673,7 +1833,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• repo <name> — live default-branch and GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

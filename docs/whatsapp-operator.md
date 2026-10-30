@@ -4,7 +4,7 @@ The configured owner can message Echo directly for a read-only operational view.
 
 Selecting an owner in the control plane atomically queues a private confirmation describing the notification scope and the `brief` command. If that message later remains pending or becomes dead, the same durable outbox state is visible on Overview and System; Echo never silently treats a half-saved owner change as complete.
 
-When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only eleven function tools: current status, open alerts, service search, service detail, worker queue, deployment records, project listing, joined project health, live read-only GitHub repository status, recent incident search, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, general web, code execution, deployment mutation, or other write tool.
+When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only twelve function tools: current status, open alerts, service search, service detail, worker queue, deployment records, project listing, joined project health, bounded GitHub estate health, one live read-only GitHub repository status, recent incident search, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, general web, code execution, deployment mutation, or other write tool.
 
 Service detail includes observer freshness, evidence age, alert fingerprints and times, plus a strict allowlist of useful operational counters such as disk, memory, load, HTTP latency, container lifecycle, health, restarts, and heartbeat policy. Arbitrary detail keys and free-form failure text are never sent to the model, so a custom observer cannot smuggle credentials or unrestricted logs through monitoring evidence. Evidence objects above 64 KiB are omitted. Tool collections are bounded and declare when results were truncated.
 
@@ -19,6 +19,7 @@ Supported requests include:
 - `deployments` or “what is deployed?” for recent dispatch, rollback, and verification state
 - `projects` for the project and repository map
 - `project <name-or-key>` for one joined view of repositories, service freshness, open alerts, recent incidents, and deployments
+- `github status` for current default-branch workflow health across up to 20 enabled repositories
 - `repo <name>` for the configured default-branch head and up to ten recent GitHub Actions runs
 - `incidents` for a bounded recent list with IDs, project, severity, status, and summary
 - `incident <id>` for the report, latest diagnosis, bounded change/PR state, and deployment verification that followed
