@@ -7,7 +7,7 @@ The local stack is deliberately separate from Echo's normal Compose deployment. 
 - Echo on `http://localhost:8080`, bound only to `127.0.0.1`
 - MariaDB 11.4 with separate `echo_local_core` and `echo_local_whatsapp` databases and users
 - a deterministic OpenAI-compatible stub that marks the report as processed without claiming to inspect code
-- a seeded **Local Test** project with disposable HTTP, TCP, host-resource, and container services
+- a seeded **Local Test** project with disposable HTTP, TCP, host-resource, process, and container services
 - persistent Docker volumes for the databases, WhatsApp session, and worker state
 
 The local database passwords and administrator token are predictable test defaults and must never be reused in production. The stack is isolated to `docker-compose.local.yml`; MariaDB is not exposed on a host port, and the control plane binds only to loopback.
@@ -75,9 +75,9 @@ With the stack healthy on the default local port, run one signed observation cyc
 make local-observe
 ```
 
-The target starts a temporary loopback-only `echo-docker-proxy`, probes `/readyz` without reading its body, opens and immediately closes a TCP connection to Echo without sending application data, reads bounded kernel/filesystem counters from the local Linux environment, inspects only the allowlisted mock-AI container's sanitized lifecycle state, signs four normalized health events, and submits them to Echo. The proxy exits when this one-shot test finishes. **Monitoring → Recent signals** should show `Local Echo`, `Local Echo TCP Listener`, `Local Host`, and `Local Mock AI Container` as healthy. The local example explicitly permits plaintext HTTP because both endpoints bind to loopback; observer configuration requires HTTPS by default. Its deliberately high resource thresholds make this a data-path test rather than a workstation-capacity alarm.
+The target starts temporary loopback-only Docker and process metadata proxies plus a disposable `sleep` process, probes `/readyz` without reading its body, opens and immediately closes a TCP connection to Echo without sending application data, reads bounded kernel/filesystem counters from the local Linux environment, inspects only the allowlisted process aggregate and mock-AI container's sanitized lifecycle state, signs five normalized health events, and submits them to Echo. The proxies and process exit when this one-shot test finishes. **Monitoring → Recent signals** should show `Local Echo`, `Local Echo TCP Listener`, `Local Host`, `Local Sleep Process`, and `Local Mock AI Container` as healthy. The local example explicitly permits plaintext HTTP because every endpoint binds to loopback; observer configuration requires HTTPS by default. Its deliberately high resource thresholds make this a data-path test rather than a workstation-capacity alarm.
 
-All four seeded services expect a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens `observer-silent` warnings. Running `make local-observe` records fresh evidence and resolves those alerts.
+All five seeded services expect a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens `observer-silent` warnings. Running `make local-observe` records fresh evidence and resolves those alerts.
 
 To enable real analysis, open **System → OpenAI connection**, enter the OpenAI API key and model, and save. Echo validates the credentials before encrypting the key in MariaDB. Application settings override the local deterministic mock immediately without restarting the stack.
 

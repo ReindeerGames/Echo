@@ -85,7 +85,7 @@ func (o *Observer) RunOnce(ctx context.Context) error {
 		serviceID string
 		observe   func(context.Context) domain.MonitorEvent
 	}
-	allJobs := make([]probeJob, 0, len(o.config.Probes)+len(o.config.TCPProbes)+len(o.config.SystemProbes)+len(o.config.DockerProbes)+len(o.config.FreshnessProbes))
+	allJobs := make([]probeJob, 0, len(o.config.Probes)+len(o.config.TCPProbes)+len(o.config.SystemProbes)+len(o.config.ProcessProbes)+len(o.config.DockerProbes)+len(o.config.FreshnessProbes))
 	for _, configured := range o.config.Probes {
 		probe := configured
 		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observe(ctx, probe) }})
@@ -97,6 +97,10 @@ func (o *Observer) RunOnce(ctx context.Context) error {
 	for _, configured := range o.config.SystemProbes {
 		probe := configured
 		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeSystem(ctx, probe) }})
+	}
+	for _, configured := range o.config.ProcessProbes {
+		probe := configured
+		allJobs = append(allJobs, probeJob{serviceID: probe.ServiceID, observe: func(ctx context.Context) domain.MonitorEvent { return o.observeProcess(ctx, probe) }})
 	}
 	for _, configured := range o.config.DockerProbes {
 		probe := configured

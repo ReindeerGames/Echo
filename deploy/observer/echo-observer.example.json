@@ -36,6 +36,18 @@
       "loadCriticalPerCpu": 2
     }
   ],
+  "processProbes": [
+    {
+      "name": "application-worker-process",
+      "serviceId": "svc_000000000000000000000006",
+      "proxyUrl": "http://127.0.0.1:23751",
+      "processName": "app-worker",
+      "minimumCount": 1,
+      "maximumCount": 4,
+      "rssWarningMiB": 1024,
+      "rssCriticalMiB": 1536
+    }
+  ],
   "dockerProbes": [
     {
       "name": "application-container",

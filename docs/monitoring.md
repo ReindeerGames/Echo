@@ -1,6 +1,6 @@
 # Service monitoring
 
-Echo accepts normalized health signals from small, read-only observers. Observers do not receive GitHub, WhatsApp, database, or deployment credentials and do not expose a Docker socket to Echo. Built-in probes cover HTTPS, TCP listener reachability, bounded host resources, sanitized Docker state, and metadata-only artifact freshness.
+Echo accepts normalized health signals from small, read-only observers. Observers do not receive GitHub, WhatsApp, database, or deployment credentials and do not expose a Docker socket to Echo. Built-in probes cover HTTPS, TCP listener reachability, bounded host resources, exact-name Linux process health, sanitized Docker state, and metadata-only artifact freshness.
 
 Echo includes `echo-observer`, a small health-endpoint and Linux host-resource observer with a signed event forwarder. Build it with `make build`; its only secret is the monitor webhook secret supplied as `ECHO_OBSERVER_WEBHOOK_SECRET`.
 
@@ -100,13 +100,17 @@ Every successful HTTPS response also checks the verified leaf certificate's expi
 
 On Linux, `systemProbes` read only `/proc/meminfo`, `/proc/loadavg`, `/proc/uptime`, and filesystem capacity counters for one absolute `diskPath`. They report disk and memory utilization, one/five/fifteen-minute load, load per logical CPU, and uptime—never process arguments, environment variables, file contents, logs, usernames, or network connections. Warning and critical thresholds are explicit in the configuration; defaults are 85/95 percent for disk and memory and 1/2 load per CPU.
 
+`processProbes` cover host-native daemons and workers that are not represented by a Docker container. The observer requests one exact Linux `/proc/*/comm` name of at most 15 safe ASCII characters from the separate loopback-only `echo-process-proxy`; that proxy accepts only names in `ECHO_PROCESS_PROXY_PROCESSES` and scans at most 131,072 process-directory entries. It reports only aggregate process, running, sleeping, stopped, zombie, unknown-state, thread, and resident-memory counts. It never reads or returns PIDs, command lines, arguments, environment variables, executable paths, open files, sockets, user IDs, usernames, logs, or process output, and it never invokes a command or shell.
+
+`minimumCount` defaults to one; `maximumCount` of zero disables the upper bound. A missing process or any zombie is critical, excess count and stopped/unknown state are warnings, and optional ordered `rssWarningMiB`/`rssCriticalMiB` thresholds classify aggregate resident memory. Both RSS thresholds must be zero or both configured. Run the proxy in the intended process namespace. The observer systemd unit keeps `ProtectProc=invisible`; the proxy uses `ProtectProc=default` but runs unprivileged, has no Echo secrets, and is restricted to loopback networking. A host-wide `hidepid` policy may require deliberately scoped process-metadata visibility for the proxy account. Do not weaken `/proc` privacy globally for Echo.
+
 `freshnessProbes` monitor scheduled backups or other artifacts using filesystem metadata only. `path` must name one exact absolute regular file or directory and cannot be `/`; symlinks and special files are rejected. For a directory, the observer examines at most 1,000 direct entries without recursion, ignores subdirectories and symlinks, optionally filters regular files by `matchSuffix`, and uses the newest matching modification time. It never opens a matching artifact, reads its contents, follows a symlink, or reports its path or filename. Missing paths, no matching files, inaccessible metadata, unsupported file types, and an over-limit directory produce fixed safe failure categories rather than raw operating-system errors.
 
 `warningAge` and `criticalAge` are Go duration strings between one minute and 365 days, with the critical age strictly greater than the warning age. They default to `26h` and `50h`, which suits a daily backup with scheduling margin; tune both explicitly for hourly, weekly, or irregular jobs. A timestamp more than five minutes in the future opens a warning because it usually indicates clock or metadata trouble. Create a dedicated Echo service such as `database-backup` for each freshness probe so its heartbeat and alert lifecycle stay distinct from the host or application.
 
 Run a system probe as a host service when host metrics are intended. If it runs inside a container, its kernel and filesystem namespace determine what it measures; do not assume containerized readings represent the host. The observer requires no root privileges, shell, Docker socket, or SSH credential.
 
-Each Echo service may have one aggregate probe across the HTTP, TCP, system, Docker, and freshness probe classes. Use separate service-catalogue entries for the host, each listener, each container, each backup stream, and each application health endpoint. Each built-in probe retains its stable fingerprint on healthy evidence, allowing recovery to resolve that probe's lifecycle only. Expose an aggregate readiness endpoint when one application depends on several internal checks.
+Each Echo service may have one aggregate probe across the HTTP, TCP, system, process, Docker, and freshness probe classes. Use separate service-catalogue entries for the host, each native process, each listener, each container, each backup stream, and each application health endpoint. Each built-in probe retains its stable fingerprint on healthy evidence, allowing recovery to resolve that probe's lifecycle only. Expose an aggregate readiness endpoint when one application depends on several internal checks.
 
 `dockerProbes` inspect the lifecycle of one explicitly named container through the bundled `echo-docker-proxy`. Echo records only the normalized running/paused/restarting/dead/OOM state, exit code, Docker health status and failing streak, restart count, and sanitized timestamps. The proxy discards environment variables, labels, mounts, logs, health-check output, image configuration, and raw daemon errors before the observer sees the response. Both processes cap inspect responses at one MiB and never copy unrecognized state text into alerts.
 
@@ -123,6 +127,17 @@ install -o root -g root -m 0644 deploy/observer/echo-docker-proxy.env.example /e
 
 Set `ECHO_DOCKER_PROXY_CONTAINERS` in `/etc/echo-docker-proxy.env` to the comma-separated exact names used by `dockerProbes`; no wildcard is supported. Create a locked `echo-docker-proxy` system account, make it a supplementary member of the local Docker group through the unit, then start the proxy. Keep `ECHO_DOCKER_PROXY_LISTEN` at `127.0.0.1:23750`. The optional `ECHO_DOCKER_SOCKET` must be an absolute local Unix socket path.
 
+Build and configure the process proxy beside host-native workloads:
+
+```bash
+make build
+install -o root -g root -m 0755 bin/echo-process-proxy /usr/local/bin/echo-process-proxy
+install -o root -g root -m 0644 deploy/observer/echo-process-proxy.service /etc/systemd/system/echo-process-proxy.service
+install -o root -g root -m 0644 deploy/observer/echo-process-proxy.env.example /etc/echo-process-proxy.env
+```
+
+Set `ECHO_PROCESS_PROXY_PROCESSES` to the comma-separated exact names used by `processProbes`; no wildcard is supported. Create a locked `echo-process-proxy` system account and start the proxy with `ECHO_PROCESS_PROXY_LISTEN` kept at `127.0.0.1:23751`. The proxy account needs only the process metadata visibility required by local policy and must not receive the observer webhook secret or any Echo, GitHub, WhatsApp, AI, Docker, or application credential.
+
 Run continuously:
 
 ```bash
@@ -132,4 +147,4 @@ ECHO_OBSERVER_WEBHOOK_SECRET='use-the-same-32-character-or-longer-secret' \
 
 Use `-once` for installation smoke tests. Create the matching services in Echo before starting the observer. Do not put the webhook secret or health-endpoint credentials in the JSON file; authenticated health endpoints are intentionally not supported by the bundled observer.
 
-For a Linux host installation, [`deploy/observer/echo-observer.service`](../deploy/observer/echo-observer.service) and [`deploy/observer/echo-docker-proxy.service`](../deploy/observer/echo-docker-proxy.service) provide hardened systemd units. Create separate locked system accounts, install binaries and JSON configuration as root-owned read-only files, and put only `ECHO_OBSERVER_WEBHOOK_SECRET=...` in `/etc/echo-observer.env` with mode `0600`. The observer account does not belong to the Docker group; only the small allowlisting proxy may access the socket. Validate the observer with `-once` before enabling it. Installation is an explicit deployment step; Echo never installs observers or changes a server on its own.
+For a Linux host installation, [`deploy/observer/echo-observer.service`](../deploy/observer/echo-observer.service), [`deploy/observer/echo-process-proxy.service`](../deploy/observer/echo-process-proxy.service), and [`deploy/observer/echo-docker-proxy.service`](../deploy/observer/echo-docker-proxy.service) provide hardened systemd units. Create separate locked system accounts, install binaries and JSON configuration as root-owned read-only files, and put only `ECHO_OBSERVER_WEBHOOK_SECRET=...` in `/etc/echo-observer.env` with mode `0600`. The observer account keeps its process table hidden and does not belong to the Docker group; only each small allowlisting proxy receives its narrowly required local read access. Validate the observer with `-once` before enabling it. Installation is an explicit deployment step; Echo never installs observers or changes a server on its own.

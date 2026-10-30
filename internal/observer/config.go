@@ -28,6 +28,7 @@ type Config struct {
 	Probes            []HTTPProbe      `json:"probes"`
 	TCPProbes         []TCPProbe       `json:"tcpProbes"`
 	SystemProbes      []SystemProbe    `json:"systemProbes"`
+	ProcessProbes     []ProcessProbe   `json:"processProbes"`
 	DockerProbes      []DockerProbe    `json:"dockerProbes"`
 	FreshnessProbes   []FreshnessProbe `json:"freshnessProbes"`
 }
@@ -60,6 +61,17 @@ type SystemProbe struct {
 	MemoryCriticalPercent float64 `json:"memoryCriticalPercent"`
 	LoadWarningPerCPU     float64 `json:"loadWarningPerCpu"`
 	LoadCriticalPerCPU    float64 `json:"loadCriticalPerCpu"`
+}
+
+type ProcessProbe struct {
+	Name           string `json:"name"`
+	ServiceID      string `json:"serviceId"`
+	ProxyURL       string `json:"proxyUrl"`
+	ProcessName    string `json:"processName"`
+	MinimumCount   int    `json:"minimumCount"`
+	MaximumCount   int    `json:"maximumCount"`
+	RSSWarningMiB  uint64 `json:"rssWarningMiB"`
+	RSSCriticalMiB uint64 `json:"rssCriticalMiB"`
 }
 
 type DockerProbe struct {
@@ -141,7 +153,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("invalid echoUrl: %w", err)
 	}
 	cfg.EchoURL = strings.TrimRight(echoURL.String(), "/")
-	totalProbes := len(cfg.Probes) + len(cfg.TCPProbes) + len(cfg.SystemProbes) + len(cfg.DockerProbes) + len(cfg.FreshnessProbes)
+	totalProbes := len(cfg.Probes) + len(cfg.TCPProbes) + len(cfg.SystemProbes) + len(cfg.ProcessProbes) + len(cfg.DockerProbes) + len(cfg.FreshnessProbes)
 	if totalProbes == 0 || totalProbes > 100 {
 		return Config{}, errors.New("between 1 and 100 probes are required")
 	}
@@ -226,6 +238,32 @@ func normalizeConfig(cfg Config) (Config, error) {
 			return Config{}, fmt.Errorf("system probe %q load thresholds must be positive, ordered, and no greater than 20 per CPU", probe.Name)
 		}
 	}
+	for index := range cfg.ProcessProbes {
+		probe := &cfg.ProcessProbes[index]
+		probe.Name = strings.ToLower(strings.TrimSpace(probe.Name))
+		probe.ServiceID = strings.TrimSpace(probe.ServiceID)
+		probe.ProcessName = strings.TrimSpace(probe.ProcessName)
+		if err := registerProbe(probe.Name, probe.ServiceID, fmt.Sprintf("process probe %d", index+1), seenNames, seenServices); err != nil {
+			return Config{}, err
+		}
+		if !safeContainerName(probe.ProcessName) || len(probe.ProcessName) > 15 {
+			return Config{}, fmt.Errorf("process probe %q processName must be an exact Linux comm name of at most 15 safe characters", probe.Name)
+		}
+		proxyURL, err := validateLoopbackProxyURL(strings.TrimSpace(probe.ProxyURL), cfg.AllowInsecureHTTP)
+		if err != nil {
+			return Config{}, fmt.Errorf("process probe %q proxyUrl: %w", probe.Name, err)
+		}
+		probe.ProxyURL = strings.TrimRight(proxyURL.String(), "/")
+		if probe.MinimumCount == 0 {
+			probe.MinimumCount = 1
+		}
+		if probe.MinimumCount < 1 || probe.MinimumCount > 10000 || probe.MaximumCount < 0 || probe.MaximumCount > 10000 || (probe.MaximumCount > 0 && probe.MaximumCount < probe.MinimumCount) {
+			return Config{}, fmt.Errorf("process probe %q count thresholds must be between 1 and 10000 with maximumCount zero or at least minimumCount", probe.Name)
+		}
+		if (probe.RSSWarningMiB == 0) != (probe.RSSCriticalMiB == 0) || probe.RSSCriticalMiB > 1<<20 || (probe.RSSWarningMiB > 0 && probe.RSSCriticalMiB <= probe.RSSWarningMiB) {
+			return Config{}, fmt.Errorf("process probe %q RSS thresholds must both be zero or ordered values no greater than 1048576 MiB", probe.Name)
+		}
+	}
 	for index := range cfg.DockerProbes {
 		probe := &cfg.DockerProbes[index]
 		probe.Name = strings.ToLower(strings.TrimSpace(probe.Name))
@@ -237,7 +275,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 		if !safeContainerName(probe.Container) || len(probe.Container) > 128 {
 			return Config{}, fmt.Errorf("Docker probe %q container must use letters, numbers, dot, dash, or underscore", probe.Name)
 		}
-		proxyURL, err := validateDockerProxyURL(strings.TrimSpace(probe.ProxyURL), cfg.AllowInsecureHTTP)
+		proxyURL, err := validateLoopbackProxyURL(strings.TrimSpace(probe.ProxyURL), cfg.AllowInsecureHTTP)
 		if err != nil {
 			return Config{}, fmt.Errorf("Docker probe %q proxyUrl: %w", probe.Name, err)
 		}
@@ -275,7 +313,7 @@ func normalizeConfig(cfg Config) (Config, error) {
 	return cfg, nil
 }
 
-func validateDockerProxyURL(raw string, allowHTTP bool) (*url.URL, error) {
+func validateLoopbackProxyURL(raw string, allowHTTP bool) (*url.URL, error) {
 	parsed, err := validateURL(raw, true)
 	if err != nil {
 		return nil, err
@@ -288,7 +326,7 @@ func validateDockerProxyURL(raw string, allowHTTP bool) (*url.URL, error) {
 	if host == "localhost" || (ip != nil && ip.IsLoopback()) {
 		return parsed, nil
 	}
-	return nil, errors.New("plaintext Docker proxy URLs must use loopback unless allowInsecureHttp is enabled")
+	return nil, errors.New("plaintext proxy URLs must use loopback unless allowInsecureHttp is enabled")
 }
 
 func registerProbe(name, serviceID, label string, seenNames, seenServices map[string]struct{}) error {

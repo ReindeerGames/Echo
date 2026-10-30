@@ -33,11 +33,12 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 
 func TestBundledObserverConfigsRemainLoadable(t *testing.T) {
 	for _, test := range []struct {
-		path      string
-		tcpProbes int
+		path          string
+		tcpProbes     int
+		processProbes int
 	}{
-		{path: "../../deploy/observer/echo-observer.example.json", tcpProbes: 1},
-		{path: "../../deploy/local-test/observer.json", tcpProbes: 1},
+		{path: "../../deploy/observer/echo-observer.example.json", tcpProbes: 1, processProbes: 1},
+		{path: "../../deploy/local-test/observer.json", tcpProbes: 1, processProbes: 1},
 	} {
 		cfg, err := LoadConfig(test.path)
 		if err != nil {
@@ -45,6 +46,9 @@ func TestBundledObserverConfigsRemainLoadable(t *testing.T) {
 		}
 		if len(cfg.TCPProbes) != test.tcpProbes {
 			t.Fatalf("%s has %d TCP probes, want %d", test.path, len(cfg.TCPProbes), test.tcpProbes)
+		}
+		if len(cfg.ProcessProbes) != test.processProbes {
+			t.Fatalf("%s has %d process probes, want %d", test.path, len(cfg.ProcessProbes), test.processProbes)
 		}
 	}
 }
@@ -166,6 +170,41 @@ func TestSystemProbeRejectsUnsafeThresholdsAndRelativePath(t *testing.T) {
 	_, err = normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", SystemProbes: []SystemProbe{{Name: "host", ServiceID: "svc_host", DiskWarningPercent: 95, DiskCriticalPercent: 90}}})
 	if err == nil || !strings.Contains(err.Error(), "disk thresholds") {
 		t.Fatalf("inverted disk thresholds were not rejected: %v", err)
+	}
+}
+
+func TestProcessProbeDefaultsValidationAndCrossTypeUniqueness(t *testing.T) {
+	cfg, err := normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		ProcessProbes: []ProcessProbe{{Name: "Database-Process", ServiceID: "svc_database", ProxyURL: "http://127.0.0.1:23751/", ProcessName: "mariadbd"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := cfg.ProcessProbes[0]
+	if probe.Name != "database-process" || probe.ProxyURL != "http://127.0.0.1:23751" || probe.ProcessName != "mariadbd" || probe.MinimumCount != 1 || probe.MaximumCount != 0 {
+		t.Fatalf("unexpected process defaults: %#v", probe)
+	}
+	invalid := []ProcessProbe{
+		{Name: "unsafe-name", ServiceID: "svc_process", ProxyURL: "http://127.0.0.1:23751", ProcessName: "process with spaces"},
+		{Name: "long-name", ServiceID: "svc_process", ProxyURL: "http://127.0.0.1:23751", ProcessName: "process-name-is-too-long"},
+		{Name: "bad-counts", ServiceID: "svc_process", ProxyURL: "http://127.0.0.1:23751", ProcessName: "worker", MinimumCount: 3, MaximumCount: 2},
+		{Name: "half-rss", ServiceID: "svc_process", ProxyURL: "http://127.0.0.1:23751", ProcessName: "worker", RSSWarningMiB: 128},
+		{Name: "bad-rss", ServiceID: "svc_process", ProxyURL: "http://127.0.0.1:23751", ProcessName: "worker", RSSWarningMiB: 512, RSSCriticalMiB: 256},
+		{Name: "remote-plaintext", ServiceID: "svc_process", ProxyURL: "http://process-proxy.internal:23751", ProcessName: "worker"},
+	}
+	for _, candidate := range invalid {
+		if _, err := normalizeConfig(Config{EchoURL: "https://echo.test", Source: "observer", ProcessProbes: []ProcessProbe{candidate}}); err == nil {
+			t.Fatalf("invalid process probe was accepted: %#v", candidate)
+		}
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		SystemProbes:  []SystemProbe{{Name: "host", ServiceID: "svc_same"}},
+		ProcessProbes: []ProcessProbe{{Name: "worker", ServiceID: "svc_same", ProxyURL: "http://127.0.0.1:23751", ProcessName: "worker"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "one aggregate probe") {
+		t.Fatalf("cross-type process service duplicate was not rejected: %v", err)
 	}
 }
 

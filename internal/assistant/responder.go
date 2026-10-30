@@ -124,8 +124,8 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_open_alerts", "List current Echo component, service, and default-branch GitHub workflow alerts with severity and last observed time.", schema(nil, nil)),
 		ai.FunctionTool("get_maintenance_windows", "List active and upcoming service maintenance windows. This tool is read-only and cannot schedule, extend, or cancel suppression.", schema(nil, nil)),
 		ai.FunctionTool("list_services", "List services. Use an empty query for all services or a name/key fragment to filter.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Service name or key fragment, or empty string."}}, []string{"query"})),
-		ai.FunctionTool("get_service", "Get one service with its open alerts, explicit repository ownership, operator runbooks, and recent monitoring signals.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
-		ai.FunctionTool("investigate_service", "Correlate one service's bounded monitoring timeline, operator runbooks, open alerts, project incidents, deployments, recent default-branch commit summaries, and repository workflow state. Explicit service repository links determine repository scope; without links, the tool reports its compatibility fallback to enabled project repositories. Use for diagnosis or 'why is this failing?' questions. This tool is read-only and has no log, shell, SSH, or mutation access.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
+		ai.FunctionTool("get_service", "Get one service with its open alerts, explicit repository ownership, operator runbooks, and recent normalized monitoring signals including safe aggregate host, process, container, network, certificate, and artifact counters when observed.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
+		ai.FunctionTool("investigate_service", "Correlate one service's bounded normalized monitoring timeline, including retained safe aggregate process evidence when available, with operator runbooks, open alerts, project incidents, deployments, recent default-branch commit summaries, and repository workflow state. Explicit service repository links determine repository scope; without links, the tool reports its compatibility fallback to enabled project repositories. Use for diagnosis or 'why is this failing?' questions. This tool is read-only and has no live process, log, shell, SSH, or mutation access.", schema(map[string]any{"service": map[string]string{"type": "string", "description": "Exact service ID, key, or name."}}, []string{"service"})),
 		ai.FunctionTool("get_work_queue", "List queued, running, retrying, and terminally failed Echo jobs with safe error categories.", schema(nil, nil)),
 		ai.FunctionTool("get_delivery_queue", "List the active queued, sending, retrying, and terminally failed WhatsApp delivery queue with channel type, attempt timing, and safe failure categories. An empty result does not prove a specific message was delivered. Message content, destinations, IDs, and raw errors are omitted.", schema(nil, nil)),
 		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
@@ -374,7 +374,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		}
 		signals := make([]map[string]any, 0, len(events))
 		for _, event := range events {
-			view := map[string]any{"status": event.Status, "severity": event.Severity, "summary": event.Summary, "source": event.Source, "observed_at": event.ObservedAt, "age_seconds": ageSeconds(now, event.ObservedAt)}
+			view := map[string]any{"status": event.Status, "severity": event.Severity, "summary": event.Summary, "source": event.Source, "fingerprint": truncateRunes(event.Fingerprint, 255), "observed_at": event.ObservedAt, "age_seconds": ageSeconds(now, event.ObservedAt)}
 			if evidence := sanitizedEvidence(event.Details); len(evidence) > 0 {
 				view["evidence"] = evidence
 			}
@@ -1011,10 +1011,10 @@ func marshal(value any) (string, error) {
 const maxEvidenceBytes = 64 << 10
 
 var evidenceFields = map[string]map[string]struct{}{
-	"":           setOf("probe", "method", "port", "statusCode", "latencyMs", "failure", "tls", "snapshot", "thresholds", "modifiedAt", "ageSeconds", "matchedFiles", "container", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
+	"":           setOf("probe", "method", "port", "statusCode", "latencyMs", "failure", "tls", "snapshot", "thresholds", "modifiedAt", "ageSeconds", "matchedFiles", "container", "processName", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
 	"tls":        setOf("expiresAt", "daysRemaining"),
-	"snapshot":   setOf("diskPath", "diskTotalBytes", "diskAvailableBytes", "diskUsedPercent", "memoryTotalBytes", "memoryAvailableBytes", "memoryUsedPercent", "load1", "load5", "load15", "cpuCount", "load1PerCpu", "uptimeSeconds"),
-	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu", "tlsWarningDays", "tlsCriticalDays", "warningAgeSeconds", "criticalAgeSeconds"),
+	"snapshot":   setOf("diskPath", "diskTotalBytes", "diskAvailableBytes", "diskUsedPercent", "memoryTotalBytes", "memoryAvailableBytes", "memoryUsedPercent", "load1", "load5", "load15", "cpuCount", "load1PerCpu", "uptimeSeconds", "processCount", "runningCount", "sleepingCount", "stoppedCount", "zombieCount", "otherCount", "threadCount", "rssBytes"),
+	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu", "tlsWarningDays", "tlsCriticalDays", "warningAgeSeconds", "criticalAgeSeconds", "minimumCount", "maximumCount", "rssWarningMiB", "rssCriticalMiB"),
 }
 
 func setOf(values ...string) map[string]struct{} {
@@ -1083,8 +1083,8 @@ func sanitizeEvidenceString(key, value string) (string, bool) {
 		value = strings.ToLower(value)
 		return value, stringIn(value, "healthy", "unhealthy", "starting", "unknown", "none")
 	case "failure":
-		return value, stringIn(value, "metrics_unavailable", "invalid_request", "timeout", "connection_failed", "unexpected_status", "inspect_status", "inspect_response_too_large", "invalid_inspect_response", "docker_unavailable", "container_inspect_failed", "proxy_request_failed", "path_missing", "path_unavailable", "no_matching_files", "scan_limit", "unsupported_path", "future_timestamp", "probe_cancelled")
-	case "container", "probe":
+		return value, stringIn(value, "metrics_unavailable", "process_inspect_failed", "process_response_too_large", "invalid_process_response", "invalid_request", "timeout", "connection_failed", "unexpected_status", "inspect_status", "inspect_response_too_large", "invalid_inspect_response", "docker_unavailable", "container_inspect_failed", "proxy_request_failed", "path_missing", "path_unavailable", "no_matching_files", "scan_limit", "unsupported_path", "future_timestamp", "probe_cancelled")
+	case "container", "processName", "probe":
 		if value == "" || len(value) > 128 {
 			return "", false
 		}

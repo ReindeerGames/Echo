@@ -35,6 +35,16 @@
       "loadCriticalPerCpu": 20
     }
   ],
+  "processProbes": [
+    {
+      "name": "local-sleep-process",
+      "serviceId": "svc_local_process",
+      "proxyUrl": "http://127.0.0.1:23751",
+      "processName": "sleep",
+      "minimumCount": 1,
+      "maximumCount": 100
+    }
+  ],
   "dockerProbes": [
     {
       "name": "local-mock-ai-container",
