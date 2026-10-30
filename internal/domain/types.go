@@ -84,6 +84,18 @@ type ServiceDependency struct {
 	CreatedAt            time.Time `json:"createdAt"`
 }
 
+type ServiceRunbook struct {
+	ID           string    `json:"id"`
+	ProjectID    string    `json:"projectId"`
+	ServiceID    string    `json:"serviceId"`
+	ServiceName  string    `json:"serviceName"`
+	Title        string    `json:"title"`
+	Guidance     string    `json:"guidance"`
+	ReferenceURL string    `json:"referenceUrl"`
+	CreatedAt    time.Time `json:"createdAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 type StaleServiceHeartbeat struct {
 	ServiceID       string     `json:"serviceId"`
 	ServiceName     string     `json:"serviceName"`

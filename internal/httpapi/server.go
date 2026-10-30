@@ -114,6 +114,9 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("GET /api/v1/service-dependencies", s.serviceDependencies)
 	protected.HandleFunc("POST /api/v1/service-dependencies", s.serviceDependencies)
 	protected.HandleFunc("DELETE /api/v1/service-dependencies/{id}", s.deleteServiceDependency)
+	protected.HandleFunc("GET /api/v1/service-runbooks", s.serviceRunbooks)
+	protected.HandleFunc("POST /api/v1/service-runbooks", s.serviceRunbooks)
+	protected.HandleFunc("DELETE /api/v1/service-runbooks/{id}", s.deleteServiceRunbook)
 	protected.HandleFunc("GET /api/v1/monitor/events", s.monitorEvents)
 	protected.HandleFunc("GET /api/v1/monitor/alerts", s.serviceAlerts)
 	protected.HandleFunc("POST /api/v1/monitor/alerts/{id}/acknowledgement", s.serviceAlertAcknowledgement)
@@ -573,6 +576,50 @@ func (s *Server) deleteServiceDependency(w http.ResponseWriter, r *http.Request)
 	}
 	if err == nil {
 		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_dependency.deleted", "service_dependency", deleted.ID, "succeeded", map[string]any{"serviceId": deleted.ServiceID, "dependsOnServiceId": deleted.DependsOnServiceID, "kind": deleted.Kind})
+	}
+	respond(w, deleted, err)
+}
+
+func (s *Server) serviceRunbooks(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		items, err := s.store.ListServiceRunbooks(r.Context(), r.URL.Query().Get("serviceId"), 500)
+		respond(w, items, err)
+		return
+	}
+	var item domain.ServiceRunbook
+	if err := decodeJSON(r, &item); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_service_runbook", err.Error())
+		return
+	}
+	saved, err := s.store.SaveServiceRunbook(r.Context(), item)
+	switch {
+	case errors.Is(err, store.ErrInvalidRunbook):
+		writeError(w, http.StatusBadRequest, "invalid_service_runbook", "service, title, guidance of at most 4,000 characters, and an optional HTTPS reference without credentials, query, or fragment are required")
+		return
+	case errors.Is(err, store.ErrRunbookLimit):
+		writeError(w, http.StatusConflict, "service_runbook_limit", "a service can have at most 20 runbooks")
+		return
+	case errors.Is(err, store.ErrRunbookServiceMismatch):
+		writeError(w, http.StatusConflict, "service_runbook_service_mismatch", "a runbook cannot be moved to another service")
+		return
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "service_runbook_not_found", "service or runbook was not found")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_runbook.saved", "service_runbook", saved.ID, "succeeded", map[string]any{"serviceId": saved.ServiceID, "hasReference": saved.ReferenceURL != ""})
+	}
+	respondStatus(w, http.StatusCreated, saved, err)
+}
+
+func (s *Server) deleteServiceRunbook(w http.ResponseWriter, r *http.Request) {
+	deleted, err := s.store.DeleteServiceRunbook(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "service_runbook_not_found", "service runbook was not found")
+		return
+	}
+	if err == nil {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), "service_runbook.deleted", "service_runbook", deleted.ID, "succeeded", map[string]any{"serviceId": deleted.ServiceID})
 	}
 	respond(w, deleted, err)
 }

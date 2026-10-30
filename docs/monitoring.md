@@ -16,6 +16,12 @@ Open a service in **Monitoring** to declare what it directly depends on and whic
 
 Keep the graph limited to direct operational dependencies and remove stale relationships promptly. A service with dependency relationships cannot be moved to another project until those relationships are removed, which prevents a project edit from silently leaking another project's catalogue into an investigation.
 
+## Service runbooks
+
+Open a service in **Monitoring** and select **Add runbook** to record a concise operational check and, optionally, one HTTPS documentation reference. A service may have at most twenty runbooks. Titles are limited to 120 characters, guidance to 4,000 characters, and references cannot contain credentials, query strings, or fragments. Never store passwords, API tokens, private keys, signed URLs, raw logs, or customer data in a runbook.
+
+Runbooks appear in `service <name>` and correlated investigations so Echo can answer what to check next. The assistant receives at most ten, common secret patterns are redacted first, and every runbook is explicitly labelled untrusted reference material. Echo never follows embedded instructions, runs a command, contacts a host, or claims a check was performed merely because a runbook says to do it. Keep guidance current, observable, and phrased as a suggested verification rather than a conclusion.
+
 ## Event contract
 
 Send `POST /webhooks/monitor` with `Content-Type: application/json` and an `X-Echo-Signature-256` header containing `sha256=<hex HMAC-SHA256 of the exact request body>`.

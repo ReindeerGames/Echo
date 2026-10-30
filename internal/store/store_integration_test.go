@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"sync"
@@ -1002,6 +1003,70 @@ func TestMariaDBServiceDependenciesStayExplicitAndProjectScoped(t *testing.T) {
 	}
 }
 
+func TestMariaDBServiceRunbooksAreBoundedAndServiceScoped(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "runbooks", Name: "Runbooks", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "api", Name: "API", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "database", Name: "Database", Kind: "database", Criticality: "critical", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runbook, err := st.SaveServiceRunbook(ctx, domain.ServiceRunbook{ServiceID: api.ID, Title: "  API   recovery  ", Guidance: "  Check the current alerts.\r\nConfirm database reachability before escalation.  ", ReferenceURL: "https://docs.example.com/runbooks/api"})
+	if err != nil || runbook.ServiceName != api.Name || runbook.ProjectID != project.ID || runbook.Title != "API recovery" || !strings.Contains(runbook.Guidance, "\n") {
+		t.Fatalf("create normalized runbook: item=%#v err=%v", runbook, err)
+	}
+	items, err := st.ListServiceRunbooks(ctx, api.ID, 10)
+	if err != nil || len(items) != 1 || items[0].ID != runbook.ID {
+		t.Fatalf("list service runbooks: items=%#v err=%v", items, err)
+	}
+	runbook.Title = "API incident recovery"
+	runbook.Guidance = "Check readiness, database connectivity, and the latest deployment before paging the owner."
+	updated, err := st.SaveServiceRunbook(ctx, runbook)
+	if err != nil || updated.Title != runbook.Title || updated.Guidance != runbook.Guidance {
+		t.Fatalf("update runbook: item=%#v err=%v", updated, err)
+	}
+	moved := updated
+	moved.ServiceID = database.ID
+	if _, err := st.SaveServiceRunbook(ctx, moved); !errors.Is(err, ErrRunbookServiceMismatch) {
+		t.Fatalf("runbook moved between services: %v", err)
+	}
+	for index := 1; index < maxServiceRunbooks; index++ {
+		if _, err := st.SaveServiceRunbook(ctx, domain.ServiceRunbook{ServiceID: api.ID, Title: fmt.Sprintf("Procedure %02d", index), Guidance: "Use the approved operational procedure and record the observed evidence."}); err != nil {
+			t.Fatalf("create bounded runbook %d: %v", index, err)
+		}
+	}
+	if _, err := st.SaveServiceRunbook(ctx, domain.ServiceRunbook{ServiceID: api.ID, Title: "Procedure overflow", Guidance: "This entry must be rejected by the per-service bound."}); !errors.Is(err, ErrRunbookLimit) {
+		t.Fatalf("runbook limit was not enforced: %v", err)
+	}
+	all, err := st.ListServiceRunbooks(ctx, "", 500)
+	if err != nil || len(all) != maxServiceRunbooks {
+		t.Fatalf("global bounded runbook list: items=%d err=%v", len(all), err)
+	}
+	deleted, err := st.DeleteServiceRunbook(ctx, runbook.ID)
+	if err != nil || deleted.ID != runbook.ID {
+		t.Fatalf("delete runbook: item=%#v err=%v", deleted, err)
+	}
+	if _, err := st.DeleteServiceRunbook(ctx, runbook.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted runbook remained deletable: %v", err)
+	}
+}
+
 func TestMariaDBHeartbeatWatchdogLifecycle(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -1356,7 +1421,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_service_dependencies", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_service_maintenance_windows", "echo_monitor_events", "echo_service_runbooks", "echo_service_dependencies", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

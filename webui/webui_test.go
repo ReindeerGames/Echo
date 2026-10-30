@@ -192,6 +192,18 @@ func TestMonitoringSupportsProjectScopedServiceTopology(t *testing.T) {
 	}
 }
 
+func TestMonitoringSupportsServiceOperationalRunbooks(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/service-runbooks", "runbook-form", "Add runbook", "Operational runbooks", "Reference only — never automatic execution", "data-edit-runbook", "data-delete-runbook", "Service runbook added"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("service runbook workflow is missing %q", expected)
+		}
+	}
+}
+
 func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()
