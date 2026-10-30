@@ -16,6 +16,7 @@ type HeartbeatStore interface {
 	ListStaleServiceHeartbeats(context.Context, time.Time) ([]domain.StaleServiceHeartbeat, error)
 	ResolveInactiveHeartbeatAlerts(context.Context, time.Time, ...string) ([]domain.AlertTransition, error)
 	RecordMonitorEvent(context.Context, domain.MonitorEvent, ...string) (domain.MonitorResult, error)
+	QueueDueServiceAlertNotifications(context.Context, time.Time, time.Duration, string, int) ([]domain.AlertTransition, error)
 	Audit(context.Context, string, string, string, string, string, string, any) error
 }
 
@@ -24,17 +25,25 @@ type OwnerLookup interface {
 }
 
 type Watchdog struct {
-	store    HeartbeatStore
-	owners   OwnerLookup
-	interval time.Duration
-	now      func() time.Time
+	store            HeartbeatStore
+	owners           OwnerLookup
+	interval         time.Duration
+	reminderInterval time.Duration
+	now              func() time.Time
 }
 
-func NewWatchdog(store HeartbeatStore, owners OwnerLookup, interval time.Duration) *Watchdog {
+func NewWatchdog(store HeartbeatStore, owners OwnerLookup, interval time.Duration, reminder ...time.Duration) *Watchdog {
 	if interval < 5*time.Second || interval > 5*time.Minute {
 		interval = 30 * time.Second
 	}
-	return &Watchdog{store: store, owners: owners, interval: interval, now: func() time.Time { return time.Now().UTC() }}
+	reminderInterval := 4 * time.Hour
+	if len(reminder) > 0 {
+		reminderInterval = reminder[0]
+	}
+	if reminderInterval != 0 && (reminderInterval < 15*time.Minute || reminderInterval > 7*24*time.Hour) {
+		reminderInterval = 4 * time.Hour
+	}
+	return &Watchdog{store: store, owners: owners, interval: interval, reminderInterval: reminderInterval, now: func() time.Time { return time.Now().UTC() }}
 }
 
 func (w *Watchdog) Run(ctx context.Context) error {
@@ -88,6 +97,15 @@ func (w *Watchdog) Sweep(ctx context.Context, now time.Time) ([]domain.AlertTran
 		}
 		transitions = append(transitions, result.Transitions...)
 		_ = w.store.Audit(ctx, "system", "echo-watchdog", "monitor.heartbeat_stale", "service", heartbeat.ServiceID, "succeeded", map[string]any{"eventId": event.EventID, "lastEventId": heartbeat.LastEventID, "timeoutSeconds": heartbeat.TimeoutSeconds})
+	}
+	due, reminderErr := w.store.QueueDueServiceAlertNotifications(ctx, now, w.reminderInterval, ownerJID, 20)
+	if reminderErr != nil {
+		sweepErrors = append(sweepErrors, fmt.Errorf("queue due service alert notifications: %w", reminderErr))
+	} else {
+		transitions = append(transitions, due...)
+		for _, transition := range due {
+			_ = w.store.Audit(ctx, "system", "echo-watchdog", "monitor.alert_"+transition.Kind, "service_alert", transition.Alert.ID, "succeeded", map[string]any{"serviceId": transition.Alert.ServiceID, "reminderCount": transition.Alert.ReminderCount})
+		}
 	}
 	return transitions, errors.Join(sweepErrors...)
 }

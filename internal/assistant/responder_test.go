@@ -595,6 +595,21 @@ func TestMaintenanceIsVisibleWithoutExposingMutationTools(t *testing.T) {
 	}
 }
 
+func TestCriticalAlertsExposeExactAcknowledgementCodeAsReadEvidence(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{alerts: []domain.ServiceAlert{{ID: "alt_0123456789abcdef01234567", ServiceID: "svc_1", ServiceName: "Invoices API", Status: "open", Severity: "critical", Summary: "Readiness unavailable", Fingerprint: "readiness", OpenedAt: now.Add(-time.Hour), LastSeenAt: now}}}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+	answer, intent, err := responder.Answer(context.Background(), "alerts")
+	if err != nil || intent != "alerts" || !containsAll(answer, "ack cdef01234567", "pause bounded reminders") {
+		t.Fatalf("acknowledgement guidance missing intent=%s err=%v body=%s", intent, err, answer)
+	}
+	output, err := responder.executeTool(context.Background(), "get_open_alerts", json.RawMessage(`{}`))
+	if err != nil || !containsAll(output, `"acknowledgement_code":"cdef01234567"`, `"reminder_count":0`) || strings.Contains(output, "alt_0123456789abcdef01234567") {
+		t.Fatalf("unsafe acknowledgement tool view: output=%s err=%v", output, err)
+	}
+}
+
 func TestWorkerStallIsVisibleInStatusAndAlerts(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	lastSeen := now.Add(-10 * time.Minute)

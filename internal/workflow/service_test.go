@@ -16,6 +16,19 @@ func TestSameJIDMatchesLinkedDeviceAndAccount(t *testing.T) {
 	}
 }
 
+func TestParseAlertAcknowledgementCommandRequiresExactCode(t *testing.T) {
+	for _, input := range []string{"ack abcdef012345", "ACKNOWLEDGE ABCDEF012345."} {
+		if code, ok := parseAlertAcknowledgementCommand(input); !ok || code != "abcdef012345" {
+			t.Fatalf("valid acknowledgement command rejected: input=%q code=%q ok=%t", input, code, ok)
+		}
+	}
+	for _, input := range []string{"ack", "ack abc", "please ack abcdef012345", "ack abcdef01234z"} {
+		if _, ok := parseAlertAcknowledgementCommand(input); ok {
+			t.Fatalf("unsafe acknowledgement command accepted: %q", input)
+		}
+	}
+}
+
 func TestApprovalResolutionMessageExplainsQueuedPatchWork(t *testing.T) {
 	message := approvalResolutionMessage(domain.Approval{IncidentID: "inc_test", ActionType: "prepare_patch"}, "approved")
 	for _, expected := range []string{"now queued", "few minutes", "draft pull request", "terminal failure"} {

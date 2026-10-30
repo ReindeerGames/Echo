@@ -212,6 +212,9 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
       (SELECT COUNT(*) FROM echo_service_alerts a WHERE a.alert_status='open' AND EXISTS (
         SELECT 1 FROM echo_service_maintenance_windows m WHERE m.service_id=a.service_id AND m.cancelled_at IS NULL AND m.starts_at<=UTC_TIMESTAMP(6) AND m.ends_at>UTC_TIMESTAMP(6)
       )),
+	  (SELECT COUNT(*) FROM echo_service_alerts a WHERE a.alert_status='open' AND a.acknowledged_at IS NOT NULL AND NOT EXISTS (
+	    SELECT 1 FROM echo_service_maintenance_windows m WHERE m.service_id=a.service_id AND m.cancelled_at IS NULL AND m.starts_at<=UTC_TIMESTAMP(6) AND m.ends_at>UTC_TIMESTAMP(6)
+	  )),
       (SELECT COUNT(*) FROM echo_service_maintenance_windows WHERE cancelled_at IS NULL AND starts_at<=UTC_TIMESTAMP(6) AND ends_at>UTC_TIMESTAMP(6)),
       (SELECT COUNT(*) FROM echo_approvals WHERE status='pending' AND expires_at > NOW(6)),
 	  (SELECT COUNT(*) FROM echo_jobs WHERE status='queued'),
@@ -225,7 +228,7 @@ func (s *Store) Dashboard(ctx context.Context) (domain.Dashboard, error) {
 	  (SELECT MAX(last_seen_at) FROM echo_worker_heartbeats),
 	  EXISTS(SELECT 1 FROM echo_worker_health_alerts WHERE alert_status='open'),
 	  COALESCE((SELECT summary FROM echo_worker_health_alerts WHERE alert_status='open' ORDER BY updated_at DESC LIMIT 1),'')`).Scan(
-		&out.OpenIncidents, &out.OpenAlerts, &out.SuppressedAlerts, &out.ActiveMaintenanceWindows, &out.PendingApprovals, &out.QueuedJobs, &out.RunningJobs, &out.RetryingJobs, &out.DeadJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages, &out.WorkerLastSeenAt, &out.WorkerQueueStalled, &out.WorkerHealthSummary,
+		&out.OpenIncidents, &out.OpenAlerts, &out.SuppressedAlerts, &out.AcknowledgedAlerts, &out.ActiveMaintenanceWindows, &out.PendingApprovals, &out.QueuedJobs, &out.RunningJobs, &out.RetryingJobs, &out.DeadJobs, &out.FailedDeployments, &out.EnabledProjects, &out.PendingWhatsAppMessages, &out.DeadWhatsAppMessages, &out.WorkerLastSeenAt, &out.WorkerQueueStalled, &out.WorkerHealthSummary,
 	)
 	return out, err
 }
@@ -717,12 +720,14 @@ func enqueueMonitorTransitions(ctx context.Context, tx *sql.Tx, ownerJID string,
 			continue
 		}
 		alert := transition.Alert
-		body := fmt.Sprintf("Echo alert %s · %s\n%s (%s)\n%s", strings.ReplaceAll(strings.ToUpper(transition.Kind), "_", " "), strings.ToUpper(alert.Severity), alert.ServiceName, alert.Fingerprint, alert.Summary)
-		if transition.Kind == "opened" || transition.Kind == "reopened" || transition.Kind == "escalated" || transition.Kind == "maintenance_ended" {
-			body += fmt.Sprintf("\n\nReply “service %s” for current evidence, or “investigate %s” for correlated diagnosis when AI tools are enabled.", alert.ServiceName, alert.ServiceName)
-		}
+		body := serviceAlertNotificationBody(transition.Kind, alert)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, body); err != nil {
 			return err
+		}
+		if alert.Status == "open" {
+			if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET last_notified_at=UTC_TIMESTAMP(6) WHERE id=?`, alert.ID); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -748,10 +753,10 @@ func monitorEventScanArgs(item *domain.MonitorEvent) []any {
 }
 
 func scanServiceAlert(row scanner, item *domain.ServiceAlert) error {
-	return row.Scan(&item.ID, &item.ServiceID, &item.ServiceName, &item.ProjectID, &item.Fingerprint, &item.Status, &item.Severity, &item.Title, &item.Summary, &item.LatestEventID, &item.OpenedAt, &item.LastSeenAt, &item.ResolvedAt, &item.MaintenanceWindowID, &item.NotificationSuppressedUntil, &item.MaintenanceOpeningSuppressed)
+	return row.Scan(&item.ID, &item.ServiceID, &item.ServiceName, &item.ProjectID, &item.Fingerprint, &item.Status, &item.Severity, &item.Title, &item.Summary, &item.LatestEventID, &item.OpenedAt, &item.LastSeenAt, &item.ResolvedAt, &item.MaintenanceWindowID, &item.NotificationSuppressedUntil, &item.MaintenanceOpeningSuppressed, &item.AcknowledgedAt, &item.AcknowledgedVia, &item.LastNotifiedAt, &item.ReminderCount)
 }
 
-const serviceAlertSelect = `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at,COALESCE(a.maintenance_window_id,''),a.notification_suppressed_until,a.maintenance_opening_suppressed FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id`
+const serviceAlertSelect = `SELECT a.id,a.service_id,s.name,s.project_id,a.fingerprint,a.alert_status,a.severity,a.title,a.summary,a.latest_event_id,a.opened_at,a.last_seen_at,a.resolved_at,COALESCE(a.maintenance_window_id,''),a.notification_suppressed_until,a.maintenance_opening_suppressed,a.acknowledged_at,a.acknowledged_via,a.last_notified_at,a.reminder_count FROM echo_service_alerts a JOIN echo_services s ON s.id=a.service_id`
 
 func updateAlerts(ctx context.Context, tx *sql.Tx, event domain.MonitorEvent) ([]domain.AlertTransition, error) {
 	if event.Status == "healthy" {
@@ -819,6 +824,15 @@ func updateAlerts(ctx context.Context, tx *sql.Tx, event domain.MonitorEvent) ([
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET alert_status='open',severity=?,title=?,summary=?,latest_event_id=?,opened_at=IF(alert_status='resolved',?,opened_at),last_seen_at=?,resolved_at=NULL WHERE id=?`, severity, title, event.Summary, event.EventID, event.ObservedAt, event.ObservedAt, alert.ID); err != nil {
 		return nil, err
+	}
+	if kind == "reopened" || kind == "escalated" {
+		if _, err := tx.ExecContext(ctx, `UPDATE echo_service_alerts SET acknowledged_at=NULL,acknowledged_via='',last_notified_at=NULL,reminder_count=0 WHERE id=?`, alert.ID); err != nil {
+			return nil, err
+		}
+		alert.AcknowledgedAt = nil
+		alert.AcknowledgedVia = ""
+		alert.LastNotifiedAt = nil
+		alert.ReminderCount = 0
 	}
 	alert.Status = "open"
 	alert.Severity = severity

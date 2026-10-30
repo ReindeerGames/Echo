@@ -168,6 +168,18 @@ func TestMonitoringSupportsBoundedPlannedMaintenance(t *testing.T) {
 	}
 }
 
+func TestMonitoringSupportsAlertAcknowledgementLifecycle(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/acknowledgement", "data-alert-acknowledgement", "Acknowledge", "Clear acknowledgement", "Alert acknowledged; attention recorded", "Unacknowledged critical"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("alert acknowledgement workflow is missing %q", expected)
+		}
+	}
+}
+
 func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

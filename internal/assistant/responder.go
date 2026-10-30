@@ -167,7 +167,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		if err != nil {
 			return "", err
 		}
-		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "maintenance_suppressed_alerts": dashboard.SuppressedAlerts, "active_maintenance_windows": dashboard.ActiveMaintenanceWindows, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "monitoring": coverage, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
+		view := map[string]any{"open_alerts": dashboard.OpenAlerts, "maintenance_suppressed_alerts": dashboard.SuppressedAlerts, "acknowledged_alerts": dashboard.AcknowledgedAlerts, "active_maintenance_windows": dashboard.ActiveMaintenanceWindows, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "queued_jobs": dashboard.QueuedJobs, "running_jobs": dashboard.RunningJobs, "retrying_jobs": dashboard.RetryingJobs, "dead_jobs": dashboard.DeadJobs, "worker_last_seen_at": dashboard.WorkerLastSeenAt, "worker_queue_stalled": dashboard.WorkerQueueStalled, "worker_health_summary": dashboard.WorkerHealthSummary, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "monitoring": coverage, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages}
 		windows, err := r.reader.ListMaintenanceWindows(ctx, "", 101)
 		if err != nil {
 			return "", err
@@ -196,6 +196,9 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			OpenedAt         *time.Time `json:"opened_at,omitempty"`
 			LastSeen         *time.Time `json:"last_seen,omitempty"`
 			MaintenanceUntil *time.Time `json:"maintenance_suppressed_until,omitempty"`
+			AcknowledgedAt   *time.Time `json:"acknowledged_at,omitempty"`
+			Acknowledgement  string     `json:"acknowledgement_code,omitempty"`
+			ReminderCount    int        `json:"reminder_count"`
 		}
 		views := make([]alertView, 0, min(len(alerts), 50))
 		for index, alert := range alerts {
@@ -203,7 +206,11 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 				break
 			}
 			openedAt, lastSeen := alert.OpenedAt, alert.LastSeenAt
-			views = append(views, alertView{Service: alert.ServiceName, Severity: alert.Severity, Summary: alert.Summary, Fingerprint: alert.Fingerprint, OpenedAt: &openedAt, LastSeen: &lastSeen, MaintenanceUntil: alertMaintenanceUntil(r.now().UTC(), alert, windows)})
+			code := ""
+			if alert.Status == "open" && alert.Severity == "critical" {
+				code = store.AlertAcknowledgementCode(alert.ID)
+			}
+			views = append(views, alertView{Service: alert.ServiceName, Severity: alert.Severity, Summary: alert.Summary, Fingerprint: alert.Fingerprint, OpenedAt: &openedAt, LastSeen: &lastSeen, MaintenanceUntil: alertMaintenanceUntil(r.now().UTC(), alert, windows), AcknowledgedAt: alert.AcknowledgedAt, Acknowledgement: code, ReminderCount: alert.ReminderCount})
 		}
 		dashboard, err := r.reader.Dashboard(ctx)
 		if err != nil {
@@ -314,7 +321,10 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		}
 		serviceAlerts := make([]map[string]any, 0, len(alerts))
 		for _, alert := range alerts {
-			view := map[string]any{"severity": alert.Severity, "summary": alert.Summary, "fingerprint": alert.Fingerprint, "opened_at": alert.OpenedAt, "last_seen": alert.LastSeenAt}
+			view := map[string]any{"severity": alert.Severity, "summary": alert.Summary, "fingerprint": alert.Fingerprint, "opened_at": alert.OpenedAt, "last_seen": alert.LastSeenAt, "acknowledged_at": alert.AcknowledgedAt, "reminder_count": alert.ReminderCount}
+			if alert.Severity == "critical" {
+				view["acknowledgement_code"] = store.AlertAcknowledgementCode(alert.ID)
+			}
 			if until := alertMaintenanceUntil(now, alert, windows); until != nil {
 				view["maintenance_suppressed_until"] = until
 			}
@@ -392,7 +402,10 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			if len(alertViews) == 10 {
 				continue
 			}
-			view := map[string]any{"severity": alert.Severity, "summary": truncateRunes(alert.Summary, 300), "fingerprint": truncateRunes(alert.Fingerprint, 255), "opened_at": alert.OpenedAt, "last_seen_at": alert.LastSeenAt}
+			view := map[string]any{"severity": alert.Severity, "summary": truncateRunes(alert.Summary, 300), "fingerprint": truncateRunes(alert.Fingerprint, 255), "opened_at": alert.OpenedAt, "last_seen_at": alert.LastSeenAt, "acknowledged_at": alert.AcknowledgedAt, "reminder_count": alert.ReminderCount}
+			if alert.Severity == "critical" {
+				view["acknowledgement_code"] = store.AlertAcknowledgementCode(alert.ID)
+			}
 			if until := alertMaintenanceUntil(now, alert, windows); until != nil {
 				view["maintenance_suppressed_until"] = until
 			}
@@ -1495,10 +1508,10 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 		}
 	}
 	state := "No open runtime alerts."
-	if total := max(0, dashboard.OpenAlerts-dashboard.SuppressedAlerts) + runtimeAlerts; total > 0 {
+	if total := max(0, dashboard.OpenAlerts-dashboard.SuppressedAlerts-dashboard.AcknowledgedAlerts) + runtimeAlerts; total > 0 {
 		state = fmt.Sprintf("%d runtime alert(s) need attention.", total)
-	} else if dashboard.SuppressedAlerts > 0 {
-		state = fmt.Sprintf("%d open alert(s) are inside planned maintenance; evidence is still recording.", dashboard.SuppressedAlerts)
+	} else if dashboard.SuppressedAlerts > 0 || dashboard.AcknowledgedAlerts > 0 {
+		state = fmt.Sprintf("No unacknowledged alerts need attention · %d in maintenance · %d acknowledged.", dashboard.SuppressedAlerts, dashboard.AcknowledgedAlerts)
 	}
 	delivery := fmt.Sprintf("WhatsApp delivery: %d pending · %d dead", dashboard.PendingWhatsAppMessages, dashboard.DeadWhatsAppMessages)
 	if dashboard.DeadWhatsAppMessages > 0 {
@@ -1706,8 +1719,14 @@ func (r *Responder) alerts(ctx context.Context) (string, error) {
 		maintenance := ""
 		if until := alertMaintenanceUntil(r.now().UTC(), alert, windows); until != nil {
 			maintenance = " · MAINTENANCE until " + until.Format("2006-01-02 15:04 UTC")
+		} else if alert.AcknowledgedAt != nil {
+			maintenance = " · ACKNOWLEDGED " + alert.AcknowledgedAt.UTC().Format("2006-01-02 15:04 UTC")
 		}
-		lines = append(lines, fmt.Sprintf("• %s · %s%s\n  %s", strings.ToUpper(alert.Severity), alert.ServiceName, maintenance, alert.Summary))
+		line := fmt.Sprintf("• %s · %s%s\n  %s", strings.ToUpper(alert.Severity), alert.ServiceName, maintenance, alert.Summary)
+		if code := store.AlertAcknowledgementCode(alert.ID); alert.Severity == "critical" && alert.AcknowledgedAt == nil && maintenance == "" && code != "" {
+			line += fmt.Sprintf("\n  Reply “ack %s” to pause bounded reminders.", code)
+		}
+		lines = append(lines, line)
 	}
 	return fmt.Sprintf("Open operational alerts (%d)\n\n%s", len(alerts)+len(unreadyComponents)+map[bool]int{true: 1}[dashboard.WorkerQueueStalled], strings.Join(lines, "\n")), nil
 }
@@ -2364,7 +2383,7 @@ func projectOverviewView(now time.Time, overview projectOverview) map[string]any
 		if index == 50 {
 			continue
 		}
-		alerts = append(alerts, map[string]any{"service": truncateRunes(alert.ServiceName, 160), "service_id": alert.ServiceID, "severity": alert.Severity, "fingerprint": alert.Fingerprint, "summary": truncateRunes(alert.Summary, 300), "opened_at": alert.OpenedAt, "last_seen_at": alert.LastSeenAt})
+		alerts = append(alerts, map[string]any{"service": truncateRunes(alert.ServiceName, 160), "service_id": alert.ServiceID, "severity": alert.Severity, "fingerprint": alert.Fingerprint, "summary": truncateRunes(alert.Summary, 300), "opened_at": alert.OpenedAt, "last_seen_at": alert.LastSeenAt, "acknowledged_at": alert.AcknowledgedAt, "reminder_count": alert.ReminderCount})
 	}
 	services := make([]map[string]any, 0, min(len(overview.Services), 50))
 	for index, service := range overview.Services {
@@ -2498,6 +2517,8 @@ func (r *Responder) service(ctx context.Context, query string) (string, error) {
 			suppression := ""
 			if until := alertMaintenanceUntil(now, alert, windows); until != nil {
 				suppression = " · notifications suppressed until " + until.Format("15:04 UTC")
+			} else if alert.AcknowledgedAt != nil {
+				suppression = " · acknowledged " + alert.AcknowledgedAt.UTC().Format("2006-01-02 15:04 UTC")
 			}
 			lines = append(lines, fmt.Sprintf("• %s%s · %s", strings.ToUpper(alert.Severity), suppression, alert.Summary))
 		}
@@ -2801,7 +2822,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• coverage / what isn't monitored — project relationship and monitoring gaps\n• activity / what happened — recent safe audit events\n• alerts — open runtime conditions\n• maintenance — active and upcoming service maintenance\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• investigate <service> — correlate signals, incidents, deployments and workflows (AI configured)\n• jobs — queued, running, retrying and dead work\n• deliveries — WhatsApp delivery attempts and safe failure categories\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• github inventory — compare token-visible and configured repositories (AI configured)\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• brief / good morning — estate health and current attention items\n• status — estate summary and monitoring coverage\n• coverage / what isn't monitored — project relationship and monitoring gaps\n• activity / what happened — recent safe audit events\n• alerts — open runtime conditions and acknowledgement codes\n• ack <code> — acknowledge one exact open alert and pause its reminders\n• maintenance — active and upcoming service maintenance\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• investigate <service> — correlate signals, incidents, deployments and workflows (AI configured)\n• jobs — queued, running, retrying and dead work\n• deliveries — WhatsApp delivery attempts and safe failure categories\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• project <name> — joined service, alert, incident and deployment health\n• github status — current workflow health across enabled repositories\n• github inventory — compare token-visible and configured repositories (AI configured)\n• repo <name> — one default branch and its recent GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions and AI tools are read-only. Only an exact owner command can acknowledge an alert; production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

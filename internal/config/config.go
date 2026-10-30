@@ -54,9 +54,10 @@ type GitHub struct {
 }
 
 type Monitor struct {
-	WebhookSecret    string
-	WatchdogInterval time.Duration
-	Retention        time.Duration
+	WebhookSecret         string
+	WatchdogInterval      time.Duration
+	AlertReminderInterval time.Duration
+	Retention             time.Duration
 }
 
 type AI struct {
@@ -122,9 +123,10 @@ func Load() (Config, error) {
 			WebhookSecret: strings.TrimSpace(os.Getenv("ECHO_GITHUB_WEBHOOK_SECRET")),
 		},
 		Monitor: Monitor{
-			WebhookSecret:    strings.TrimSpace(os.Getenv("ECHO_MONITOR_WEBHOOK_SECRET")),
-			WatchdogInterval: duration("ECHO_MONITOR_WATCHDOG_INTERVAL", 30*time.Second),
-			Retention:        duration("ECHO_MONITOR_RETENTION", 90*24*time.Hour),
+			WebhookSecret:         strings.TrimSpace(os.Getenv("ECHO_MONITOR_WEBHOOK_SECRET")),
+			WatchdogInterval:      duration("ECHO_MONITOR_WATCHDOG_INTERVAL", 30*time.Second),
+			AlertReminderInterval: duration("ECHO_MONITOR_ALERT_REMINDER_INTERVAL", 4*time.Hour),
+			Retention:             duration("ECHO_MONITOR_RETENTION", 90*24*time.Hour),
 		},
 		AI: AI{
 			Enabled: boolean("ECHO_AI_ENABLED", false),
@@ -186,6 +188,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Monitor.WatchdogInterval < 5*time.Second || cfg.Monitor.WatchdogInterval > 5*time.Minute {
 		return Config{}, errors.New("ECHO_MONITOR_WATCHDOG_INTERVAL must be between 5s and 5m")
+	}
+	if cfg.Monitor.AlertReminderInterval != 0 && (cfg.Monitor.AlertReminderInterval < 15*time.Minute || cfg.Monitor.AlertReminderInterval > 7*24*time.Hour) {
+		return Config{}, errors.New("ECHO_MONITOR_ALERT_REMINDER_INTERVAL must be 0 or between 15m and 168h")
 	}
 	if cfg.Monitor.Retention < 24*time.Hour || cfg.Monitor.Retention > 365*24*time.Hour {
 		return Config{}, errors.New("ECHO_MONITOR_RETENTION must be between 24h and 8760h")

@@ -88,7 +88,7 @@ func run() error {
 	}
 	workerWatchdog := worker.NewHealthWatchdog(st, owners, cfg.Monitor.WatchdogInterval, cfg.Worker.HeartbeatTimeout, cfg.Worker.QueueStallTimeout, cfg.Worker.Enabled)
 	go superviseComponent(ctx, state, "worker-watchdog", func() error { return workerWatchdog.Run(ctx) }, reporter)
-	heartbeatWatchdog := monitor.NewWatchdog(st, owners, cfg.Monitor.WatchdogInterval)
+	heartbeatWatchdog := monitor.NewWatchdog(st, owners, cfg.Monitor.WatchdogInterval, cfg.Monitor.AlertReminderInterval)
 	go superviseComponent(ctx, state, "monitor-watchdog", func() error { return heartbeatWatchdog.Run(ctx) }, reporter)
 
 	select {

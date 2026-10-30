@@ -16,6 +16,8 @@ type fakeHeartbeatStore struct {
 	events    []domain.MonitorEvent
 	ownerJIDs []string
 	listCalls int
+	due       []domain.AlertTransition
+	dueCalls  int
 }
 
 func (f *fakeHeartbeatStore) ListStaleServiceHeartbeats(context.Context, time.Time) ([]domain.StaleServiceHeartbeat, error) {
@@ -47,8 +49,25 @@ func (f *fakeHeartbeatStore) RecordMonitorEvent(_ context.Context, event domain.
 	return domain.MonitorResult{Event: event, Transitions: []domain.AlertTransition{transition}}, nil
 }
 
+func (f *fakeHeartbeatStore) QueueDueServiceAlertNotifications(_ context.Context, _ time.Time, _ time.Duration, owner string, _ int) ([]domain.AlertTransition, error) {
+	f.dueCalls++
+	f.ownerJIDs = append(f.ownerJIDs, owner)
+	return f.due, nil
+}
+
 func (*fakeHeartbeatStore) Audit(context.Context, string, string, string, string, string, string, any) error {
 	return nil
+}
+
+func TestWatchdogIncludesDueAlertFollowThrough(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	due := domain.AlertTransition{Kind: "reminder", Alert: domain.ServiceAlert{ID: "alt_1", ServiceID: "svc_1", ReminderCount: 2}}
+	store := &fakeHeartbeatStore{due: []domain.AlertTransition{due}}
+	watchdog := NewWatchdog(store, fakeOwner{jid: "owner@s.whatsapp.net"}, 30*time.Second, time.Hour)
+	transitions, err := watchdog.Sweep(t.Context(), now)
+	if err != nil || len(transitions) != 1 || transitions[0].Kind != "reminder" || store.dueCalls != 1 {
+		t.Fatalf("due alert follow-through missing: transitions=%#v calls=%d err=%v", transitions, store.dueCalls, err)
+	}
 }
 
 type fakeOwner struct {

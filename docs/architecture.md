@@ -50,6 +50,7 @@ The observer has no database, GitHub, WhatsApp, AI, shell, or SSH access. HTTPS 
 - `echo_incident_messages`: the original report and bounded correlated follow-up thread; WhatsApp chat/message IDs provide idempotency and reply correlation without text heuristics.
 - `echo_monitor_events`: signed normalized service observations. Superseded history is pruned in bounded startup and daily batches according to `ECHO_MONITOR_RETENTION`; the newest non-watchdog event per service and all alert-referenced events are retained.
 - `echo_service_maintenance_windows`: non-overlapping per-service notification-suppression windows; alert evidence continues and suppression provenance stays attached to affected open alerts.
+- `echo_service_alerts`: acknowledgement provenance, last notification time, and a monotonic reminder count make critical-alert follow-through durable and idempotent.
 - `echo_approvals`: expiring one-action authorization.
 - `echo_audit_events`: append-only operational evidence.
 - `echo_encrypted_settings`: AES-GCM ciphertext and non-secret connection metadata; the encryption key remains outside MariaDB.

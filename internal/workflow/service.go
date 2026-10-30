@@ -328,6 +328,30 @@ func (s *Service) ReceiveOwnerCommand(ctx context.Context, msg domain.InboundMes
 			return complete(approvalResolutionMessage(item, resolution), "approval_"+resolution, nil, nil)
 		}
 	}
+	if code, ok := parseAlertAcknowledgementCommand(msg.Body); ok {
+		alert, findErr := s.store.FindOpenServiceAlertByAcknowledgementCode(ctx, code)
+		if findErr != nil {
+			if errors.Is(findErr, store.ErrAlertTokenAmbiguous) {
+				return complete("That acknowledgement code matches more than one open alert. Please acknowledge the exact alert in the Echo control plane.", "alert_acknowledgement_ambiguous", nil, findErr)
+			}
+			return complete("I could not find an open alert for that acknowledgement code. It may already be resolved or the code may be incorrect.", "alert_acknowledgement_not_found", nil, findErr)
+		}
+		acknowledged, changed, acknowledgeErr := s.store.AcknowledgeServiceAlert(ctx, alert.ID, "whatsapp")
+		if acknowledgeErr != nil {
+			return complete("I could not acknowledge that alert safely. Please use the Echo control plane.", "alert_acknowledgement_failed", nil, acknowledgeErr)
+		}
+		if changed {
+			_ = s.store.Audit(ctx, "whatsapp", msg.SenderJID, "monitor.alert_acknowledged", "service_alert", acknowledged.ID, "succeeded", map[string]any{"serviceId": acknowledged.ServiceID})
+		}
+		state := "Acknowledged"
+		if !changed {
+			state = "Already acknowledged"
+		}
+		return complete(fmt.Sprintf("%s: %s · %s. Reminders are paused until this alert resolves, reopens, or escalates.", state, acknowledged.ServiceName, acknowledged.Summary), "alert_acknowledged", nil, nil)
+	}
+	if fields := strings.Fields(strings.ToLower(strings.TrimSpace(msg.Body))); len(fields) > 0 && (fields[0] == "ack" || fields[0] == "acknowledge") {
+		return complete("Use the exact command from the critical alert notification: “ack” followed by its 12-character code. You can also acknowledge the alert in Echo’s Monitoring screen.", "alert_acknowledgement_invalid", nil, nil)
+	}
 	if s.assistant == nil {
 		return complete("Echo's read-only operator assistant is unavailable. Please use the control plane.", "unavailable", nil, errors.New("assistant unavailable"))
 	}
@@ -354,6 +378,23 @@ func (s *Service) ReceiveOwnerCommand(ctx context.Context, msg domain.InboundMes
 		intent = "ai_failed"
 	}
 	return complete(reply, intent, executions, answerErr)
+}
+
+func parseAlertAcknowledgementCommand(value string) (string, bool) {
+	parts := strings.Fields(strings.ToLower(strings.TrimSpace(value)))
+	if len(parts) != 2 || (parts[0] != "ack" && parts[0] != "acknowledge") {
+		return "", false
+	}
+	code := strings.Trim(parts[1], "?!.,")
+	if len(code) != 12 {
+		return "", false
+	}
+	for _, char := range code {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return "", false
+		}
+	}
+	return code, true
 }
 
 func approvalResolutionMessage(item domain.Approval, resolution string) string {

@@ -144,6 +144,25 @@ func TestMonitorWatchdogIntervalIsBounded(t *testing.T) {
 	}
 }
 
+func TestMonitorAlertReminderIntervalIsBoundedOrDisabled(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "false")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	t.Setenv("ECHO_MONITOR_ALERT_REMINDER_INTERVAL", "1m")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected short alert reminder interval to be rejected")
+	}
+	t.Setenv("ECHO_MONITOR_ALERT_REMINDER_INTERVAL", "169h")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected oversized alert reminder interval to be rejected")
+	}
+	t.Setenv("ECHO_MONITOR_ALERT_REMINDER_INTERVAL", "0")
+	if cfg, err := Load(); err != nil || cfg.Monitor.AlertReminderInterval != 0 {
+		t.Fatalf("disabled alert reminders rejected: interval=%s err=%v", cfg.Monitor.AlertReminderInterval, err)
+	}
+}
+
 func TestMonitorRetentionIsBounded(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "development")

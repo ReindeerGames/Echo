@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -692,11 +693,9 @@ func TestMariaDBMaintenanceSuppressesAndRestoresAlertNotifications(t *testing.T)
 	if _, err := st.db.ExecContext(ctx, `UPDATE echo_service_maintenance_windows SET starts_at=?,ends_at=? WHERE id=?`, now.Add(-2*time.Hour), now.Add(-time.Hour), window.ID); err != nil {
 		t.Fatal(err)
 	}
-	unhealthy.EventID = "maintenance-persisted"
-	unhealthy.ObservedAt = now.Add(time.Minute)
-	result, err = st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
-	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "maintenance_ended" || result.Transitions[0].Suppressed {
-		t.Fatalf("persistent alert did not notify after maintenance: result=%#v err=%v", result, err)
+	due, err := st.QueueDueServiceAlertNotifications(ctx, now.Add(time.Minute), time.Hour, "owner@s.whatsapp.net", 20)
+	if err != nil || len(due) != 1 || due[0].Kind != "maintenance_ended" || due[0].Suppressed {
+		t.Fatalf("persistent alert did not notify proactively after maintenance: transitions=%#v err=%v", due, err)
 	}
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE body LIKE 'Echo alert MAINTENANCE ENDED%'`).Scan(&notifications); err != nil || notifications != 1 {
 		t.Fatalf("maintenance-ended notification count=%d err=%v", notifications, err)
@@ -723,6 +722,122 @@ func TestMariaDBMaintenanceSuppressesAndRestoresAlertNotifications(t *testing.T)
 	}
 	if _, _, err := st.CancelMaintenanceWindow(ctx, second.ID, "owner@s.whatsapp.net"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cancelled maintenance remained cancellable: %v", err)
+	}
+}
+
+func TestMariaDBAlertAcknowledgementAndRemindersAreBounded(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "reminders", Name: "Reminders", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "api", Name: "API", Kind: "application", Criticality: "critical", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	event := domain.MonitorEvent{EventID: "reminder-open", ServiceID: service.ID, Source: "integration", Status: "unhealthy", Severity: "critical", Summary: "API is unavailable", Fingerprint: "readiness", Details: json.RawMessage(`{}`), ObservedAt: now}
+	result, err := st.RecordMonitorEvent(ctx, event, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
+		t.Fatalf("open critical alert: result=%#v err=%v", result, err)
+	}
+	alertID := result.Transitions[0].Alert.ID
+	code := AlertAcknowledgementCode(alertID)
+	if len(code) != 12 {
+		t.Fatalf("invalid acknowledgement code %q", code)
+	}
+	var initialBody string
+	if err := st.db.QueryRowContext(ctx, `SELECT body FROM echo_whatsapp_outbox ORDER BY created_at LIMIT 1`).Scan(&initialBody); err != nil || !strings.Contains(initialBody, "ack "+code) {
+		t.Fatalf("opening notification missing exact acknowledgement command: body=%q err=%v", initialBody, err)
+	}
+	if due, err := st.QueueDueServiceAlertNotifications(ctx, now.Add(30*time.Minute), time.Hour, "owner@s.whatsapp.net", 20); err != nil || len(due) != 0 {
+		t.Fatalf("early reminder queued: transitions=%#v err=%v", due, err)
+	}
+	type reminderResult struct {
+		transitions []domain.AlertTransition
+		err         error
+	}
+	results := make(chan reminderResult, 2)
+	start := make(chan struct{})
+	var wait sync.WaitGroup
+	for range 2 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			transitions, queueErr := st.QueueDueServiceAlertNotifications(ctx, now.Add(2*time.Hour), time.Hour, "owner@s.whatsapp.net", 20)
+			results <- reminderResult{transitions: transitions, err: queueErr}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	queued := 0
+	for result := range results {
+		if result.err != nil {
+			t.Fatalf("concurrent reminder queue failed: %v", result.err)
+		}
+		queued += len(result.transitions)
+		if len(result.transitions) == 1 && (result.transitions[0].Kind != "reminder" || result.transitions[0].Alert.ReminderCount != 1) {
+			t.Fatalf("unexpected reminder transition: %#v", result.transitions)
+		}
+	}
+	if queued != 1 {
+		t.Fatalf("concurrent watchdogs queued %d reminders, want exactly one", queued)
+	}
+	if duplicate, err := st.QueueDueServiceAlertNotifications(ctx, now.Add(2*time.Hour), time.Hour, "owner@s.whatsapp.net", 20); err != nil || len(duplicate) != 0 {
+		t.Fatalf("duplicate reminder queued: transitions=%#v err=%v", duplicate, err)
+	}
+	found, err := st.FindOpenServiceAlertByAcknowledgementCode(ctx, code)
+	if err != nil || found.ID != alertID {
+		t.Fatalf("acknowledgement code lookup: alert=%#v err=%v", found, err)
+	}
+	acknowledged, changed, err := st.AcknowledgeServiceAlert(ctx, alertID, "whatsapp")
+	if err != nil || !changed || acknowledged.AcknowledgedAt == nil || acknowledged.AcknowledgedVia != "whatsapp" {
+		t.Fatalf("acknowledge alert: alert=%#v changed=%t err=%v", acknowledged, changed, err)
+	}
+	if _, changed, err := st.AcknowledgeServiceAlert(ctx, alertID, "whatsapp"); err != nil || changed {
+		t.Fatalf("repeated acknowledgement was not idempotent: changed=%t err=%v", changed, err)
+	}
+	if due, err := st.QueueDueServiceAlertNotifications(ctx, now.Add(6*time.Hour), time.Hour, "owner@s.whatsapp.net", 20); err != nil || len(due) != 0 {
+		t.Fatalf("acknowledged alert produced reminder: transitions=%#v err=%v", due, err)
+	}
+	window, err := st.CreateMaintenanceWindow(ctx, domain.MaintenanceWindow{ServiceID: service.ID, StartsAt: time.Now().UTC().Add(-time.Minute), EndsAt: time.Now().UTC().Add(time.Hour), Reason: "Acknowledged maintenance test"}, "integration-admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_service_maintenance_windows SET starts_at=?,ends_at=? WHERE id=?`, now.Add(-2*time.Hour), now.Add(-time.Hour), window.ID); err != nil {
+		t.Fatal(err)
+	}
+	if due, err := st.QueueDueServiceAlertNotifications(ctx, now.Add(7*time.Hour), time.Hour, "owner@s.whatsapp.net", 20); err != nil || len(due) != 1 || due[0].Kind != "maintenance_ended" || due[0].Alert.AcknowledgedAt == nil {
+		t.Fatalf("acknowledgement hid maintenance-ended transition: transitions=%#v err=%v", due, err)
+	}
+	cleared, changed, err := st.ClearServiceAlertAcknowledgement(ctx, alertID)
+	if err != nil || !changed || cleared.AcknowledgedAt != nil || cleared.LastNotifiedAt == nil {
+		t.Fatalf("clear acknowledgement: alert=%#v changed=%t err=%v", cleared, changed, err)
+	}
+	if due, err := st.QueueDueServiceAlertNotifications(ctx, time.Now().UTC().Add(30*time.Minute), time.Hour, "owner@s.whatsapp.net", 20); err != nil || len(due) != 0 {
+		t.Fatalf("clearing acknowledgement caused immediate reminder: transitions=%#v err=%v", due, err)
+	}
+	recovery := domain.MonitorEvent{EventID: "reminder-resolved", ServiceID: service.ID, Source: "integration", Status: "healthy", Severity: "info", Summary: "API recovered", Details: json.RawMessage(`{}`), ObservedAt: now.Add(7 * time.Hour)}
+	if _, err := st.RecordMonitorEvent(ctx, recovery, "owner@s.whatsapp.net"); err != nil {
+		t.Fatal(err)
+	}
+	event.EventID = "reminder-reopened"
+	event.ObservedAt = now.Add(8 * time.Hour)
+	result, err = st.RecordMonitorEvent(ctx, event, "owner@s.whatsapp.net")
+	if err != nil || result.Transitions[0].Kind != "reopened" || result.Transitions[0].Alert.AcknowledgedAt != nil || result.Transitions[0].Alert.ReminderCount != 0 {
+		t.Fatalf("reopened alert did not reset acknowledgement lifecycle: result=%#v err=%v", result, err)
 	}
 }
 

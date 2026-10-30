@@ -113,6 +113,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("POST /api/v1/services", s.services)
 	protected.HandleFunc("GET /api/v1/monitor/events", s.monitorEvents)
 	protected.HandleFunc("GET /api/v1/monitor/alerts", s.serviceAlerts)
+	protected.HandleFunc("POST /api/v1/monitor/alerts/{id}/acknowledgement", s.serviceAlertAcknowledgement)
+	protected.HandleFunc("DELETE /api/v1/monitor/alerts/{id}/acknowledgement", s.serviceAlertAcknowledgement)
 	protected.HandleFunc("GET /api/v1/maintenance", s.maintenanceWindows)
 	protected.HandleFunc("POST /api/v1/maintenance", s.maintenanceWindows)
 	protected.HandleFunc("DELETE /api/v1/maintenance/{id}", s.cancelMaintenanceWindow)
@@ -550,6 +552,35 @@ func monitorEventLimit(raw string) (int, error) {
 func (s *Server) serviceAlerts(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListServiceAlerts(r.Context(), r.URL.Query().Get("status"))
 	respond(w, items, err)
+}
+
+func (s *Server) serviceAlertAcknowledgement(w http.ResponseWriter, r *http.Request) {
+	alertID := r.PathValue("id")
+	var (
+		alert   domain.ServiceAlert
+		changed bool
+		err     error
+		action  string
+	)
+	if r.Method == http.MethodDelete {
+		alert, changed, err = s.store.ClearServiceAlertAcknowledgement(r.Context(), alertID)
+		action = "monitor.alert_acknowledgement_cleared"
+	} else {
+		alert, changed, err = s.store.AcknowledgeServiceAlert(r.Context(), alertID, "control_plane")
+		action = "monitor.alert_acknowledged"
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "alert_not_found", "open service alert was not found")
+		return
+	}
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	if changed {
+		_ = s.store.Audit(r.Context(), "admin", actorFrom(r.Context()), action, "service_alert", alert.ID, "succeeded", map[string]any{"serviceId": alert.ServiceID})
+	}
+	respond(w, map[string]any{"alert": alert, "changed": changed}, nil)
 }
 
 func (s *Server) maintenanceWindows(w http.ResponseWriter, r *http.Request) {

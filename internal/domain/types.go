@@ -113,6 +113,10 @@ type ServiceAlert struct {
 	MaintenanceWindowID          string     `json:"maintenanceWindowId,omitempty"`
 	NotificationSuppressedUntil  *time.Time `json:"notificationSuppressedUntil,omitempty"`
 	MaintenanceOpeningSuppressed bool       `json:"-"`
+	AcknowledgedAt               *time.Time `json:"acknowledgedAt,omitempty"`
+	AcknowledgedVia              string     `json:"acknowledgedVia,omitempty"`
+	LastNotifiedAt               *time.Time `json:"lastNotifiedAt,omitempty"`
+	ReminderCount                int        `json:"reminderCount"`
 }
 
 type AlertTransition struct {
@@ -282,6 +286,7 @@ type Dashboard struct {
 	OpenIncidents            int        `json:"openIncidents"`
 	OpenAlerts               int        `json:"openAlerts"`
 	SuppressedAlerts         int        `json:"suppressedAlerts"`
+	AcknowledgedAlerts       int        `json:"acknowledgedAlerts"`
 	ActiveMaintenanceWindows int        `json:"activeMaintenanceWindows"`
 	PendingApprovals         int        `json:"pendingApprovals"`
 	QueuedJobs               int        `json:"queuedJobs"`
