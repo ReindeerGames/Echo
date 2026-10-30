@@ -86,14 +86,27 @@ func (s *Store) SetOwnerContact(ctx context.Context, contactID, actor string) (d
 	if err != nil {
 		return domain.WhatsAppContact{}, time.Time{}, err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO echo_owner_settings(singleton_id,contact_id,set_by) VALUES(1,?,?)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.WhatsAppContact{}, time.Time{}, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO echo_owner_settings(singleton_id,contact_id,set_by) VALUES(1,?,?)
       ON DUPLICATE KEY UPDATE contact_id=VALUES(contact_id),set_by=VALUES(set_by)`, contactID, actor)
 	if err != nil {
 		return domain.WhatsAppContact{}, time.Time{}, err
 	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), contact.JID, ownerConfirmationMessage()); err != nil {
+		return domain.WhatsAppContact{}, time.Time{}, err
+	}
 	var updated time.Time
-	err = s.db.QueryRowContext(ctx, `SELECT updated_at FROM echo_owner_settings WHERE singleton_id=1`).Scan(&updated)
-	return contact, updated, err
+	if err := tx.QueryRowContext(ctx, `SELECT updated_at FROM echo_owner_settings WHERE singleton_id=1`).Scan(&updated); err != nil {
+		return domain.WhatsAppContact{}, time.Time{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.WhatsAppContact{}, time.Time{}, err
+	}
+	return contact, updated, nil
 }
 
 func (s *Store) GetOwnerContact(ctx context.Context) (domain.WhatsAppContact, time.Time, error) {
@@ -108,6 +121,10 @@ func (s *Store) GetOwnerContact(ctx context.Context) (domain.WhatsAppContact, ti
 func (s *Store) ClearOwnerContact(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM echo_owner_settings WHERE singleton_id=1`)
 	return err
+}
+
+func ownerConfirmationMessage() string {
+	return "Echo owner contact confirmed.\n\nI will send private incident diagnoses, approval requests, monitoring alerts, deployment results, and Echo runtime warnings here.\n\nSend “brief” or “good morning” any time for the current operational picture. Questions never approve a production change."
 }
 
 func contactJIDs(msg domain.InboundMessage) (string, string) {

@@ -127,6 +127,48 @@ func TestMariaDBRuntimeComponentAlertLifecycleIsAtomicAndDeduplicated(t *testing
 	}
 }
 
+func TestMariaDBOwnerSelectionQueuesConfirmationAtomically(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	first, _, err := st.UpsertWhatsAppContact(ctx, domain.InboundMessage{MessageID: "owner-contact-1", ChatJID: "27820000000@s.whatsapp.net", SenderJID: "27820000000@s.whatsapp.net", SenderName: "Jason", Body: "hello", Timestamp: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selected, _, err := st.SetOwnerContact(ctx, first.ID, "admin")
+	if err != nil || selected.ID != first.ID {
+		t.Fatalf("select owner: contact=%#v err=%v", selected, err)
+	}
+	outbound, err := st.ClaimOutbound(ctx, time.Minute)
+	if err != nil || outbound.ID == "" || outbound.ChatJID != first.JID || !strings.Contains(outbound.Body, "Echo owner contact confirmed") || !strings.Contains(outbound.Body, "Send “brief”") {
+		t.Fatalf("owner confirmation: outbound=%#v err=%v", outbound, err)
+	}
+	second, _, err := st.UpsertWhatsAppContact(ctx, domain.InboundMessage{MessageID: "owner-contact-2", ChatJID: "27821111111@s.whatsapp.net", SenderJID: "27821111111@s.whatsapp.net", SenderName: "Other", Body: "hello", Timestamp: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.SetOwnerContact(ctx, second.ID, strings.Repeat("x", 256)); err == nil {
+		t.Fatal("oversized actor unexpectedly committed owner selection")
+	}
+	current, _, err := st.GetOwnerContact(ctx)
+	if err != nil || current.ID != first.ID {
+		t.Fatalf("failed owner selection changed current owner: contact=%#v err=%v", current, err)
+	}
+	var confirmations int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&confirmations); err != nil || confirmations != 1 {
+		t.Fatalf("failed owner selection changed outbox: count=%d err=%v", confirmations, err)
+	}
+}
+
 func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {
@@ -673,7 +715,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)
