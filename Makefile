@@ -1,6 +1,8 @@
 .PHONY: build test check run compose-up compose-down local-env local-up local-down local-logs local-restart local-reset
 
-LOCAL_COMPOSE = docker compose --env-file .env.local -f docker-compose.local.yml
+DOCKER ?= docker
+COMPOSE ?= $(DOCKER) compose
+LOCAL_COMPOSE = $(COMPOSE) --env-file .env.local -f docker-compose.local.yml
 
 build:
 	go build -o bin/echo ./cmd/echo
@@ -16,10 +18,10 @@ run:
 	go run ./cmd/echo
 
 compose-up:
-	docker compose up --build
+	$(COMPOSE) up --build
 
 compose-down:
-	docker compose down
+	$(COMPOSE) down
 
 local-env:
 	@test -f .env.local || cp .env.local.example .env.local

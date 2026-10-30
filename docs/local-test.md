@@ -18,6 +18,8 @@ The local database passwords and administrator token are predictable test defaul
 make local-up
 ```
 
+If the workstation's saved Docker context points somewhere else, override the client explicitly, for example `make DOCKER='docker --host=unix:///var/run/docker.sock' local-up`. Echo never guesses or rewrites Docker contexts.
+
 Open `http://localhost:8080` and sign in with the local administrator token:
 
 ```text

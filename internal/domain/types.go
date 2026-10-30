@@ -111,6 +111,39 @@ type MonitorResult struct {
 	Transitions []AlertTransition `json:"transitions"`
 }
 
+type Conversation struct {
+	ID             string    `json:"id"`
+	Channel        string    `json:"channel"`
+	ParticipantKey string    `json:"participantKey"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
+}
+
+type ConversationMessage struct {
+	ID                string    `json:"id"`
+	ConversationID    string    `json:"conversationId"`
+	Role              string    `json:"role"`
+	ExternalMessageID string    `json:"externalMessageId,omitempty"`
+	ReplyToMessageID  string    `json:"replyToMessageId,omitempty"`
+	Body              string    `json:"body"`
+	Intent            string    `json:"intent,omitempty"`
+	CreatedAt         time.Time `json:"createdAt"`
+}
+
+type ToolRun struct {
+	ID             string          `json:"id"`
+	ConversationID string          `json:"conversationId"`
+	MessageID      string          `json:"messageId"`
+	CallID         string          `json:"callId"`
+	Name           string          `json:"name"`
+	Arguments      json.RawMessage `json:"arguments"`
+	Output         string          `json:"output"`
+	Status         string          `json:"status"`
+	Error          string          `json:"error,omitempty"`
+	DurationMS     int64           `json:"durationMs"`
+	CreatedAt      time.Time       `json:"createdAt"`
+}
+
 type Incident struct {
 	ID              string     `json:"id"`
 	ProjectID       string     `json:"projectId"`

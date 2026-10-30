@@ -20,6 +20,7 @@ type Config struct {
 	GitHub      GitHub
 	Monitor     Monitor
 	AI          AI
+	Assistant   Assistant
 	Worker      Worker
 	Security    Security
 	Environment string
@@ -60,6 +61,11 @@ type AI struct {
 	BaseURL string
 	APIKey  string
 	Model   string
+}
+
+type Assistant struct {
+	HistoryLimit int
+	Retention    time.Duration
 }
 
 type Worker struct {
@@ -116,6 +122,10 @@ func Load() (Config, error) {
 			APIKey:  strings.TrimSpace(os.Getenv("ECHO_AI_API_KEY")),
 			Model:   env("ECHO_AI_MODEL", "gpt-5-mini"),
 		},
+		Assistant: Assistant{
+			HistoryLimit: integer("ECHO_ASSISTANT_HISTORY_LIMIT", 12),
+			Retention:    duration("ECHO_ASSISTANT_RETENTION", 30*24*time.Hour),
+		},
 		Worker: Worker{
 			Enabled:       boolean("ECHO_WORKER_ENABLED", true),
 			PollInterval:  duration("ECHO_WORKER_POLL_INTERVAL", 2*time.Second),
@@ -147,6 +157,12 @@ func Load() (Config, error) {
 	}
 	if len(cfg.Security.EncryptionKey) < 32 {
 		return Config{}, errors.New("ECHO_ENCRYPTION_KEY must contain at least 32 characters")
+	}
+	if cfg.Assistant.HistoryLimit < 4 || cfg.Assistant.HistoryLimit > 50 {
+		return Config{}, errors.New("ECHO_ASSISTANT_HISTORY_LIMIT must be between 4 and 50")
+	}
+	if cfg.Assistant.Retention < 24*time.Hour || cfg.Assistant.Retention > 365*24*time.Hour {
+		return Config{}, errors.New("ECHO_ASSISTANT_RETENTION must be between 24h and 8760h")
 	}
 	publicURL, err := url.ParseRequestURI(cfg.HTTP.PublicBaseURL)
 	if err != nil {

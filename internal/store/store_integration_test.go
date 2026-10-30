@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"testing"
 	"time"
@@ -160,9 +161,67 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	}
 }
 
+func TestMariaDBAssistantConversationIsIdempotent(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	conversation, inbound, created, err := st.BeginConversationTurn(ctx, "whatsapp", "27820000000@s.whatsapp.net", "wa-message-1", "Is anything wrong?")
+	if err != nil || !created {
+		t.Fatalf("begin turn: created=%v conversation=%#v inbound=%#v err=%v", created, conversation, inbound, err)
+	}
+	duplicateConversation, duplicateInbound, created, err := st.BeginConversationTurn(ctx, "whatsapp", "27820000000@s.whatsapp.net", "wa-message-1", "Is anything wrong?")
+	if err != nil || created || duplicateConversation.ID != conversation.ID || duplicateInbound.ID != inbound.ID {
+		t.Fatalf("deduplicate turn: created=%v conversation=%#v inbound=%#v err=%v", created, duplicateConversation, duplicateInbound, err)
+	}
+	run := domain.ToolRun{CallID: "call-1", Name: "get_open_alerts", Arguments: json.RawMessage(`{}`), Output: `{"alerts":[]}`, Status: "succeeded", DurationMS: 4}
+	reply, err := st.CompleteConversationTurn(ctx, conversation.ID, inbound.ID, "No open alerts.", "ai_investigation", []domain.ToolRun{run}, "owner@s.whatsapp.net")
+	if err != nil || reply.ReplyToMessageID != inbound.ID {
+		t.Fatalf("complete turn: reply=%#v err=%v", reply, err)
+	}
+	sameReply, err := st.CompleteConversationTurn(ctx, conversation.ID, inbound.ID, "No open alerts.", "ai_investigation", []domain.ToolRun{run}, "owner@s.whatsapp.net")
+	if err != nil || sameReply.ID != reply.ID {
+		t.Fatalf("idempotent reply: reply=%#v err=%v", sameReply, err)
+	}
+	var outboxCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&outboxCount); err != nil || outboxCount != 1 {
+		t.Fatalf("reply must enqueue exactly once: count=%d err=%v", outboxCount, err)
+	}
+	outbound, err := st.ClaimOutbound(ctx, time.Minute)
+	if err != nil || outbound.ChatJID != "owner@s.whatsapp.net" || outbound.Body != reply.Body {
+		t.Fatalf("claim assistant reply: outbound=%#v err=%v", outbound, err)
+	}
+	messages, err := st.ListConversationMessages(ctx, conversation.ID, 12)
+	if err != nil || len(messages) != 2 || messages[0].Role != "user" || messages[1].Role != "assistant" {
+		t.Fatalf("conversation history: messages=%#v err=%v", messages, err)
+	}
+
+	_, rollbackInbound, created, err := st.BeginConversationTurn(ctx, "whatsapp", "27820000000@s.whatsapp.net", "wa-message-2", "Test a failed completion")
+	if err != nil || !created {
+		t.Fatalf("begin rollback turn: created=%v inbound=%#v err=%v", created, rollbackInbound, err)
+	}
+	invalidRun := domain.ToolRun{CallID: "call-invalid", Name: "get_status", Arguments: json.RawMessage(`{}`), Status: "running"}
+	if _, err := st.CompleteConversationTurn(ctx, conversation.ID, rollbackInbound.ID, "This must roll back.", "ai_investigation", []domain.ToolRun{invalidRun}, "owner@s.whatsapp.net"); err == nil {
+		t.Fatal("invalid tool run unexpectedly completed")
+	}
+	if _, err := st.ConversationReply(ctx, rollbackInbound.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed completion persisted reply: err=%v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&outboxCount); err != nil || outboxCount != 1 {
+		t.Fatalf("failed completion changed outbox: count=%d err=%v", outboxCount, err)
+	}
+}
+
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

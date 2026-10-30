@@ -18,6 +18,10 @@ type completionRequest struct {
 	} `json:"messages"`
 }
 
+type responsesRequest struct {
+	Input []json.RawMessage `json:"input"`
+}
+
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--healthcheck" {
 		client := http.Client{Timeout: 2 * time.Second}
@@ -33,8 +37,34 @@ func main() {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("POST /v1/chat/completions", completion)
+	mux.HandleFunc("POST /v1/responses", responses)
 	log.Print("Echo local test AI listening on :8090")
 	log.Fatal(http.ListenAndServe(":8090", mux))
+}
+
+func responses(w http.ResponseWriter, r *http.Request) {
+	var request responsesRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&request); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	for _, raw := range request.Input {
+		var item struct {
+			Type   string `json:"type"`
+			Output string `json:"output"`
+		}
+		if json.Unmarshal(raw, &item) == nil && item.Type == "function_call_output" {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id": "echo-local-response-2", "status": "completed",
+				"output": []map[string]any{{"type": "message", "role": "assistant", "content": []map[string]string{{"type": "output_text", "text": "Local tool test complete. I retrieved Echo's current status through the bounded read-only tool. This mock does not perform a real AI investigation."}}}},
+			})
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": "echo-local-response-1", "status": "completed",
+		"output": []map[string]any{{"type": "function_call", "call_id": "local-status-call", "name": "get_status", "arguments": "{}"}},
+	})
 }
 
 func completion(w http.ResponseWriter, r *http.Request) {

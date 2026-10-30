@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ReindeerGames/echo/internal/ai"
 	"github.com/ReindeerGames/echo/internal/assistant"
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/owner"
@@ -18,15 +19,19 @@ import (
 )
 
 type Service struct {
-	store       *store.Store
-	policy      *policy.Engine
-	owners      *owner.Service
-	assistant   *assistant.Responder
-	approvalTTL time.Duration
+	store        *store.Store
+	policy       *policy.Engine
+	owners       *owner.Service
+	assistant    *assistant.Responder
+	historyLimit int
+	approvalTTL  time.Duration
 }
 
-func New(st *store.Store, policies *policy.Engine, owners *owner.Service, approvalTTL time.Duration) *Service {
-	return &Service{store: st, policy: policies, owners: owners, assistant: assistant.New(st), approvalTTL: approvalTTL}
+func New(st *store.Store, policies *policy.Engine, owners *owner.Service, aiClient *ai.Client, historyLimit int, approvalTTL time.Duration) *Service {
+	if historyLimit < 4 || historyLimit > 50 {
+		historyLimit = 12
+	}
+	return &Service{store: st, policy: policies, owners: owners, assistant: assistant.New(st, aiClient), historyLimit: historyLimit, approvalTTL: approvalTTL}
 }
 
 func (s *Service) ReceiveGroupReport(ctx context.Context, selfJIDs []string, msg domain.InboundMessage) (domain.Incident, bool, error) {
@@ -206,6 +211,39 @@ func (s *Service) ReceiveOwnerCommand(ctx context.Context, msg domain.InboundMes
 	if err != nil || ownerJID == "" || (!sameJID(msg.SenderJID, ownerJID) && !sameJID(msg.SenderAltJID, ownerJID)) {
 		return "", false
 	}
+	conversation, inbound, created, err := s.store.BeginConversationTurn(ctx, "whatsapp", normalizedJID(ownerJID), msg.MessageID, msg.Body)
+	if err != nil {
+		slog.Error("begin owner conversation turn", "error", err, "message_id", msg.MessageID)
+		return "I could not record this request safely. Please try again or use the Echo control plane.", true
+	}
+	if !created {
+		if _, replyErr := s.store.ConversationReply(ctx, inbound.ID); replyErr == nil {
+			return "", true
+		} else if !errors.Is(replyErr, store.ErrNotFound) {
+			slog.Error("read existing owner conversation reply", "error", replyErr, "message_id", msg.MessageID)
+			return "", true
+		}
+	}
+	complete := func(reply, intent string, executions []ai.ToolExecution, answerErr error) (string, bool) {
+		runs := make([]domain.ToolRun, 0, len(executions))
+		for _, execution := range executions {
+			status := "succeeded"
+			if execution.Error != "" {
+				status = "failed"
+			}
+			runs = append(runs, domain.ToolRun{ConversationID: conversation.ID, MessageID: inbound.ID, CallID: execution.CallID, Name: execution.Name, Arguments: execution.Arguments, Output: execution.Output, Status: status, Error: execution.Error, DurationMS: execution.Duration.Milliseconds()})
+		}
+		if _, persistErr := s.store.CompleteConversationTurn(ctx, conversation.ID, inbound.ID, reply, intent, runs, msg.ChatJID); persistErr != nil {
+			slog.Error("complete owner conversation turn", "error", persistErr, "message_id", msg.MessageID, "intent", intent)
+			return "", true
+		}
+		outcome := "succeeded"
+		if answerErr != nil {
+			outcome = "failed"
+		}
+		_ = s.store.Audit(ctx, "whatsapp", msg.SenderJID, "assistant.query", "conversation", conversation.ID, outcome, map[string]any{"intent": intent, "messageId": msg.MessageID, "toolCalls": len(executions), "error": errorString(answerErr)})
+		return "", true
+	}
 	parts := strings.Fields(strings.TrimSpace(msg.Body))
 	if len(parts) == 2 {
 		resolution := ""
@@ -218,26 +256,41 @@ func (s *Service) ReceiveOwnerCommand(ctx context.Context, msg domain.InboundMes
 		if resolution != "" {
 			approvalID, err := s.store.FindPendingApprovalByNonceHash(ctx, security.HashNonce(parts[1]))
 			if err != nil {
-				return "I could not find an active approval for that code. It may be incorrect or expired.", true
+				return complete("I could not find an active approval for that code. It may be incorrect or expired.", "approval_invalid", nil, err)
 			}
 			item, err := s.ResolveApproval(ctx, approvalID, msg.SenderJID, resolution)
 			if err != nil {
-				return "The approval could not be resolved safely. Please review it in the Echo control plane.", true
+				return complete("The approval could not be resolved safely. Please review it in the Echo control plane.", "approval_failed", nil, err)
 			}
-			return approvalResolutionMessage(item, resolution), true
+			return complete(approvalResolutionMessage(item, resolution), "approval_"+resolution, nil, nil)
 		}
 	}
 	if s.assistant == nil {
-		return "Echo's read-only operator assistant is unavailable. Please use the control plane.", true
+		return complete("Echo's read-only operator assistant is unavailable. Please use the control plane.", "unavailable", nil, errors.New("assistant unavailable"))
 	}
 	reply, intent, answerErr := s.assistant.Answer(ctx, msg.Body)
-	outcome := "succeeded"
-	if answerErr != nil {
-		outcome = "failed"
-		reply = "I could not retrieve the operational facts safely just now. Please check the Echo control plane and try again."
+	var executions []ai.ToolExecution
+	if intent == "unknown" {
+		history, historyErr := s.store.ListConversationMessages(ctx, conversation.ID, s.historyLimit)
+		if historyErr == nil {
+			var investigated string
+			investigated, executions, answerErr = s.assistant.Investigate(ctx, history)
+			if answerErr == nil {
+				reply = investigated
+				intent = "ai_investigation"
+			} else if errors.Is(answerErr, ai.ErrNotConfigured) || errors.Is(answerErr, ai.ErrResponsesUnsupported) {
+				answerErr = nil
+				intent = "deterministic_fallback"
+			}
+		} else {
+			answerErr = historyErr
+		}
 	}
-	_ = s.store.Audit(ctx, "whatsapp", msg.SenderJID, "assistant.query", "owner", ownerJID, outcome, map[string]any{"intent": intent, "messageId": msg.MessageID, "error": errorString(answerErr)})
-	return reply, true
+	if answerErr != nil {
+		reply = "I could not retrieve the operational facts safely just now. Please check the Echo control plane and try again."
+		intent = "ai_failed"
+	}
+	return complete(reply, intent, executions, answerErr)
 }
 
 func approvalResolutionMessage(item domain.Approval, resolution string) string {

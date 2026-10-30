@@ -87,6 +87,22 @@ func TestDevelopmentAllowsPairingBeforeOwnerIsConfigured(t *testing.T) {
 	}
 }
 
+func TestAssistantRetentionIsBounded(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "false")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	t.Setenv("ECHO_ASSISTANT_RETENTION", "1h")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected unsafe short assistant retention to be rejected")
+	}
+	t.Setenv("ECHO_ASSISTANT_RETENTION", "168h")
+	t.Setenv("ECHO_ASSISTANT_HISTORY_LIMIT", "51")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected oversized assistant history to be rejected")
+	}
+}
+
 func TestProductionAllowsOwnerToBeConfiguredInApplication(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "production")

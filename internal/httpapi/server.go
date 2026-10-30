@@ -101,6 +101,8 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected.HandleFunc("POST /api/v1/services", s.services)
 	protected.HandleFunc("GET /api/v1/monitor/events", s.monitorEvents)
 	protected.HandleFunc("GET /api/v1/monitor/alerts", s.serviceAlerts)
+	protected.HandleFunc("GET /api/v1/assistant/conversations", s.conversations)
+	protected.HandleFunc("GET /api/v1/assistant/conversations/{id}", s.conversation)
 	protected.HandleFunc("GET /api/v1/deployments", s.deployments)
 	protected.HandleFunc("GET /api/v1/incidents", s.incidents)
 	protected.HandleFunc("GET /api/v1/incidents/{id}", s.incident)
@@ -418,6 +420,26 @@ func (s *Server) monitorEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) serviceAlerts(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListServiceAlerts(r.Context(), r.URL.Query().Get("status"))
 	respond(w, items, err)
+}
+
+func (s *Server) conversations(w http.ResponseWriter, r *http.Request) {
+	items, err := s.store.ListConversations(r.Context(), 50)
+	respond(w, items, err)
+}
+
+func (s *Server) conversation(w http.ResponseWriter, r *http.Request) {
+	item, err := s.store.GetConversation(r.Context(), r.PathValue("id"))
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	messages, err := s.store.ListConversationMessages(r.Context(), item.ID, 50)
+	if err != nil {
+		respond(w, nil, err)
+		return
+	}
+	runs, err := s.store.ListToolRuns(r.Context(), item.ID, 200)
+	respond(w, map[string]any{"conversation": item, "messages": messages, "toolRuns": runs}, err)
 }
 func (s *Server) deployments(w http.ResponseWriter, r *http.Request) {
 	items, err := s.store.ListDeployments(r.Context(), r.URL.Query().Get("incidentId"))

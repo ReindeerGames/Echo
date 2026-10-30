@@ -46,10 +46,16 @@ func run() error {
 		return err
 	}
 	defer st.Close()
+	pruned, err := st.PruneConversationHistory(ctx, time.Now().UTC().Add(-cfg.Assistant.Retention))
+	if err != nil {
+		return err
+	}
+	if pruned > 0 {
+		slog.Info("pruned expired assistant conversation messages", "count", pruned)
+	}
 	state := runtimestate.New()
 	policies := policy.New()
 	owners := owner.New(st, cfg.WhatsApp.OwnerJID)
-	workflows := workflow.New(st, policies, owners, cfg.Security.ApprovalTTL)
 
 	vault, err := security.NewVault(st, cfg.Security.EncryptionKey)
 	if err != nil {
@@ -57,6 +63,7 @@ func run() error {
 	}
 	githubClient := githubapp.New(vault, cfg.GitHub.APIBaseURL, cfg.Worker.MaxRepoBytes)
 	aiClient := ai.NewManaged(vault, cfg.AI.Enabled, cfg.AI.BaseURL, cfg.AI.APIKey, cfg.AI.Model)
+	workflows := workflow.New(st, policies, owners, aiClient, cfg.Assistant.HistoryLimit, cfg.Security.ApprovalTTL)
 
 	gateway := whatsapp.New(st, workflows, state, cfg.Database.WhatsAppDSN)
 	server := httpapi.New(cfg, st, workflows, owners, state, githubClient, aiClient, gateway)

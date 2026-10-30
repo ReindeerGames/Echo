@@ -275,7 +275,7 @@ func (g *Gateway) consumeInbound(ctx context.Context) error {
 					slog.Error("discover WhatsApp contact", "error", err, "message_id", msg.MessageID)
 				}
 				reply, handled := g.workflows.ReceiveOwnerCommand(ctx, msg)
-				if handled {
+				if handled && strings.TrimSpace(reply) != "" {
 					if err := g.core.EnqueueOutbound(ctx, msg.ChatJID, reply); err != nil {
 						slog.Error("enqueue owner command reply", "error", err)
 					}
