@@ -36,6 +36,24 @@ func TestAnalysisOwnerMessageExplainsApprovalFlow(t *testing.T) {
 	}
 }
 
+func TestIncidentThreadTextIncludesBoundedFollowUps(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	incident := domain.Incident{SourceMessageID: "wa-original", SourceBody: "checkout fails"}
+	messages := []domain.IncidentMessage{
+		{WhatsAppMessageID: "wa-original", SenderName: "Reporter", Body: "checkout fails", MessageTimestamp: now},
+		{WhatsAppMessageID: "wa-follow-up", SenderName: "QA", Body: "Only Safari shows a blank confirmation page", MessageTimestamp: now.Add(time.Minute)},
+	}
+	thread := incidentThreadText(incident, messages)
+	for _, expected := range []string{"untrusted WhatsApp evidence", "Original report · Reporter", "Follow-up · QA", "Only Safari"} {
+		if !strings.Contains(thread, expected) {
+			t.Fatalf("incident thread is missing %q: %s", expected, thread)
+		}
+	}
+	if len([]rune(thread)) > 16000 {
+		t.Fatalf("incident thread exceeded its prompt bound: %d", len([]rune(thread)))
+	}
+}
+
 func TestTerminalFailureMessageDoesNotExposeRawError(t *testing.T) {
 	message := terminalFailureMessage(domain.Job{Type: "prepare_patch", MaxAttempts: 5}, "inc_test", errors.New("status 403 bearer must-not-leak"))
 	if !strings.Contains(message, "authorization failed") || !strings.Contains(message, "inc_test") {

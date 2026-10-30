@@ -157,33 +157,48 @@ type ToolRun struct {
 }
 
 type Incident struct {
-	ID              string     `json:"id"`
-	ProjectID       string     `json:"projectId"`
-	ProjectName     string     `json:"projectName,omitempty"`
-	Status          string     `json:"status"`
-	Severity        string     `json:"severity"`
-	Summary         string     `json:"summary"`
-	ReporterJID     string     `json:"reporterJid"`
-	ReporterName    string     `json:"reporterName"`
-	GroupJID        string     `json:"groupJid"`
-	SourceMessageID string     `json:"sourceMessageId"`
-	SourceBody      string     `json:"sourceBody"`
-	AssignedTo      string     `json:"assignedTo,omitempty"`
-	CreatedAt       time.Time  `json:"createdAt"`
-	UpdatedAt       time.Time  `json:"updatedAt"`
-	ResolvedAt      *time.Time `json:"resolvedAt,omitempty"`
+	ID               string     `json:"id"`
+	ProjectID        string     `json:"projectId"`
+	ProjectName      string     `json:"projectName,omitempty"`
+	Status           string     `json:"status"`
+	Severity         string     `json:"severity"`
+	Summary          string     `json:"summary"`
+	ReporterJID      string     `json:"reporterJid"`
+	ReporterName     string     `json:"reporterName"`
+	GroupJID         string     `json:"groupJid"`
+	SourceMessageID  string     `json:"sourceMessageId"`
+	SourceBody       string     `json:"sourceBody"`
+	EvidenceRevision uint64     `json:"evidenceRevision"`
+	AssignedTo       string     `json:"assignedTo,omitempty"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	UpdatedAt        time.Time  `json:"updatedAt"`
+	ResolvedAt       *time.Time `json:"resolvedAt,omitempty"`
 }
 
 type Analysis struct {
-	ID         string          `json:"id"`
-	IncidentID string          `json:"incidentId"`
-	Status     string          `json:"status"`
-	Confidence string          `json:"confidence"`
-	Summary    string          `json:"summary"`
-	Evidence   json.RawMessage `json:"evidence"`
-	Proposal   json.RawMessage `json:"proposal"`
-	Model      string          `json:"model,omitempty"`
-	CreatedAt  time.Time       `json:"createdAt"`
+	ID               string          `json:"id"`
+	IncidentID       string          `json:"incidentId"`
+	EvidenceRevision uint64          `json:"evidenceRevision"`
+	Status           string          `json:"status"`
+	Confidence       string          `json:"confidence"`
+	Summary          string          `json:"summary"`
+	Evidence         json.RawMessage `json:"evidence"`
+	Proposal         json.RawMessage `json:"proposal"`
+	Model            string          `json:"model,omitempty"`
+	CreatedAt        time.Time       `json:"createdAt"`
+}
+
+type IncidentMessage struct {
+	ID                string          `json:"id"`
+	IncidentID        string          `json:"incidentId"`
+	WhatsAppMessageID string          `json:"whatsappMessageId"`
+	ReplyToMessageID  string          `json:"replyToMessageId,omitempty"`
+	SenderName        string          `json:"senderName"`
+	Direction         string          `json:"direction"`
+	Body              string          `json:"body"`
+	Metadata          json.RawMessage `json:"-"`
+	MessageTimestamp  time.Time       `json:"messageTimestamp"`
+	CreatedAt         time.Time       `json:"createdAt"`
 }
 
 type ChangeSet struct {
@@ -295,16 +310,17 @@ type SchemaStatus struct {
 }
 
 type InboundMessage struct {
-	MessageID     string
-	ChatJID       string
-	SenderJID     string
-	SenderAltJID  string
-	SenderName    string
-	Body          string
-	IsGroup       bool
-	MentionedJIDs []string
-	Attachments   []IncidentAttachment
-	Timestamp     time.Time
+	MessageID        string
+	ChatJID          string
+	SenderJID        string
+	SenderAltJID     string
+	SenderName       string
+	Body             string
+	IsGroup          bool
+	MentionedJIDs    []string
+	ReplyToMessageID string
+	Attachments      []IncidentAttachment
+	Timestamp        time.Time
 }
 
 type IncidentAttachment struct {

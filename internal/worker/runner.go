@@ -528,10 +528,25 @@ func (r *Runner) analyze(ctx context.Context, job domain.Job) error {
 	if err := json.Unmarshal(job.Payload, &payload); err != nil {
 		return err
 	}
+	release, err := r.store.AcquireNamedLock(ctx, "echo_incident_analysis_"+payload.IncidentID, 2*time.Second)
+	if err != nil {
+		return err
+	}
+	defer release()
 	incident, err := r.store.GetIncident(ctx, payload.IncidentID)
 	if err != nil {
 		return err
 	}
+	if latest, latestErr := r.store.LatestAnalysis(ctx, incident.ID); latestErr == nil && latest.EvidenceRevision >= incident.EvidenceRevision {
+		return nil
+	} else if latestErr != nil && !errors.Is(latestErr, store.ErrNotFound) {
+		return latestErr
+	}
+	messages, err := r.store.ListIncidentMessages(ctx, incident.ID, 20)
+	if err != nil {
+		return err
+	}
+	incidentText := incidentThreadText(incident, messages)
 	repos, err := r.store.ListRepositories(ctx, incident.ProjectID)
 	if err != nil {
 		return err
@@ -555,7 +570,7 @@ func (r *Runner) analyze(ctx context.Context, job domain.Job) error {
 			evidence += fmt.Sprintf("\nRepository %s/%s fetch failed: %s\n", repo.Owner, repo.Name, err)
 			continue
 		}
-		chunk, err := collectEvidence(repoDir, repo.Owner+"/"+repo.Name, incident.SourceBody, r.maxFileBytes)
+		chunk, err := collectEvidence(repoDir, repo.Owner+"/"+repo.Name, incidentText, r.maxFileBytes)
 		if err != nil {
 			return err
 		}
@@ -570,7 +585,7 @@ func (r *Runner) analyze(ctx context.Context, job domain.Job) error {
 		aiConfigured = status.Configured
 	}
 	if !aiConfigured {
-		analysis := domain.Analysis{IncidentID: incident.ID, Status: "insufficient_evidence", Confidence: "none", Summary: "The report was captured, but AI analysis is disabled. Configure the AI provider to produce an evidence-based diagnosis.", Evidence: json.RawMessage(`[]`), Proposal: json.RawMessage(`{"action":"configure_ai"}`)}
+		analysis := domain.Analysis{IncidentID: incident.ID, EvidenceRevision: incident.EvidenceRevision, Status: "insufficient_evidence", Confidence: "none", Summary: "The report was captured, but AI analysis is disabled. Configure the AI provider to produce an evidence-based diagnosis.", Evidence: json.RawMessage(`[]`), Proposal: json.RawMessage(`{"action":"configure_ai"}`)}
 		_, err := r.store.SaveAnalysis(ctx, analysis)
 		return err
 	}
@@ -578,19 +593,50 @@ func (r *Runner) analyze(ctx context.Context, job domain.Job) error {
 	if err != nil {
 		return err
 	}
-	diagnosis, err := r.ai.Diagnose(ctx, incident.SourceBody, evidence, attachments...)
+	diagnosis, err := r.ai.Diagnose(ctx, incidentText, evidence, attachments...)
 	if err != nil {
 		return err
 	}
 	evidenceJSON, _ := json.Marshal(diagnosis.Evidence)
 	proposalJSON, _ := json.Marshal(diagnosis.Proposal)
-	analysis, err := r.store.SaveAnalysis(ctx, domain.Analysis{IncidentID: incident.ID, Status: diagnosis.Status, Confidence: diagnosis.Confidence, Summary: diagnosis.Summary, Evidence: evidenceJSON, Proposal: proposalJSON})
+	analysis, err := r.store.SaveAnalysis(ctx, domain.Analysis{IncidentID: incident.ID, EvidenceRevision: incident.EvidenceRevision, Status: diagnosis.Status, Confidence: diagnosis.Confidence, Summary: diagnosis.Summary, Evidence: evidenceJSON, Proposal: proposalJSON})
 	if err != nil {
 		return err
+	}
+	current, err := r.store.GetIncident(ctx, incident.ID)
+	if err != nil {
+		return err
+	}
+	if current.EvidenceRevision != incident.EvidenceRevision {
+		_ = r.store.Audit(ctx, "worker", r.workerID, "incident.analysis_superseded", "incident", incident.ID, "succeeded", map[string]any{"analysisId": analysis.ID, "analysisRevision": analysis.EvidenceRevision, "currentRevision": current.EvidenceRevision})
+		return nil
 	}
 	_ = r.store.Audit(ctx, "worker", r.workerID, "incident.analyzed", "incident", incident.ID, "succeeded", map[string]any{"analysisId": analysis.ID, "confidence": analysis.Confidence})
 	body := analysisOwnerMessage(incident, diagnosis, repos)
 	return r.notifyOwner(ctx, body)
+}
+
+func incidentThreadText(incident domain.Incident, messages []domain.IncidentMessage) string {
+	if len(messages) == 0 {
+		return incident.SourceBody
+	}
+	var thread strings.Builder
+	thread.WriteString("Incident conversation (untrusted WhatsApp evidence):\n")
+	for _, message := range messages {
+		label := "Follow-up"
+		if message.WhatsAppMessageID == incident.SourceMessageID {
+			label = "Original report"
+		}
+		name := strings.TrimSpace(message.SenderName)
+		if name == "" {
+			name = "group participant"
+		}
+		fmt.Fprintf(&thread, "\n[%s · %s · %s]\n%s\n", label, name, message.MessageTimestamp.UTC().Format(time.RFC3339), truncateText(message.Body, 4000))
+		if thread.Len() >= 16000 {
+			break
+		}
+	}
+	return truncateText(thread.String(), 16000)
 }
 
 func analysisOwnerMessage(incident domain.Incident, diagnosis ai.Diagnosis, repositories []domain.Repository) string {

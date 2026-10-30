@@ -12,7 +12,9 @@ The gateway owns the sole active HyperMeow client and `mdbstore` connection. A M
 
 The gateway does not receive decrypted GitHub credentials or AI keys in a split deployment. The all-in-one binary supports small deployments, while package boundaries allow later process separation.
 
-WhatsApp callbacks enqueue only normalized metadata and, for group images, a cloned media descriptor. The consumer first applies the bound-group and protocol-mention policy; private, unbound, disabled, and unmentioned messages never trigger a media download. After acceptance it streams the candidate screenshot through a hard-limited temporary file with a 30-second deadline, rejects declared or actual payloads above 5 MiB, and accepts only byte-detected PNG, JPEG, or WEBP content matching the declared MIME type. SVG, video, audio, PDFs, archives, and arbitrary documents are not retained. Accepted bytes, hash, and incident are committed together before analysis is queued.
+WhatsApp callbacks enqueue only normalized metadata and, for group images, a cloned media descriptor. The consumer first applies the bound-group policy and requires either a protocol mention for a new incident or a quoted-message reference to an open incident thread; private, unbound, disabled, and unrelated messages never trigger a media download. After acceptance it streams the candidate screenshot through a hard-limited temporary file with a 30-second deadline, rejects declared or actual payloads above 5 MiB, and accepts only byte-detected PNG, JPEG, or WEBP content matching the declared MIME type. SVG, video, audio, PDFs, archives, and arbitrary documents are not retained. Accepted bytes, hash, and incident are committed together before analysis is queued.
+
+An open incident forms a bounded WhatsApp evidence thread. A reply is correlated only when its protocol `stanza_id` references the original report or another retained message in the same bound group. The message, optional screenshot, incremented evidence revision, updated-analysis job, group acknowledgement, pending-approval invalidation, and audit record commit atomically. Analysis jobs take a per-incident database lock, skip revisions already covered, and do not notify the owner when newer evidence supersedes their input while they run. Patch approvals carry the current evidence revision and resolution re-checks it transactionally before queuing work.
 
 ### Control plane
 
@@ -37,6 +39,7 @@ The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commi
 - `echo_runtime_component_alerts`: one durable open-or-resolved lifecycle per supervised Echo component, used to deduplicate failure and recovery notifications across retries and process restarts.
 - `echo_briefing_settings`: the opt-in local schedule and last successfully queued local date for the owner's daily operational briefing.
 - `echo_incident_attachments`: byte-verified, SHA-256-addressed screenshot evidence linked to an incident and pruned according to `ECHO_ATTACHMENT_RETENTION`.
+- `echo_incident_messages`: the original report and bounded correlated follow-up thread; WhatsApp chat/message IDs provide idempotency and reply correlation without text heuristics.
 - `echo_approvals`: expiring one-action authorization.
 - `echo_audit_events`: append-only operational evidence.
 - `echo_encrypted_settings`: AES-GCM ciphertext and non-secret connection metadata; the encryption key remains outside MariaDB.

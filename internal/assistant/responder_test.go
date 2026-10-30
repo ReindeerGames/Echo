@@ -33,6 +33,7 @@ type fakeReader struct {
 	analysis    domain.Analysis
 	audit       []domain.AuditEvent
 	attachments []domain.IncidentAttachment
+	messages    []domain.IncidentMessage
 }
 
 type fakeToolModel struct{}
@@ -149,6 +150,9 @@ func (f fakeReader) ListAudit(context.Context, int) ([]domain.AuditEvent, error)
 }
 func (f fakeReader) ListIncidentAttachments(context.Context, string) ([]domain.IncidentAttachment, error) {
 	return f.attachments, nil
+}
+func (f fakeReader) ListIncidentMessages(context.Context, string, int) ([]domain.IncidentMessage, error) {
+	return f.messages, nil
 }
 
 func TestClassifyNaturalOperatorQuestions(t *testing.T) {
@@ -620,7 +624,8 @@ func TestDeploymentAnswersExposeBoundedVerificationState(t *testing.T) {
 func TestIncidentAnswersIncludeChangeAndDeploymentLifecycle(t *testing.T) {
 	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
 	reader := fakeReader{
-		incident:    domain.Incident{ID: "inc_123", ProjectName: "Invoices", Status: "resolved", Severity: "high", Summary: "Invoices were blank", CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now},
+		incident:    domain.Incident{ID: "inc_123", ProjectName: "Invoices", Status: "resolved", Severity: "high", Summary: "Invoices were blank", EvidenceRevision: 2, CreatedAt: now.Add(-2 * time.Hour), UpdatedAt: now},
+		messages:    []domain.IncidentMessage{{ID: "msg_1", IncidentID: "inc_123", SenderName: "Reporter", Direction: "inbound", Body: "Invoices were blank", MessageTimestamp: now.Add(-2 * time.Hour)}, {ID: "msg_2", IncidentID: "inc_123", SenderName: "Reporter", Direction: "inbound", Body: "Only on Safari", MessageTimestamp: now.Add(-110 * time.Minute)}},
 		attachments: []domain.IncidentAttachment{{ID: "att_1", IncidentID: "inc_123", Kind: "image", MIMEType: "image/png", FileName: "error.png", SizeBytes: 2048, SHA256: strings.Repeat("a", 64), Data: []byte("must-not-leak-image-bytes"), CreatedAt: now.Add(-2 * time.Hour)}},
 		analysis:    domain.Analysis{ID: "ana_1", IncidentID: "inc_123", Status: "complete", Confidence: "high", Summary: "Template regression", CreatedAt: now.Add(-90 * time.Minute)},
 		changes:     []domain.ChangeSet{{ID: "chg_1", IncidentID: "inc_123", RepositoryID: "repo_1", BranchName: "echo/inc-123", CommitSHA: "a75cdbdaad7917a104299753c32f8358b90a50e6", PullRequestNumber: 17, ArtifactRef: "a75cdbdaad7917a104299753c32f8358b90a50e6", Status: "merged", CreatedAt: now.Add(-time.Hour), UpdatedAt: now}},
@@ -628,11 +633,11 @@ func TestIncidentAnswersIncludeChangeAndDeploymentLifecycle(t *testing.T) {
 	}
 	responder := New(reader)
 	answer, intent, err := responder.Answer(context.Background(), "incident inc_123")
-	if err != nil || intent != "incident" || !containsAll(answer, "Screenshot evidence: 1 retained image(s)", "Analysis (high confidence): Template regression", "Latest change: merged · PR #17 · a75cdbda", "Latest deployment: production · deploy · verified") {
+	if err != nil || intent != "incident" || !containsAll(answer, "Follow-up evidence: 1 message(s) · revision 2", "Screenshot evidence: 1 retained image(s)", "Analysis (high confidence): Template regression", "Latest change: merged · PR #17 · a75cdbda", "Latest deployment: production · deploy · verified") {
 		t.Fatalf("unexpected incident answer intent=%s body=%s err=%v", intent, answer, err)
 	}
 	output, err := responder.executeTool(context.Background(), "get_incident", json.RawMessage(`{"incident_id":"inc_123"}`))
-	if err != nil || !containsAll(output, `"pull_request_number":17`, `"commit_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`, `"environment":"production"`, `"status":"verified"`, `"file_name":"error.png"`, `"size_bytes":2048`) || strings.Contains(output, "pullRequestUrl") || strings.Contains(output, "must-not-leak-image-bytes") {
+	if err != nil || !containsAll(output, `"pull_request_number":17`, `"commit_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`, `"environment":"production"`, `"status":"verified"`, `"file_name":"error.png"`, `"size_bytes":2048`, `"body":"Only on Safari"`) || strings.Contains(output, "pullRequestUrl") || strings.Contains(output, "must-not-leak-image-bytes") {
 		t.Fatalf("unexpected incident tool output=%s err=%v", output, err)
 	}
 }

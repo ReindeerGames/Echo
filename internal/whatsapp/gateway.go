@@ -296,7 +296,7 @@ func (g *Gateway) handleEvent(raw any) {
 		msg := domain.InboundMessage{
 			MessageID: string(evt.Info.ID), ChatJID: evt.Info.Chat.String(), SenderJID: evt.Info.Sender.String(),
 			SenderAltJID: evt.Info.SenderAlt.String(), SenderName: evt.Info.PushName, Body: messageBody(evt.Message), IsGroup: evt.Info.IsGroup,
-			MentionedJIDs: mentionedJIDs(evt.Message), Timestamp: evt.Info.Timestamp,
+			MentionedJIDs: mentionedJIDs(evt.Message), ReplyToMessageID: quotedMessageID(evt.Message), Timestamp: evt.Info.Timestamp,
 		}
 		if msg.Timestamp.IsZero() {
 			msg.Timestamp = time.Now().UTC()
@@ -342,11 +342,15 @@ func (g *Gateway) consumeInbound(ctx context.Context) error {
 						accepted.Attachments = append(accepted.Attachments, attachment)
 					}
 				}
-				incident, created, err := g.workflows.ReceiveGroupReportWithEnricher(ctx, g.deviceJIDs(), msg, enrich)
+				incident, changed, err := g.workflows.ReceiveGroupReportWithEnricher(ctx, g.deviceJIDs(), msg, enrich)
 				if err != nil {
 					slog.Error("process WhatsApp report", "error", err, "message_id", msg.MessageID)
-				} else if created {
-					slog.Info("created incident from WhatsApp report", "incident_id", incident.ID, "group_jid", msg.ChatJID, "message_id", msg.MessageID)
+				} else if changed {
+					action := "created"
+					if incident.SourceMessageID != msg.MessageID {
+						action = "updated"
+					}
+					slog.Info(action+" incident from WhatsApp report", "incident_id", incident.ID, "group_jid", msg.ChatJID, "message_id", msg.MessageID)
 				}
 			} else {
 				contact, discovered, err := g.core.UpsertWhatsAppContact(ctx, msg)
@@ -594,17 +598,31 @@ func messageBody(msg *waE2E.Message) string {
 }
 
 func mentionedJIDs(msg *waE2E.Message) []string {
-	if ext := msg.GetExtendedTextMessage(); ext != nil && ext.GetContextInfo() != nil {
-		return ext.GetContextInfo().GetMentionedJID()
+	if contextInfo := messageContextInfo(msg); contextInfo != nil {
+		return contextInfo.GetMentionedJID()
 	}
-	if image := msg.GetImageMessage(); image != nil && image.GetContextInfo() != nil {
-		return image.GetContextInfo().GetMentionedJID()
+	return nil
+}
+
+func quotedMessageID(msg *waE2E.Message) string {
+	if contextInfo := messageContextInfo(msg); contextInfo != nil {
+		return strings.TrimSpace(contextInfo.GetStanzaID())
 	}
-	if video := msg.GetVideoMessage(); video != nil && video.GetContextInfo() != nil {
-		return video.GetContextInfo().GetMentionedJID()
+	return ""
+}
+
+func messageContextInfo(msg *waE2E.Message) *waE2E.ContextInfo {
+	if ext := msg.GetExtendedTextMessage(); ext != nil {
+		return ext.GetContextInfo()
 	}
-	if document := msg.GetDocumentMessage(); document != nil && document.GetContextInfo() != nil {
-		return document.GetContextInfo().GetMentionedJID()
+	if image := msg.GetImageMessage(); image != nil {
+		return image.GetContextInfo()
+	}
+	if video := msg.GetVideoMessage(); video != nil {
+		return video.GetContextInfo()
+	}
+	if document := msg.GetDocumentMessage(); document != nil {
+		return document.GetContextInfo()
 	}
 	return nil
 }

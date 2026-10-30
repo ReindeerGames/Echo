@@ -32,13 +32,14 @@ See [the architecture](docs/architecture.md), [threat model](docs/threat-model.m
 2. The group JID is resolved to an enabled project binding.
 3. Echo atomically creates an incident, analysis job, group acknowledgement, and audit event.
 4. A mentioned PNG, JPEG, or WEBP screenshot up to 5 MiB is downloaded outside the event callback, verified from its bytes, hashed, and attached to the incident. Unsupported or mismatched media is rejected with a categorized audit event.
-5. A worker downloads only enabled project repositories using the encrypted fine-grained token configured in Echo.
-6. Bounded text evidence and at most two retained screenshots are sent to the configured AI provider with an explicit untrusted-data boundary.
-7. The diagnosis and confidence are stored and sent privately to the owner.
-8. Patch approval queues a one-time `prepare_patch` job. The worker can create a draft branch and pull request, never a direct default-branch write.
-9. With configured environments, staging approval dispatches a GitHub Actions workflow with an immutable commit SHA; a signed `workflow_run` webhook records verification.
-10. With no staging environment, a separate repository-native production approval is bound to the PR number, exact head SHA, base branch, repository identity, and repository-configuration hash. The worker refuses changed heads or incomplete/failing GitHub checks, marks a draft ready, and squash-merges that exact SHA.
-11. Echo then monitors the repository's existing push workflows for the resulting default-branch commit. It resolves the incident only after all matching runs finish successfully; a failed run marks the deployment and incident failed.
+5. A reply to the original report or a retained follow-up is atomically appended to the same open incident, acknowledged in the group, and assigned a new evidence revision. This correlation uses WhatsApp's quoted message ID in the same bound group; it does not rely on message text.
+6. A worker downloads only enabled project repositories using the encrypted fine-grained token configured in Echo.
+7. Bounded thread text, repository evidence, and at most two of the newest retained screenshots are sent to the configured AI provider with an explicit untrusted-data boundary. Per-incident locking and evidence revisions suppress duplicate or stale analysis results.
+8. The diagnosis and confidence are stored and sent privately to the owner.
+9. Patch approval is bound to the incident's current evidence revision and queues a one-time `prepare_patch` job. New follow-up evidence expires pending approvals atomically, and resolution re-checks the revision before any job can be queued. The worker can create a draft branch and pull request, never a direct default-branch write.
+10. With configured environments, staging approval dispatches a GitHub Actions workflow with an immutable commit SHA; a signed `workflow_run` webhook records verification.
+11. With no staging environment, a separate repository-native production approval is bound to the PR number, exact head SHA, base branch, repository identity, and repository-configuration hash. The worker refuses changed heads or incomplete/failing GitHub checks, marks a draft ready, and squash-merges that exact SHA.
+12. Echo then monitors the repository's existing push workflows for the resulting default-branch commit. It resolves the incident only after all matching runs finish successfully; a failed run marks the deployment and incident failed.
 
 Separately, the operations catalogue maps projects to runtime services. The bundled read-only `echo-observer` probes aggregate HTTPS readiness endpoints, bounded Linux disk/memory/load/uptime counters, and sanitized container state through the exact-allowlist `echo-docker-proxy`, then sends signed, idempotent events. Those signals maintain an alert lifecycle and privately notify the owner only when a condition opens, reopens, or resolves. Built-in watchdogs also alert when an expected observer goes silent or ready background work is stranded without a fresh worker heartbeat. Alert transitions and their WhatsApp outbox messages commit atomically. Echo and its observer never receive a production Docker socket or SSH credential.
 

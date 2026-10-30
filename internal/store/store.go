@@ -9,11 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/id"
@@ -24,6 +22,7 @@ import (
 var migrationFS embed.FS
 
 var ErrNotFound = errors.New("not found")
+var ErrApprovalStale = errors.New("approval evidence revision is stale")
 
 type Store struct {
 	db *sql.DB
@@ -1034,7 +1033,7 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]domain.Incident
 	if limit <= 0 || limit > 200 {
 		limit = 100
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.assigned_to,i.created_at,i.updated_at,i.resolved_at FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id ORDER BY i.created_at DESC LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.evidence_revision,i.assigned_to,i.created_at,i.updated_at,i.resolved_at FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id ORDER BY i.created_at DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1042,7 +1041,7 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]domain.Incident
 	var out []domain.Incident
 	for rows.Next() {
 		var item domain.Incident
-		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.EvidenceRevision, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -1057,7 +1056,7 @@ func (s *Store) ListProjectIncidents(ctx context.Context, projectID string, limi
 	if limit < 1 || limit > 101 {
 		limit = 101
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.assigned_to,i.created_at,i.updated_at,i.resolved_at
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.evidence_revision,i.assigned_to,i.created_at,i.updated_at,i.resolved_at
 	  FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id
 	  WHERE i.project_id=? ORDER BY i.created_at DESC LIMIT ?`, projectID, limit)
 	if err != nil {
@@ -1067,7 +1066,7 @@ func (s *Store) ListProjectIncidents(ctx context.Context, projectID string, limi
 	var out []domain.Incident
 	for rows.Next() {
 		var item domain.Incident
-		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.EvidenceRevision, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, item)
@@ -1077,7 +1076,7 @@ func (s *Store) ListProjectIncidents(ctx context.Context, projectID string, limi
 
 func (s *Store) GetIncident(ctx context.Context, incidentID string) (domain.Incident, error) {
 	var item domain.Incident
-	err := s.db.QueryRowContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.assigned_to,i.created_at,i.updated_at,i.resolved_at FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id WHERE i.id=?`, incidentID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT i.id,i.project_id,p.name,i.status,i.severity,i.summary,i.reporter_jid,i.reporter_name,i.group_jid,i.source_message_id,i.source_body,i.evidence_revision,i.assigned_to,i.created_at,i.updated_at,i.resolved_at FROM echo_incidents i JOIN echo_projects p ON p.id=i.project_id WHERE i.id=?`, incidentID).Scan(&item.ID, &item.ProjectID, &item.ProjectName, &item.Status, &item.Severity, &item.Summary, &item.ReporterJID, &item.ReporterName, &item.GroupJID, &item.SourceMessageID, &item.SourceBody, &item.EvidenceRevision, &item.AssignedTo, &item.CreatedAt, &item.UpdatedAt, &item.ResolvedAt)
 	return item, notFound(err)
 }
 
@@ -1116,26 +1115,13 @@ func (s *Store) CreateIncident(ctx context.Context, binding domain.GroupBinding,
 	if err != nil {
 		return domain.Incident{}, false, err
 	}
-	metadata, _ := json.Marshal(map[string]any{"mentionedJids": msg.MentionedJIDs, "isGroup": msg.IsGroup, "attachmentCount": len(msg.Attachments)})
+	metadata, _ := json.Marshal(map[string]any{"mentionedJids": msg.MentionedJIDs, "isGroup": msg.IsGroup, "replyToMessageId": msg.ReplyToMessageID, "attachmentCount": len(msg.Attachments)})
 	_, err = tx.ExecContext(ctx, `INSERT INTO echo_incident_messages(id,incident_id,whatsapp_message_id,chat_jid,sender_jid,sender_name,direction,body,metadata_json,message_timestamp) VALUES(?,?,?,?,?,?,'inbound',?,?,?)`, id.New("msg"), incidentID, msg.MessageID, msg.ChatJID, msg.SenderJID, msg.SenderName, msg.Body, metadata, msg.Timestamp)
 	if err != nil {
 		return domain.Incident{}, false, err
 	}
-	for _, attachment := range msg.Attachments {
-		_, hashErr := hex.DecodeString(attachment.SHA256)
-		digest := sha256.Sum256(attachment.Data)
-		detectedMIME := strings.ToLower(strings.TrimSpace(http.DetectContentType(attachment.Data)))
-		mimeAllowed := attachment.MIMEType == "image/jpeg" || attachment.MIMEType == "image/png" || attachment.MIMEType == "image/webp"
-		if attachment.Kind != "image" || !mimeAllowed || detectedMIME != attachment.MIMEType || !utf8.ValidString(attachment.FileName) || utf8.RuneCountInString(attachment.FileName) > 255 || len(attachment.Data) == 0 || int64(len(attachment.Data)) != attachment.SizeBytes || attachment.SizeBytes > 5<<20 || len(attachment.SHA256) != 64 || hashErr != nil || !strings.EqualFold(hex.EncodeToString(digest[:]), attachment.SHA256) {
-			return domain.Incident{}, false, errors.New("invalid incident attachment")
-		}
-		if attachment.ID == "" {
-			attachment.ID = id.New("att")
-		}
-		_, err = tx.ExecContext(ctx, `INSERT INTO echo_incident_attachments(id,incident_id,whatsapp_message_id,media_kind,mime_type,file_name,size_bytes,sha256,data_blob) VALUES(?,?,?,?,?,?,?,?,?)`, attachment.ID, incidentID, msg.MessageID, attachment.Kind, attachment.MIMEType, attachment.FileName, attachment.SizeBytes, attachment.SHA256, attachment.Data)
-		if err != nil {
-			return domain.Incident{}, false, err
-		}
+	if err = insertIncidentAttachments(ctx, tx, incidentID, msg.MessageID, msg.Attachments); err != nil {
+		return domain.Incident{}, false, err
 	}
 	jobPayload, _ := json.Marshal(map[string]string{"incidentId": incidentID})
 	_, err = tx.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json) VALUES(?,'analyze_incident',?)`, id.New("job"), jobPayload)
@@ -1157,6 +1143,11 @@ func (s *Store) CreateIncident(ctx context.Context, binding domain.GroupBinding,
 }
 
 func (s *Store) SaveAnalysis(ctx context.Context, item domain.Analysis) (domain.Analysis, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Analysis{}, err
+	}
+	defer tx.Rollback()
 	if item.ID == "" {
 		item.ID = id.New("ana")
 	}
@@ -1166,18 +1157,28 @@ func (s *Store) SaveAnalysis(ctx context.Context, item domain.Analysis) (domain.
 	if len(item.Proposal) == 0 {
 		item.Proposal = json.RawMessage(`{}`)
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO echo_analyses(id,incident_id,status,confidence,summary,evidence_json,proposal_json,model) VALUES(?,?,?,?,?,?,?,?)`, item.ID, item.IncidentID, item.Status, item.Confidence, item.Summary, item.Evidence, item.Proposal, item.Model)
+	if item.EvidenceRevision == 0 {
+		if err := tx.QueryRowContext(ctx, `SELECT evidence_revision FROM echo_incidents WHERE id=?`, item.IncidentID).Scan(&item.EvidenceRevision); err != nil {
+			return domain.Analysis{}, notFound(err)
+		}
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO echo_analyses(id,incident_id,evidence_revision,status,confidence,summary,evidence_json,proposal_json,model) VALUES(?,?,?,?,?,?,?,?,?)`, item.ID, item.IncidentID, item.EvidenceRevision, item.Status, item.Confidence, item.Summary, item.Evidence, item.Proposal, item.Model)
 	if err != nil {
 		return domain.Analysis{}, err
 	}
-	_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='awaiting_owner' WHERE id=? AND status IN ('reported','triaging')`, item.IncidentID)
+	if _, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status='awaiting_owner' WHERE id=? AND evidence_revision=? AND status IN ('reported','triaging')`, item.IncidentID, item.EvidenceRevision); err != nil {
+		return domain.Analysis{}, err
+	}
+	if err = tx.Commit(); err != nil {
+		return domain.Analysis{}, err
+	}
 	item.CreatedAt = time.Now().UTC()
 	return item, nil
 }
 
 func (s *Store) LatestAnalysis(ctx context.Context, incidentID string) (domain.Analysis, error) {
 	var item domain.Analysis
-	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,status,confidence,summary,evidence_json,proposal_json,model,created_at FROM echo_analyses WHERE incident_id=? ORDER BY created_at DESC LIMIT 1`, incidentID).Scan(&item.ID, &item.IncidentID, &item.Status, &item.Confidence, &item.Summary, &item.Evidence, &item.Proposal, &item.Model, &item.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id,incident_id,evidence_revision,status,confidence,summary,evidence_json,proposal_json,model,created_at FROM echo_analyses WHERE incident_id=? ORDER BY evidence_revision DESC,created_at DESC LIMIT 1`, incidentID).Scan(&item.ID, &item.IncidentID, &item.EvidenceRevision, &item.Status, &item.Confidence, &item.Summary, &item.Evidence, &item.Proposal, &item.Model, &item.CreatedAt)
 	return item, notFound(err)
 }
 
@@ -1218,44 +1219,75 @@ func (s *Store) ResolveApproval(ctx context.Context, approvalID, resolver, statu
 	if status != "approved" && status != "rejected" {
 		return domain.Approval{}, errors.New("invalid approval resolution")
 	}
-	res, err := s.db.ExecContext(ctx, `UPDATE echo_approvals SET status=?,resolved_by=?,resolved_at=NOW(6) WHERE id=? AND status='pending' AND expires_at>NOW(6)`, status, resolver, approvalID)
+	var targetIncidentID string
+	if err := s.db.QueryRowContext(ctx, `SELECT incident_id FROM echo_approvals WHERE id=?`, approvalID).Scan(&targetIncidentID); err != nil {
+		return domain.Approval{}, notFound(err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return domain.Approval{}, err
 	}
-	n, _ := res.RowsAffected()
-	if n != 1 {
-		return domain.Approval{}, errors.New("approval is not pending or has expired")
+	defer tx.Rollback()
+	var currentRevision uint64
+	if err = tx.QueryRowContext(ctx, `SELECT evidence_revision FROM echo_incidents WHERE id=? FOR UPDATE`, targetIncidentID).Scan(&currentRevision); err != nil {
+		return domain.Approval{}, err
+	}
+	var item domain.Approval
+	err = tx.QueryRowContext(ctx, `SELECT id,incident_id,action_type,action_hash,action_json,status,requested_by,resolved_by,expires_at,created_at,resolved_at FROM echo_approvals WHERE id=? AND status='pending' AND expires_at>NOW(6) FOR UPDATE`, approvalID).Scan(&item.ID, &item.IncidentID, &item.ActionType, &item.ActionHash, &item.Action, &item.Status, &item.RequestedBy, &item.ResolvedBy, &item.ExpiresAt, &item.CreatedAt, &item.ResolvedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.Approval{}, errors.New("approval is not pending or has expired")
+		}
+		return domain.Approval{}, err
+	}
+	if status == "approved" && item.ActionType == "prepare_patch" {
+		var action struct {
+			EvidenceRevision uint64 `json:"evidenceRevision"`
+		}
+		if err = json.Unmarshal(item.Action, &action); err != nil {
+			return domain.Approval{}, err
+		}
+		if action.EvidenceRevision == 0 || action.EvidenceRevision != currentRevision {
+			if _, err = tx.ExecContext(ctx, `UPDATE echo_approvals SET status='expired',resolved_by='system:evidence_changed',resolved_at=NOW(6) WHERE id=?`, approvalID); err != nil {
+				return domain.Approval{}, err
+			}
+			if err = tx.Commit(); err != nil {
+				return domain.Approval{}, err
+			}
+			return domain.Approval{}, ErrApprovalStale
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE echo_approvals SET status=?,resolved_by=?,resolved_at=NOW(6) WHERE id=?`, status, resolver, approvalID); err != nil {
+		return domain.Approval{}, err
 	}
 	if status == "approved" {
-		var actionType, incidentID string
-		var action json.RawMessage
-		if err := s.db.QueryRowContext(ctx, `SELECT action_type,incident_id,action_json FROM echo_approvals WHERE id=?`, approvalID).Scan(&actionType, &incidentID, &action); err == nil {
-			if actionType == "prepare_patch" {
-				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='change_approved' WHERE id=?`, incidentID)
+		nextStatus := ""
+		switch item.ActionType {
+		case "prepare_patch":
+			nextStatus = "change_approved"
+		case "deploy_staging":
+			nextStatus = "staging"
+		case "deploy_production", "merge_production":
+			nextStatus = "production"
+		}
+		if nextStatus != "" {
+			if _, err = tx.ExecContext(ctx, `UPDATE echo_incidents SET status=? WHERE id=?`, nextStatus, item.IncidentID); err != nil {
+				return domain.Approval{}, err
 			}
-			if actionType == "deploy_staging" {
-				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='staging' WHERE id=?`, incidentID)
-			}
-			if actionType == "deploy_production" {
-				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='production' WHERE id=?`, incidentID)
-			}
-			if actionType == "merge_production" {
-				_, _ = s.db.ExecContext(ctx, `UPDATE echo_incidents SET status='production' WHERE id=?`, incidentID)
-			}
-			payload, _ := json.Marshal(map[string]any{"incidentId": incidentID, "approvalId": approvalID, "action": json.RawMessage(action)})
-			_, _ = s.db.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json) VALUES(?,?,?)`, id.New("job"), actionType, payload)
+		}
+		payload, _ := json.Marshal(map[string]any{"incidentId": item.IncidentID, "approvalId": approvalID, "action": json.RawMessage(item.Action)})
+		if _, err = tx.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json) VALUES(?,?,?)`, id.New("job"), item.ActionType, payload); err != nil {
+			return domain.Approval{}, err
 		}
 	}
-	items, err := s.ListApprovals(ctx)
-	if err != nil {
+	if err = tx.Commit(); err != nil {
 		return domain.Approval{}, err
 	}
-	for _, item := range items {
-		if item.ID == approvalID {
-			return item, nil
-		}
-	}
-	return domain.Approval{}, ErrNotFound
+	item.Status = status
+	item.ResolvedBy = resolver
+	now := time.Now().UTC()
+	item.ResolvedAt = &now
+	return item, nil
 }
 
 func (s *Store) FindPendingApprovalByNonceHash(ctx context.Context, nonceHash string) (string, error) {

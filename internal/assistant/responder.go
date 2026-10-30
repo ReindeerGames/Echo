@@ -35,6 +35,7 @@ type Reader interface {
 	ListProjectIncidents(context.Context, string, int) ([]domain.Incident, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
+	ListIncidentMessages(context.Context, string, int) ([]domain.IncidentMessage, error)
 	ListIncidentAttachments(context.Context, string) ([]domain.IncidentAttachment, error)
 	ListAudit(context.Context, int) ([]domain.AuditEvent, error)
 }
@@ -469,6 +470,15 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			return "", err
 		}
 		view := map[string]any{"found": true, "id": incident.ID, "project": incident.ProjectName, "status": incident.Status, "severity": incident.Severity, "summary": incident.Summary, "created_at": incident.CreatedAt, "updated_at": incident.UpdatedAt}
+		messages, err := r.reader.ListIncidentMessages(ctx, incident.ID, 20)
+		if err != nil {
+			return "", err
+		}
+		messageViews := make([]map[string]any, 0, len(messages))
+		for _, message := range messages {
+			messageViews = append(messageViews, map[string]any{"sender_name": truncateRunes(message.SenderName, 120), "direction": message.Direction, "body": truncateRunes(message.Body, 1000), "message_timestamp": message.MessageTimestamp})
+		}
+		view["messages"] = messageViews
 		attachments, err := r.reader.ListIncidentAttachments(ctx, incident.ID)
 		if err != nil {
 			return "", err
@@ -1994,6 +2004,9 @@ func (r *Responder) incident(ctx context.Context, incidentID string) (string, er
 		return "", err
 	}
 	lines := []string{fmt.Sprintf("Status: %s · Severity: %s", incident.Status, incident.Severity), fmt.Sprintf("Project: %s", incident.ProjectName), fmt.Sprintf("Report: %s", incident.Summary)}
+	if incident.EvidenceRevision > 1 {
+		lines = append(lines, fmt.Sprintf("Follow-up evidence: %d message(s) · revision %d", incident.EvidenceRevision-1, incident.EvidenceRevision))
+	}
 	attachments, err := r.reader.ListIncidentAttachments(ctx, incident.ID)
 	if err != nil {
 		return "", err

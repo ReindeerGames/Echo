@@ -23,13 +23,17 @@ func TestOutboundMessageIDIsStableAndWhatsAppShaped(t *testing.T) {
 func TestMessageBodyAndMentions(t *testing.T) {
 	text := "lead form is blank"
 	mentioned := []string{"123@s.whatsapp.net"}
-	msg := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: &text, ContextInfo: &waE2E.ContextInfo{MentionedJID: mentioned}}}
+	quoted := "quoted-message-id"
+	msg := &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: &text, ContextInfo: &waE2E.ContextInfo{MentionedJID: mentioned, StanzaID: &quoted}}}
 	if got := messageBody(msg); got != text {
 		t.Fatalf("unexpected body %q", got)
 	}
 	got := mentionedJIDs(msg)
 	if len(got) != 1 || got[0] != mentioned[0] {
 		t.Fatalf("unexpected mentions %#v", got)
+	}
+	if got := quotedMessageID(msg); got != quoted {
+		t.Fatalf("unexpected quoted message ID %q", got)
 	}
 }
 

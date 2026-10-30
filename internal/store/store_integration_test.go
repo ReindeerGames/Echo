@@ -273,11 +273,99 @@ func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	if err != nil || bySource.ID != first.ID {
 		t.Fatalf("find incident by source: incident=%#v err=%v", bySource, err)
 	}
+	followUp := domain.InboundMessage{MessageID: "message-2", ChatJID: binding.GroupJID, SenderJID: "second-reporter@s.whatsapp.net", SenderName: "Second Reporter", Body: "It only fails in Safari", IsGroup: true, ReplyToMessageID: message.MessageID, Attachments: []domain.IncidentAttachment{{Kind: "image", MIMEType: "image/png", FileName: "safari.png", SizeBytes: int64(len(imageData)), SHA256: hex.EncodeToString(imageDigest[:]), Data: imageData}}, Timestamp: time.Now().UTC().Add(time.Second)}
+	updated, appended, err := st.AppendIncidentFollowUp(ctx, first.ID, followUp)
+	if err != nil || !appended || updated.EvidenceRevision != 2 || updated.Status != "triaging" {
+		t.Fatalf("append incident follow-up: incident=%#v appended=%v err=%v", updated, appended, err)
+	}
+	duplicateFollowUp, appended, err := st.AppendIncidentFollowUp(ctx, first.ID, followUp)
+	if err != nil || appended || duplicateFollowUp.ID != first.ID || duplicateFollowUp.EvidenceRevision != 2 {
+		t.Fatalf("duplicate follow-up was not idempotent: incident=%#v appended=%v err=%v", duplicateFollowUp, appended, err)
+	}
+	byReference, err := st.FindIncidentByMessageReference(ctx, binding.GroupJID, followUp.MessageID)
+	if err != nil || byReference.ID != first.ID {
+		t.Fatalf("find incident by follow-up reference: incident=%#v err=%v", byReference, err)
+	}
+	messages, err := st.ListIncidentMessages(ctx, first.ID, 20)
+	if err != nil || len(messages) != 2 || messages[1].ReplyToMessageID != message.MessageID || messages[1].Body != followUp.Body {
+		t.Fatalf("incident thread was not retained: messages=%#v err=%v", messages, err)
+	}
+	attachments, err = st.LoadIncidentAttachments(ctx, first.ID)
+	if err != nil || len(attachments) != 2 {
+		t.Fatalf("follow-up attachment was not retained: attachments=%#v err=%v", attachments, err)
+	}
+	if _, err := st.SaveAnalysis(ctx, domain.Analysis{IncidentID: first.ID, EvidenceRevision: 1, Status: "complete", Confidence: "low", Summary: "stale", Evidence: json.RawMessage(`[]`), Proposal: json.RawMessage(`{}`)}); err != nil {
+		t.Fatal(err)
+	}
+	staleResult, err := st.GetIncident(ctx, first.ID)
+	if err != nil || staleResult.Status != "triaging" {
+		t.Fatalf("stale analysis changed current incident state: incident=%#v err=%v", staleResult, err)
+	}
+	currentAnalysis, err := st.SaveAnalysis(ctx, domain.Analysis{IncidentID: first.ID, EvidenceRevision: 2, Status: "complete", Confidence: "medium", Summary: "Safari-specific regression", Evidence: json.RawMessage(`[]`), Proposal: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	latestAnalysis, err := st.LatestAnalysis(ctx, first.ID)
+	if err != nil || latestAnalysis.ID != currentAnalysis.ID || latestAnalysis.EvidenceRevision != 2 {
+		t.Fatalf("latest analysis did not follow evidence revision: analysis=%#v err=%v", latestAnalysis, err)
+	}
+	pendingPatch, err := st.CreateApproval(ctx, domain.Approval{IncidentID: first.ID, ActionType: "prepare_patch", Action: json.RawMessage(`{"repositoryId":"repo_test","evidenceRevision":2}`), RequestedBy: "integration", ExpiresAt: time.Now().Add(time.Hour)}, strings.Repeat("4", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdFollowUp := domain.InboundMessage{MessageID: "message-3", ChatJID: binding.GroupJID, SenderJID: "reporter@s.whatsapp.net", SenderName: "Reporter", Body: "Chrome is now affected too", IsGroup: true, ReplyToMessageID: followUp.MessageID, Timestamp: time.Now().UTC().Add(2 * time.Second)}
+	updated, appended, err = st.AppendIncidentFollowUp(ctx, first.ID, thirdFollowUp)
+	if err != nil || !appended || updated.EvidenceRevision != 3 {
+		t.Fatalf("append third evidence revision: incident=%#v appended=%v err=%v", updated, appended, err)
+	}
+	approvals, err := st.ListApprovals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingExpired := false
+	for _, approval := range approvals {
+		if approval.ID == pendingPatch.ID {
+			pendingExpired = approval.Status == "expired"
+		}
+	}
+	if !pendingExpired {
+		t.Fatal("follow-up did not expire the pending approval")
+	}
+	stalePatch, err := st.CreateApproval(ctx, domain.Approval{IncidentID: first.ID, ActionType: "prepare_patch", Action: json.RawMessage(`{"repositoryId":"repo_test","evidenceRevision":2}`), RequestedBy: "integration", ExpiresAt: time.Now().Add(time.Hour)}, strings.Repeat("5", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.ResolveApproval(ctx, stalePatch.ID, "integration", "approved"); !errors.Is(err, ErrApprovalStale) {
+		t.Fatalf("stale patch approval was not rejected: %v", err)
+	}
+	var staleStatus string
+	if err := st.db.QueryRowContext(ctx, `SELECT status FROM echo_approvals WHERE id=?`, stalePatch.ID).Scan(&staleStatus); err != nil || staleStatus != "expired" {
+		t.Fatalf("stale approval status=%q err=%v", staleStatus, err)
+	}
+	currentPatch, err := st.CreateApproval(ctx, domain.Approval{IncidentID: first.ID, ActionType: "prepare_patch", Action: json.RawMessage(`{"repositoryId":"repo_test","evidenceRevision":3}`), RequestedBy: "integration", ExpiresAt: time.Now().Add(time.Hour)}, strings.Repeat("6", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolvedPatch, err := st.ResolveApproval(ctx, currentPatch.ID, "integration", "approved")
+	if err != nil || resolvedPatch.Status != "approved" {
+		t.Fatalf("current evidence approval was not resolved: approval=%#v err=%v", resolvedPatch, err)
+	}
+	var patchJobs int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_jobs WHERE job_type='prepare_patch' AND JSON_UNQUOTE(JSON_EXTRACT(payload_json,'$.approvalId'))=?`, currentPatch.ID).Scan(&patchJobs); err != nil || patchJobs != 1 {
+		t.Fatalf("approved patch job count=%d err=%v", patchJobs, err)
+	}
+	var analysisJobs, acknowledgements int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_jobs WHERE job_type='analyze_incident'`).Scan(&analysisJobs); err != nil || analysisJobs != 3 {
+		t.Fatalf("follow-up analysis job count=%d err=%v", analysisJobs, err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox`).Scan(&acknowledgements); err != nil || acknowledgements != 3 {
+		t.Fatalf("follow-up acknowledgement count=%d err=%v", acknowledgements, err)
+	}
 	if _, err := st.db.ExecContext(ctx, `UPDATE echo_incident_attachments SET created_at=? WHERE incident_id=?`, time.Now().UTC().Add(-48*time.Hour), first.ID); err != nil {
 		t.Fatal(err)
 	}
 	pruned, err := st.PruneIncidentAttachments(ctx, time.Now().UTC().Add(-24*time.Hour))
-	if err != nil || pruned != 1 {
+	if err != nil || pruned != 2 {
 		t.Fatalf("prune incident attachments: count=%d err=%v", pruned, err)
 	}
 	attachments, err = st.LoadIncidentAttachments(ctx, first.ID)

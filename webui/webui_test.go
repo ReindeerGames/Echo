@@ -160,6 +160,11 @@ func TestIncidentScreenshotEvidenceIsVisibleWithoutPublicMediaURL(t *testing.T) 
 			t.Fatalf("incident screenshot evidence is missing %q", expected)
 		}
 	}
+	for _, expected := range []string{"INCIDENT THREAD", "follow-up", "Evidence revision", "followUpCount", "item.whatsappMessageId===i.sourceMessageId"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("incident follow-up evidence is missing %q", expected)
+		}
+	}
 	if strings.Contains(body, "/attachments/${") {
 		t.Fatal("incident UI must not expose a public attachment download route")
 	}

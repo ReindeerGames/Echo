@@ -61,6 +61,37 @@ func (s *Service) ReceiveGroupReportWithEnricher(ctx context.Context, selfJIDs [
 	if err != nil {
 		return domain.Incident{}, false, err
 	}
+	if binding.Enabled && strings.TrimSpace(msg.ReplyToMessageID) != "" {
+		referenced, referenceErr := s.store.FindIncidentByMessageReference(ctx, msg.ChatJID, msg.ReplyToMessageID)
+		if referenceErr == nil {
+			if referenced.ProjectID != binding.ProjectID {
+				_ = s.store.Audit(ctx, "whatsapp", msg.SenderJID, "message.ignored", "incident", referenced.ID, "denied", map[string]any{"reason": "incident_project_changed", "messageId": msg.MessageID})
+				return domain.Incident{}, false, nil
+			}
+			if referenced.Status == "resolved" || referenced.Status == "closed" {
+				acceptedNew, _ := s.policy.InboundDecision(binding, msg, selfJIDs)
+				if !acceptedNew {
+					_ = s.store.Audit(ctx, "whatsapp", msg.SenderJID, "message.ignored", "incident", referenced.ID, "denied", map[string]any{"reason": "incident_not_open", "messageId": msg.MessageID})
+					return referenced, false, nil
+				}
+			} else {
+				duplicate, duplicateErr := s.store.FindIncidentByMessageReference(ctx, msg.ChatJID, msg.MessageID)
+				if duplicateErr == nil {
+					return duplicate, false, nil
+				}
+				if !errors.Is(duplicateErr, store.ErrNotFound) {
+					return domain.Incident{}, false, duplicateErr
+				}
+				if enrich != nil {
+					enrich(ctx, &msg)
+				}
+				return s.store.AppendIncidentFollowUp(ctx, referenced.ID, msg)
+			}
+		}
+		if !errors.Is(referenceErr, store.ErrNotFound) {
+			return domain.Incident{}, false, referenceErr
+		}
+	}
 	accepted, reason := s.policy.InboundDecision(binding, msg, selfJIDs)
 	if !accepted {
 		metadata := map[string]any{
@@ -101,6 +132,9 @@ func (s *Service) ReceiveGroupReportWithEnricher(ctx context.Context, selfJIDs [
 }
 
 func (s *Service) RequestApproval(ctx context.Context, incidentID, actionType, actor string, action map[string]any) (domain.Approval, error) {
+	if action == nil {
+		action = make(map[string]any)
+	}
 	incident, err := s.store.GetIncident(ctx, incidentID)
 	if err != nil {
 		return domain.Approval{}, err
@@ -110,6 +144,7 @@ func (s *Service) RequestApproval(ctx context.Context, incidentID, actionType, a
 		return domain.Approval{}, err
 	}
 	if actionType == "prepare_patch" {
+		action["evidenceRevision"] = incident.EvidenceRevision
 		repositoryID := fmt.Sprint(action["repositoryId"])
 		repository, err := s.store.GetRepository(ctx, repositoryID)
 		if err != nil {
