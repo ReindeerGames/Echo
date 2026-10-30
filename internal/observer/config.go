@@ -31,12 +31,14 @@ type Config struct {
 }
 
 type HTTPProbe struct {
-	Name        string `json:"name"`
-	ServiceID   string `json:"serviceId"`
-	URL         string `json:"url"`
-	Method      string `json:"method"`
-	ExpectedMin int    `json:"expectedStatusMin"`
-	ExpectedMax int    `json:"expectedStatusMax"`
+	Name            string `json:"name"`
+	ServiceID       string `json:"serviceId"`
+	URL             string `json:"url"`
+	Method          string `json:"method"`
+	ExpectedMin     int    `json:"expectedStatusMin"`
+	ExpectedMax     int    `json:"expectedStatusMax"`
+	TLSWarningDays  int    `json:"tlsWarningDays"`
+	TLSCriticalDays int    `json:"tlsCriticalDays"`
 }
 
 type SystemProbe struct {
@@ -151,6 +153,15 @@ func normalizeConfig(cfg Config) (Config, error) {
 		}
 		if probe.ExpectedMin < 100 || probe.ExpectedMax > 599 || probe.ExpectedMin > probe.ExpectedMax {
 			return Config{}, fmt.Errorf("probe %q expected status range is invalid", probe.Name)
+		}
+		if probe.TLSWarningDays == 0 {
+			probe.TLSWarningDays = 30
+		}
+		if probe.TLSCriticalDays == 0 {
+			probe.TLSCriticalDays = 7
+		}
+		if probe.TLSWarningDays < 2 || probe.TLSWarningDays > 365 || probe.TLSCriticalDays < 1 || probe.TLSCriticalDays >= probe.TLSWarningDays {
+			return Config{}, fmt.Errorf("probe %q TLS expiry thresholds must be between 1 and 365 days with critical below warning", probe.Name)
 		}
 	}
 	for index := range cfg.SystemProbes {

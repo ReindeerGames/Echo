@@ -1,7 +1,10 @@
 package observer
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +16,12 @@ import (
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/monitor"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
+}
 
 func TestRunOnceSendsSignedHealthyEventWithoutResponseBody(t *testing.T) {
 	secret := "observer-test-secret-that-is-long-enough"
@@ -114,5 +123,52 @@ func TestObserverDoesNotFollowRedirects(t *testing.T) {
 	}
 	if destinationCalls.Load() != 0 || received.Status != "unhealthy" || !strings.Contains(received.Summary, "302") {
 		t.Fatalf("redirect was not treated as a failed probe: calls=%d event=%#v", destinationCalls.Load(), received)
+	}
+}
+
+func TestHTTPSProbeReportsCertificateExpiryBeforeOutage(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name         string
+		expiresIn    time.Duration
+		wantStatus   string
+		wantSeverity string
+		wantSummary  string
+	}{
+		{name: "warning", expiresIn: 20 * 24 * time.Hour, wantStatus: "degraded", wantSeverity: "warning", wantSummary: "expires in 20 days"},
+		{name: "critical", expiresIn: 6 * 24 * time.Hour, wantStatus: "unhealthy", wantSeverity: "critical", wantSummary: "expires in 6 days"},
+		{name: "healthy", expiresIn: 45 * 24 * time.Hour, wantStatus: "healthy", wantSeverity: "info", wantSummary: "is healthy"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service, err := New(Config{
+				EchoURL: "https://echo.test", Source: "observer",
+				Probes: []HTTPProbe{{Name: "web", ServiceID: "svc_web", URL: "https://web.test/readyz"}},
+			}, "observer-test-secret-that-is-long-enough")
+			if err != nil {
+				t.Fatal(err)
+			}
+			service.now = func() time.Time { return now }
+			service.probe = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode: http.StatusNoContent,
+					Body:       io.NopCloser(strings.NewReader("")),
+					TLS:        &tls.ConnectionState{PeerCertificates: []*x509.Certificate{{NotAfter: now.Add(test.expiresIn)}}},
+				}, nil
+			})}
+			event := service.observe(t.Context(), service.config.Probes[0])
+			if event.Status != test.wantStatus || event.Severity != test.wantSeverity || !strings.Contains(event.Summary, test.wantSummary) {
+				t.Fatalf("unexpected TLS expiry event: %#v", event)
+			}
+			if !strings.Contains(string(event.Details), `"expiresAt":"2026-`) || !strings.Contains(string(event.Details), `"tlsWarningDays":30`) || !strings.Contains(string(event.Details), `"tlsCriticalDays":7`) {
+				t.Fatalf("TLS evidence missing from event: %s", event.Details)
+			}
+			if test.wantStatus == "healthy" && event.Fingerprint != "" {
+				t.Fatalf("healthy certificate retained an alert fingerprint: %#v", event)
+			}
+			if test.wantStatus != "healthy" && event.Fingerprint != "http-health" {
+				t.Fatalf("certificate alert did not use aggregate HTTP fingerprint: %#v", event)
+			}
+		})
 	}
 }

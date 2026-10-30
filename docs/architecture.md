@@ -32,6 +32,10 @@ Owner-initiated code investigations use the same safe default-branch archive pat
 
 The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commit on an `echo/` branch and opens a draft PR. Protected and generated paths are rejected before any GitHub mutation. A separate repository-native production job may revalidate successful checks and merge only the exact approved PR head, then monitor the existing default-branch workflow; it cannot inherit patch approval.
 
+### Runtime observer
+
+The observer has no database, GitHub, WhatsApp, AI, shell, or SSH access. HTTPS probes discard response bodies and reduce verified certificate state to an expiry timestamp and days remaining. System probes read only bounded host counters, and Docker probes can reach only the local exact-allowlist proxy. The proxy never returns logs, environment variables, labels, mounts, image configuration, health output, or raw daemon errors.
+
 ## Persistence
 
 `mdbstore` exclusively owns `echo_whatsapp`. Echo never joins business data to its session tables.

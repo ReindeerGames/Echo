@@ -26,8 +26,25 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	if cfg.Source != "observer-01" || cfg.Interval.Duration != 30*time.Second || cfg.Timeout.Duration != 5*time.Second {
 		t.Fatalf("unexpected defaults: %#v", cfg)
 	}
-	if cfg.Probes[0].Method != "GET" || cfg.Probes[0].ExpectedMin != 200 || cfg.Probes[0].ExpectedMax != 299 {
+	if cfg.Probes[0].Method != "GET" || cfg.Probes[0].ExpectedMin != 200 || cfg.Probes[0].ExpectedMax != 299 || cfg.Probes[0].TLSWarningDays != 30 || cfg.Probes[0].TLSCriticalDays != 7 {
 		t.Fatalf("unexpected probe defaults: %#v", cfg.Probes[0])
+	}
+}
+
+func TestHTTPProbeRejectsUnsafeTLSExpiryThresholds(t *testing.T) {
+	_, err := normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		Probes: []HTTPProbe{{Name: "web", ServiceID: "svc_web", URL: "https://web.test/health", TLSWarningDays: 7, TLSCriticalDays: 7}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "TLS expiry thresholds") {
+		t.Fatalf("unordered TLS thresholds were not rejected: %v", err)
+	}
+	_, err = normalizeConfig(Config{
+		EchoURL: "https://echo.test", Source: "observer",
+		Probes: []HTTPProbe{{Name: "web", ServiceID: "svc_web", URL: "https://web.test/health", TLSWarningDays: 366, TLSCriticalDays: 7}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "TLS expiry thresholds") {
+		t.Fatalf("oversized TLS warning window was not rejected: %v", err)
 	}
 }
 

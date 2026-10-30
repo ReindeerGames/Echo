@@ -572,6 +572,58 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	}
 }
 
+func TestMariaDBMonitorAlertSeverityEscalationNotifiesOnce(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	cleanupIntegration(t, st)
+	project, err := st.SaveProject(ctx, domain.Project{Key: "escalation", Name: "Escalation", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := st.SaveService(ctx, domain.Service{ProjectID: project.ID, Key: "web", Name: "Web", Kind: "application", Criticality: "high", Enabled: true, Metadata: json.RawMessage(`{}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observed := time.Now().UTC().Truncate(time.Microsecond)
+	warning := domain.MonitorEvent{EventID: "escalation-warning", ServiceID: service.ID, Source: "integration", Status: "degraded", Severity: "warning", Summary: "certificate expires in 30 days", Fingerprint: "http-health", Details: json.RawMessage(`{}`), ObservedAt: observed}
+	result, err := st.RecordMonitorEvent(ctx, warning, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
+		t.Fatalf("open warning: result=%#v err=%v", result, err)
+	}
+	critical := warning
+	critical.EventID = "escalation-critical"
+	critical.Status = "unhealthy"
+	critical.Severity = "critical"
+	critical.Summary = "certificate expires in 7 days"
+	critical.ObservedAt = observed.Add(time.Minute)
+	result, err = st.RecordMonitorEvent(ctx, critical, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "escalated" {
+		t.Fatalf("escalate warning: result=%#v err=%v", result, err)
+	}
+	critical.EventID = "escalation-critical-repeat"
+	critical.ObservedAt = observed.Add(2 * time.Minute)
+	result, err = st.RecordMonitorEvent(ctx, critical, "owner@s.whatsapp.net")
+	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "updated" {
+		t.Fatalf("deduplicate repeated critical signal: result=%#v err=%v", result, err)
+	}
+	var notifications int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_whatsapp_outbox WHERE chat_jid='owner@s.whatsapp.net'`).Scan(&notifications); err != nil || notifications != 2 {
+		t.Fatalf("severity transition notification count=%d err=%v", notifications, err)
+	}
+	var escalationBody string
+	if err := st.db.QueryRowContext(ctx, `SELECT body FROM echo_whatsapp_outbox WHERE body LIKE 'Echo alert ESCALATED%' LIMIT 1`).Scan(&escalationBody); err != nil || !strings.Contains(escalationBody, "ESCALATED · CRITICAL") || !strings.Contains(escalationBody, "investigate Web") {
+		t.Fatalf("severity escalation notification body=%q err=%v", escalationBody, err)
+	}
+}
+
 func TestMariaDBServiceCreateAndEditAreUnambiguous(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {

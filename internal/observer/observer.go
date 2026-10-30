@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/url"
 	"strings"
@@ -147,32 +148,47 @@ func (o *Observer) observe(ctx context.Context, probe HTTPProbe) domain.MonitorE
 	started := time.Now()
 	request, err := http.NewRequestWithContext(ctx, probe.Method, probe.URL, nil)
 	if err != nil {
-		event.Details = details(probe, 0, time.Since(started), "invalid_request")
+		event.Details = details(probe, 0, time.Since(started), "invalid_request", nil, observedAt)
 		return event
 	}
 	request.Header.Set("User-Agent", "Echo-Observer/1.0")
 	response, err := o.probe.Do(request)
 	latency := time.Since(started)
 	if err != nil {
-		event.Details = details(probe, 0, latency, classifyProbeError(err))
+		event.Details = details(probe, 0, latency, classifyProbeError(err), nil, observedAt)
 		return event
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, maxResponseBytes))
 	_ = response.Body.Close()
 	if response.StatusCode < probe.ExpectedMin || response.StatusCode > probe.ExpectedMax {
 		event.Summary = fmt.Sprintf("%s returned HTTP %d", probe.Name, response.StatusCode)
-		event.Details = details(probe, response.StatusCode, latency, "unexpected_status")
+		event.Details = details(probe, response.StatusCode, latency, "unexpected_status", response.TLS, observedAt)
 		return event
+	}
+	if expiresAt, ok := certificateExpiry(response.TLS); ok {
+		remaining := expiresAt.Sub(observedAt)
+		if remaining <= time.Duration(probe.TLSWarningDays)*24*time.Hour {
+			daysRemaining := int(math.Ceil(remaining.Hours() / 24))
+			event.Status = "degraded"
+			event.Severity = "warning"
+			if remaining <= time.Duration(probe.TLSCriticalDays)*24*time.Hour {
+				event.Status = "unhealthy"
+				event.Severity = "critical"
+			}
+			event.Summary = certificateExpirySummary(probe.Name, daysRemaining)
+			event.Details = details(probe, response.StatusCode, latency, "", response.TLS, observedAt)
+			return event
+		}
 	}
 	event.Status = "healthy"
 	event.Severity = "info"
 	event.Summary = fmt.Sprintf("%s is healthy (HTTP %d)", probe.Name, response.StatusCode)
 	event.Fingerprint = ""
-	event.Details = details(probe, response.StatusCode, latency, "")
+	event.Details = details(probe, response.StatusCode, latency, "", response.TLS, observedAt)
 	return event
 }
 
-func details(probe HTTPProbe, status int, latency time.Duration, failure string) json.RawMessage {
+func details(probe HTTPProbe, status int, latency time.Duration, failure string, connection *tls.ConnectionState, observedAt time.Time) json.RawMessage {
 	parsed, _ := url.Parse(probe.URL)
 	target := ""
 	if parsed != nil {
@@ -188,8 +204,36 @@ func details(probe HTTPProbe, status int, latency time.Duration, failure string)
 	if failure != "" {
 		value["failure"] = failure
 	}
+	if expiresAt, ok := certificateExpiry(connection); ok {
+		value["tls"] = map[string]any{
+			"expiresAt":     expiresAt,
+			"daysRemaining": int(math.Ceil(expiresAt.Sub(observedAt).Hours() / 24)),
+		}
+		value["thresholds"] = map[string]any{
+			"tlsWarningDays":  probe.TLSWarningDays,
+			"tlsCriticalDays": probe.TLSCriticalDays,
+		}
+	}
 	raw, _ := json.Marshal(value)
 	return raw
+}
+
+func certificateExpiry(connection *tls.ConnectionState) (time.Time, bool) {
+	if connection == nil || len(connection.PeerCertificates) == 0 || connection.PeerCertificates[0] == nil {
+		return time.Time{}, false
+	}
+	return connection.PeerCertificates[0].NotAfter.UTC(), true
+}
+
+func certificateExpirySummary(name string, daysRemaining int) string {
+	if daysRemaining <= 0 {
+		return name + " TLS certificate has expired"
+	}
+	unit := "days"
+	if daysRemaining == 1 {
+		unit = "day"
+	}
+	return fmt.Sprintf("%s TLS certificate expires in %d %s", name, daysRemaining, unit)
 }
 
 func classifyProbeError(err error) string {

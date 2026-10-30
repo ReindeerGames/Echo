@@ -10,7 +10,9 @@
       "url": "https://application.example.com/readyz",
       "method": "GET",
       "expectedStatusMin": 200,
-      "expectedStatusMax": 299
+      "expectedStatusMax": 299,
+      "tlsWarningDays": 30,
+      "tlsCriticalDays": 7
     }
   ],
   "systemProbes": [

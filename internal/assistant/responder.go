@@ -842,9 +842,10 @@ func marshal(value any) (string, error) {
 const maxEvidenceBytes = 64 << 10
 
 var evidenceFields = map[string]map[string]struct{}{
-	"":           setOf("probe", "method", "statusCode", "latencyMs", "failure", "snapshot", "thresholds", "container", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
+	"":           setOf("probe", "method", "statusCode", "latencyMs", "failure", "tls", "snapshot", "thresholds", "container", "state", "running", "paused", "restarting", "oomKilled", "dead", "exitCode", "stateError", "health", "failingStreak", "restartCount", "startedAt", "finishedAt", "timeoutSeconds", "lastObservedAt", "policyUpdatedAt", "policyReference"),
+	"tls":        setOf("expiresAt", "daysRemaining"),
 	"snapshot":   setOf("diskPath", "diskTotalBytes", "diskAvailableBytes", "diskUsedPercent", "memoryTotalBytes", "memoryAvailableBytes", "memoryUsedPercent", "load1", "load5", "load15", "cpuCount", "load1PerCpu", "uptimeSeconds"),
-	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu"),
+	"thresholds": setOf("diskWarningPercent", "diskCriticalPercent", "memoryWarningPercent", "memoryCriticalPercent", "loadWarningPerCpu", "loadCriticalPerCpu", "tlsWarningDays", "tlsCriticalDays"),
 }
 
 func setOf(values ...string) map[string]struct{} {
@@ -880,7 +881,7 @@ func sanitizeEvidenceObject(kind string, value map[string]any) map[string]any {
 			continue
 		}
 		if nested, ok := item.(map[string]any); ok {
-			if key != "snapshot" && key != "thresholds" {
+			if key != "tls" && key != "snapshot" && key != "thresholds" {
 				continue
 			}
 			if cleaned := sanitizeEvidenceObject(key, nested); len(cleaned) > 0 {
@@ -927,7 +928,7 @@ func sanitizeEvidenceString(key, value string) (string, bool) {
 		return value, true
 	case "diskPath":
 		return truncateRunes(value, 200), strings.HasPrefix(value, "/") && !strings.ContainsRune(value, '\x00')
-	case "startedAt", "finishedAt", "lastObservedAt", "policyUpdatedAt", "policyReference":
+	case "expiresAt", "startedAt", "finishedAt", "lastObservedAt", "policyUpdatedAt", "policyReference":
 		if value == "" {
 			return "", false
 		}
