@@ -27,6 +27,7 @@ type Reader interface {
 	ListJobs(context.Context, string, int) ([]domain.Job, error)
 	ListDeployments(context.Context, string) ([]domain.Deployment, error)
 	ListChangeSets(context.Context, string) ([]domain.ChangeSet, error)
+	ListIncidents(context.Context, int) ([]domain.Incident, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
 }
@@ -102,6 +103,7 @@ func operatorTools() []ai.ToolDefinition {
 		ai.FunctionTool("get_deployments", "List recent Echo deployment records and verification state. Optionally filter by exact status.", schema(map[string]any{"status": map[string]string{"type": "string", "description": "Exact deployment status, or an empty string for all recent deployments."}}, []string{"status"})),
 		ai.FunctionTool("list_projects", "List configured projects and their enabled repositories.", schema(nil, nil)),
 		ai.FunctionTool("get_repository_status", "Inspect the configured repository default-branch head and its ten most recent GitHub Actions runs. This tool is read-only.", schema(map[string]any{"repository": map[string]string{"type": "string", "description": "Configured repository ID, name, or owner/name."}}, []string{"repository"})),
+		ai.FunctionTool("list_incidents", "Find recent incidents by optional status and project/summary text. Use this before get_incident when the exact ID is unknown.", schema(map[string]any{"query": map[string]string{"type": "string", "description": "Project or summary fragment, or empty string."}, "status": map[string]string{"type": "string", "description": "Exact incident status, or empty string."}}, []string{"query", "status"})),
 		ai.FunctionTool("get_incident", "Get an incident and its latest evidence-backed diagnosis by exact incident ID.", schema(map[string]any{"incident_id": map[string]string{"type": "string"}}, []string{"incident_id"})),
 	}
 }
@@ -420,6 +422,36 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 		view["deployments"] = deploymentViews
 		view["deployments_truncated"] = len(deployments) > len(deploymentViews)
 		return marshal(view)
+	case "list_incidents":
+		var arguments struct {
+			Query  string `json:"query"`
+			Status string `json:"status"`
+		}
+		if err := decodeArguments(raw, &arguments); err != nil {
+			return "", err
+		}
+		incidents, err := r.reader.ListIncidents(ctx, 100)
+		if err != nil {
+			return "", err
+		}
+		query := strings.ToLower(strings.TrimSpace(arguments.Query))
+		status := strings.ToLower(strings.TrimSpace(arguments.Status))
+		views := make([]map[string]any, 0, min(len(incidents), 50))
+		matched := 0
+		for _, incident := range incidents {
+			if status != "" && strings.ToLower(incident.Status) != status {
+				continue
+			}
+			if query != "" && !strings.Contains(strings.ToLower(incident.ProjectName), query) && !strings.Contains(strings.ToLower(incident.Summary), query) {
+				continue
+			}
+			matched++
+			if len(views) == 50 {
+				continue
+			}
+			views = append(views, incidentSummaryView(incident))
+		}
+		return marshal(map[string]any{"incidents": views, "count": matched, "truncated": matched > len(views)})
 	default:
 		return "", fmt.Errorf("unknown read-only tool %q", name)
 	}
@@ -614,13 +646,15 @@ func (r *Responder) Answer(ctx context.Context, text string) (string, string, er
 		answer, err = r.projects(ctx)
 	case "repository":
 		answer, err = r.repository(ctx, argument)
+	case "incidents":
+		answer, err = r.incidents(ctx)
 	case "service":
 		answer, err = r.service(ctx, argument)
 	case "incident":
 		answer, err = r.incident(ctx, argument)
 	default:
 		intent = "unknown"
-		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “repo <name>”, or “incident <id>”. I will never make a production change from a question."
+		answer = "I can investigate the facts Echo currently has, but I did not understand that request yet. Try “status”, “alerts”, “services”, “service <name>”, “jobs”, “deployments”, “projects”, “repo <name>”, “incidents”, or “incident <id>”. I will never make a production change from a question."
 	}
 	return truncate(answer, 3500), intent, err
 }
@@ -643,6 +677,9 @@ func classify(text string) (string, string) {
 	}
 	if strings.HasPrefix(value, "incident ") {
 		return "incident", strings.TrimSpace(strings.TrimPrefix(value, "incident "))
+	}
+	if value == "incidents" || value == "open incidents" || value == "recent incidents" || value == "list incidents" {
+		return "incidents", ""
 	}
 	if value == "alerts" || value == "issues" || value == "problems" || strings.Contains(value, "anything wrong") || strings.Contains(value, "what is down") || strings.Contains(value, "what's down") {
 		return "alerts", ""
@@ -960,6 +997,18 @@ func changeSetView(change domain.ChangeSet) map[string]any {
 	}
 }
 
+func incidentSummaryView(incident domain.Incident) map[string]any {
+	return map[string]any{
+		"id":         incident.ID,
+		"project":    truncateRunes(incident.ProjectName, 160),
+		"status":     incident.Status,
+		"severity":   incident.Severity,
+		"summary":    truncateRunes(incident.Summary, 300),
+		"created_at": incident.CreatedAt,
+		"updated_at": incident.UpdatedAt,
+	}
+}
+
 func (r *Responder) service(ctx context.Context, query string) (string, error) {
 	if query == "" {
 		return "Please name the service, for example “service nudgie-web”.", nil
@@ -1116,6 +1165,25 @@ func (r *Responder) incident(ctx context.Context, incidentID string) (string, er
 	return fmt.Sprintf("Incident %s\n\n%s", incident.ID, strings.Join(nonEmpty(lines), "\n")), nil
 }
 
+func (r *Responder) incidents(ctx context.Context) (string, error) {
+	incidents, err := r.reader.ListIncidents(ctx, 100)
+	if err != nil {
+		return "", err
+	}
+	if len(incidents) == 0 {
+		return "No incidents have been recorded yet.", nil
+	}
+	lines := make([]string, 0, min(len(incidents), 10))
+	for index, incident := range incidents {
+		if index == 10 {
+			lines = append(lines, fmt.Sprintf("…and %d more in the control plane.", len(incidents)-index))
+			break
+		}
+		lines = append(lines, fmt.Sprintf("• %s · %s · %s · %s\n  %s", strings.ToUpper(incident.Status), incident.ID, truncateRunes(incident.ProjectName, 120), strings.ToUpper(incident.Severity), truncateRunes(incident.Summary, 240)))
+	}
+	return fmt.Sprintf("Recent incidents (%d)\n\n%s", len(incidents), strings.Join(lines, "\n")), nil
+}
+
 func matchServices(services []domain.Service, query string) []domain.Service {
 	query = strings.ToLower(strings.TrimSpace(query))
 	var exact, partial []domain.Service
@@ -1162,7 +1230,7 @@ func matchRepositories(repositories []domain.Repository, query string) []domain.
 }
 
 func helpText() string {
-	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• repo <name> — live default-branch and GitHub Actions status\n• incident <id> — incident and diagnosis\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
+	return "Echo operator commands\n\n• status — estate summary\n• alerts — open runtime conditions\n• services — monitored service catalogue\n• service <name> — alerts and latest evidence\n• jobs — queued, running, retrying and dead work\n• deployments — recent dispatch and verification state\n• projects — project and repository map\n• repo <name> — live default-branch and GitHub Actions status\n• incidents — recent incident finder\n• incident <id> — diagnosis and delivery lifecycle\n• approve <code> / reject <code> — resolve an exact pending approval\n\nQuestions are read-only. Production changes always require a separate exact-action approval."
 }
 
 func nonEmpty(values []string) []string {

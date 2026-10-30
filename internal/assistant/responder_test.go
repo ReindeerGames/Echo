@@ -26,6 +26,7 @@ type fakeReader struct {
 	deployments []domain.Deployment
 	changes     []domain.ChangeSet
 	incident    domain.Incident
+	incidents   []domain.Incident
 	analysis    domain.Analysis
 }
 
@@ -83,6 +84,9 @@ func (f fakeReader) ListDeployments(context.Context, string) ([]domain.Deploymen
 func (f fakeReader) ListChangeSets(context.Context, string) ([]domain.ChangeSet, error) {
 	return f.changes, nil
 }
+func (f fakeReader) ListIncidents(context.Context, int) ([]domain.Incident, error) {
+	return f.incidents, nil
+}
 func (f fakeReader) GetIncident(context.Context, string) (domain.Incident, error) {
 	if f.incident.ID == "" {
 		return domain.Incident{}, store.ErrNotFound
@@ -107,6 +111,7 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 		"failed jobs":         "jobs",
 		"repo invoices":       "repository",
 		"what is deployed?":   "deployments",
+		"open incidents":      "incidents",
 	}
 	for input, expected := range tests {
 		got, _ := classify(input)
@@ -345,6 +350,23 @@ func TestIncidentAnswersIncludeChangeAndDeploymentLifecycle(t *testing.T) {
 	output, err := responder.executeTool(context.Background(), "get_incident", json.RawMessage(`{"incident_id":"inc_123"}`))
 	if err != nil || !containsAll(output, `"pull_request_number":17`, `"commit_sha":"a75cdbdaad7917a104299753c32f8358b90a50e6"`, `"environment":"production"`, `"status":"verified"`) || strings.Contains(output, "pullRequestUrl") {
 		t.Fatalf("unexpected incident tool output=%s err=%v", output, err)
+	}
+}
+
+func TestIncidentFinderIsBoundedAndSearchableWithoutSensitiveSourceFields(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{incidents: []domain.Incident{
+		{ID: "inc_open", ProjectName: "Invoices", Status: "triaging", Severity: "high", Summary: "Blank invoice PDFs", SourceBody: "secret raw report", ReporterJID: "27820000000@s.whatsapp.net", CreatedAt: now.Add(-time.Hour), UpdatedAt: now},
+		{ID: "inc_done", ProjectName: "Website", Status: "resolved", Severity: "low", Summary: "Footer typo", CreatedAt: now.Add(-24 * time.Hour), UpdatedAt: now.Add(-20 * time.Hour)},
+	}}
+	responder := New(reader)
+	answer, intent, err := responder.Answer(context.Background(), "incidents")
+	if err != nil || intent != "incidents" || !containsAll(answer, "Recent incidents (2)", "TRIAGING · inc_open · Invoices · HIGH", "Blank invoice PDFs", "RESOLVED · inc_done") || strings.Contains(answer, "secret raw report") {
+		t.Fatalf("unexpected incident finder answer intent=%s body=%s err=%v", intent, answer, err)
+	}
+	output, err := responder.executeTool(context.Background(), "list_incidents", json.RawMessage(`{"query":"invoice","status":"triaging"}`))
+	if err != nil || !containsAll(output, `"count":1`, `"id":"inc_open"`, `"summary":"Blank invoice PDFs"`) || strings.Contains(output, "secret raw report") || strings.Contains(output, "27820000000") || strings.Contains(output, "inc_done") {
+		t.Fatalf("unexpected incident finder tool output=%s err=%v", output, err)
 	}
 }
 
