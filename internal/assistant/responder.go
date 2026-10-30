@@ -35,6 +35,7 @@ type Reader interface {
 	ListProjectIncidents(context.Context, string, int) ([]domain.Incident, error)
 	GetIncident(context.Context, string) (domain.Incident, error)
 	LatestAnalysis(context.Context, string) (domain.Analysis, error)
+	ListIncidentAttachments(context.Context, string) ([]domain.IncidentAttachment, error)
 	ListAudit(context.Context, int) ([]domain.AuditEvent, error)
 }
 
@@ -468,6 +469,15 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 			return "", err
 		}
 		view := map[string]any{"found": true, "id": incident.ID, "project": incident.ProjectName, "status": incident.Status, "severity": incident.Severity, "summary": incident.Summary, "created_at": incident.CreatedAt, "updated_at": incident.UpdatedAt}
+		attachments, err := r.reader.ListIncidentAttachments(ctx, incident.ID)
+		if err != nil {
+			return "", err
+		}
+		attachmentViews := make([]map[string]any, 0, len(attachments))
+		for _, attachment := range attachments {
+			attachmentViews = append(attachmentViews, map[string]any{"kind": attachment.Kind, "mime_type": attachment.MIMEType, "file_name": truncateRunes(attachment.FileName, 255), "size_bytes": attachment.SizeBytes, "sha256": attachment.SHA256, "created_at": attachment.CreatedAt})
+		}
+		view["attachments"] = attachmentViews
 		analysis, analysisErr := r.reader.LatestAnalysis(ctx, incident.ID)
 		if analysisErr == nil {
 			view["analysis"] = map[string]any{"status": analysis.Status, "confidence": analysis.Confidence, "summary": analysis.Summary, "evidence": analysis.Evidence, "created_at": analysis.CreatedAt}
@@ -1984,6 +1994,13 @@ func (r *Responder) incident(ctx context.Context, incidentID string) (string, er
 		return "", err
 	}
 	lines := []string{fmt.Sprintf("Status: %s · Severity: %s", incident.Status, incident.Severity), fmt.Sprintf("Project: %s", incident.ProjectName), fmt.Sprintf("Report: %s", incident.Summary)}
+	attachments, err := r.reader.ListIncidentAttachments(ctx, incident.ID)
+	if err != nil {
+		return "", err
+	}
+	if len(attachments) > 0 {
+		lines = append(lines, fmt.Sprintf("Screenshot evidence: %d retained image(s)", len(attachments)))
+	}
 	analysis, analysisErr := r.reader.LatestAnalysis(ctx, incident.ID)
 	if analysisErr == nil {
 		lines = append(lines, fmt.Sprintf("Analysis (%s confidence): %s", analysis.Confidence, analysis.Summary))

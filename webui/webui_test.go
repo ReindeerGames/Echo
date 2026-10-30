@@ -150,6 +150,21 @@ func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	}
 }
 
+func TestIncidentScreenshotEvidenceIsVisibleWithoutPublicMediaURL(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"Screenshot evidence", "retained evidence", "SHA-256", "item.sizeBytes"} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("incident screenshot evidence is missing %q", expected)
+		}
+	}
+	if strings.Contains(body, "/attachments/${") {
+		t.Fatal("incident UI must not expose a public attachment download route")
+	}
+}
+
 func TestRepositoryAccessFormUsesNamedControlsAndConfirmsSavedPolicy(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

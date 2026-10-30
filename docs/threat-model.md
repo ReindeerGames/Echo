@@ -53,7 +53,7 @@ Inbound incidents are unique by group JID and source message ID. Jobs and outbox
 - A compromised GitHub workflow can falsely report success or misuse environment credentials. Workflows and branch protection remain part of the trusted computing base. Repository-native monitoring confirms GitHub's workflow conclusion, not the correctness of an untrusted deployment script.
 - The current all-in-one deployment places all environment secrets in one process. Split deployment is recommended before broad production access.
 - Owner authorization is anchored to the configured WhatsApp JID and accepts HyperMeow's authenticated primary or alternate PN/LID sender address. Identity changes not covered by that mapping require explicit re-enrolment.
-- Message attachments are not yet downloaded or analyzed; captions are retained, but richer evidence must be collected separately.
+- Screenshot analysis is limited to byte-verified PNG, JPEG, and WEBP files of at most 5 MiB. PDFs, text documents, video, audio, archives, and follow-up attachments are not yet analyzed; their captions remain the available evidence.
 
 ## Go-live requirements
 

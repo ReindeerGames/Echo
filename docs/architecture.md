@@ -12,6 +12,8 @@ The gateway owns the sole active HyperMeow client and `mdbstore` connection. A M
 
 The gateway does not receive decrypted GitHub credentials or AI keys in a split deployment. The all-in-one binary supports small deployments, while package boundaries allow later process separation.
 
+WhatsApp callbacks enqueue only a cloned media descriptor and normalized metadata. The bounded consumer streams candidate screenshots through a hard-limited temporary file with a 30-second deadline, rejects declared or actual payloads above 5 MiB, and accepts only byte-detected PNG, JPEG, or WEBP content matching the declared MIME type. SVG, video, audio, PDFs, archives, and arbitrary documents are not retained. Accepted bytes, hash, and incident are committed together before analysis is queued.
+
 ### Control plane
 
 The control plane owns configuration and policy. The embedded UI communicates only with authenticated same-origin JSON endpoints. Every mutating browser request requires a CSRF token tied to the signed session.
@@ -34,6 +36,7 @@ The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commi
 - `echo_whatsapp_outbox`: retryable outbound messages with expiring leases and stable WhatsApp message IDs across crash recovery.
 - `echo_runtime_component_alerts`: one durable open-or-resolved lifecycle per supervised Echo component, used to deduplicate failure and recovery notifications across retries and process restarts.
 - `echo_briefing_settings`: the opt-in local schedule and last successfully queued local date for the owner's daily operational briefing.
+- `echo_incident_attachments`: byte-verified, SHA-256-addressed screenshot evidence linked to an incident and pruned according to `ECHO_ATTACHMENT_RETENTION`.
 - `echo_approvals`: expiring one-action authorization.
 - `echo_audit_events`: append-only operational evidence.
 - `echo_encrypted_settings`: AES-GCM ciphertext and non-secret connection metadata; the encryption key remains outside MariaDB.

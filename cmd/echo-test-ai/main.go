@@ -13,8 +13,8 @@ import (
 
 type completionRequest struct {
 	Messages []struct {
-		Role    string `json:"role"`
-		Content string `json:"content"`
+		Role    string          `json:"role"`
+		Content json.RawMessage `json:"content"`
 	} `json:"messages"`
 }
 
@@ -69,14 +69,16 @@ func responses(w http.ResponseWriter, r *http.Request) {
 
 func completion(w http.ResponseWriter, r *http.Request) {
 	var request completionRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 2<<20)).Decode(&request); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<20)).Decode(&request); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
 		return
 	}
 
 	patchRequest := false
 	for _, message := range request.Messages {
-		if message.Role == "system" && strings.Contains(strings.ToLower(message.Content), "patch planner") {
+		var content string
+		_ = json.Unmarshal(message.Content, &content)
+		if message.Role == "system" && strings.Contains(strings.ToLower(content), "patch planner") {
 			patchRequest = true
 			break
 		}

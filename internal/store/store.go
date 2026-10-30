@@ -9,9 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/id"
@@ -1106,10 +1108,26 @@ func (s *Store) CreateIncident(ctx context.Context, binding domain.GroupBinding,
 	if err != nil {
 		return domain.Incident{}, false, err
 	}
-	metadata, _ := json.Marshal(map[string]any{"mentionedJids": msg.MentionedJIDs, "isGroup": msg.IsGroup})
+	metadata, _ := json.Marshal(map[string]any{"mentionedJids": msg.MentionedJIDs, "isGroup": msg.IsGroup, "attachmentCount": len(msg.Attachments)})
 	_, err = tx.ExecContext(ctx, `INSERT INTO echo_incident_messages(id,incident_id,whatsapp_message_id,chat_jid,sender_jid,sender_name,direction,body,metadata_json,message_timestamp) VALUES(?,?,?,?,?,?,'inbound',?,?,?)`, id.New("msg"), incidentID, msg.MessageID, msg.ChatJID, msg.SenderJID, msg.SenderName, msg.Body, metadata, msg.Timestamp)
 	if err != nil {
 		return domain.Incident{}, false, err
+	}
+	for _, attachment := range msg.Attachments {
+		_, hashErr := hex.DecodeString(attachment.SHA256)
+		digest := sha256.Sum256(attachment.Data)
+		detectedMIME := strings.ToLower(strings.TrimSpace(http.DetectContentType(attachment.Data)))
+		mimeAllowed := attachment.MIMEType == "image/jpeg" || attachment.MIMEType == "image/png" || attachment.MIMEType == "image/webp"
+		if attachment.Kind != "image" || !mimeAllowed || detectedMIME != attachment.MIMEType || !utf8.ValidString(attachment.FileName) || utf8.RuneCountInString(attachment.FileName) > 255 || len(attachment.Data) == 0 || int64(len(attachment.Data)) != attachment.SizeBytes || attachment.SizeBytes > 5<<20 || len(attachment.SHA256) != 64 || hashErr != nil || !strings.EqualFold(hex.EncodeToString(digest[:]), attachment.SHA256) {
+			return domain.Incident{}, false, errors.New("invalid incident attachment")
+		}
+		if attachment.ID == "" {
+			attachment.ID = id.New("att")
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO echo_incident_attachments(id,incident_id,whatsapp_message_id,media_kind,mime_type,file_name,size_bytes,sha256,data_blob) VALUES(?,?,?,?,?,?,?,?,?)`, attachment.ID, incidentID, msg.MessageID, attachment.Kind, attachment.MIMEType, attachment.FileName, attachment.SizeBytes, attachment.SHA256, attachment.Data)
+		if err != nil {
+			return domain.Incident{}, false, err
+		}
 	}
 	jobPayload, _ := json.Marshal(map[string]string{"incidentId": incidentID})
 	_, err = tx.ExecContext(ctx, `INSERT INTO echo_jobs(id,job_type,payload_json) VALUES(?,'analyze_incident',?)`, id.New("job"), jobPayload)
@@ -1120,7 +1138,7 @@ func (s *Store) CreateIncident(ctx context.Context, binding domain.GroupBinding,
 	if err != nil {
 		return domain.Incident{}, false, err
 	}
-	if err = insertAudit(ctx, tx, "whatsapp", msg.SenderJID, "incident.reported", "incident", incidentID, "succeeded", map[string]any{"groupJid": msg.ChatJID}); err != nil {
+	if err = insertAudit(ctx, tx, "whatsapp", msg.SenderJID, "incident.reported", "incident", incidentID, "succeeded", map[string]any{"groupJid": msg.ChatJID, "attachmentCount": len(msg.Attachments)}); err != nil {
 		return domain.Incident{}, false, err
 	}
 	if err = tx.Commit(); err != nil {

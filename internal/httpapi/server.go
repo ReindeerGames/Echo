@@ -602,6 +602,12 @@ func (s *Server) incident(w http.ResponseWriter, r *http.Request) {
 	if deployments, err := s.store.ListDeployments(r.Context(), item.ID); err == nil {
 		payload["deployments"] = deployments
 	}
+	if attachments, err := s.store.ListIncidentAttachments(r.Context(), item.ID); err == nil {
+		for index := range attachments {
+			attachments[index].Data = nil
+		}
+		payload["attachments"] = attachments
+	}
 	respond(w, payload, nil)
 }
 func (s *Server) approvals(w http.ResponseWriter, r *http.Request) {

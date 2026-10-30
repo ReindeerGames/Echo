@@ -65,8 +65,9 @@ type AI struct {
 }
 
 type Assistant struct {
-	HistoryLimit int
-	Retention    time.Duration
+	HistoryLimit        int
+	Retention           time.Duration
+	AttachmentRetention time.Duration
 }
 
 type Worker struct {
@@ -128,8 +129,9 @@ func Load() (Config, error) {
 			Model:   env("ECHO_AI_MODEL", "gpt-5-mini"),
 		},
 		Assistant: Assistant{
-			HistoryLimit: integer("ECHO_ASSISTANT_HISTORY_LIMIT", 12),
-			Retention:    duration("ECHO_ASSISTANT_RETENTION", 30*24*time.Hour),
+			HistoryLimit:        integer("ECHO_ASSISTANT_HISTORY_LIMIT", 12),
+			Retention:           duration("ECHO_ASSISTANT_RETENTION", 30*24*time.Hour),
+			AttachmentRetention: duration("ECHO_ATTACHMENT_RETENTION", 30*24*time.Hour),
 		},
 		Worker: Worker{
 			Enabled:           boolean("ECHO_WORKER_ENABLED", true),
@@ -171,6 +173,9 @@ func Load() (Config, error) {
 	}
 	if cfg.Assistant.Retention < 24*time.Hour || cfg.Assistant.Retention > 365*24*time.Hour {
 		return Config{}, errors.New("ECHO_ASSISTANT_RETENTION must be between 24h and 8760h")
+	}
+	if cfg.Assistant.AttachmentRetention < 24*time.Hour || cfg.Assistant.AttachmentRetention > 365*24*time.Hour {
+		return Config{}, errors.New("ECHO_ATTACHMENT_RETENTION must be between 24h and 8760h")
 	}
 	if cfg.Monitor.WatchdogInterval < 5*time.Second || cfg.Monitor.WatchdogInterval > 5*time.Minute {
 		return Config{}, errors.New("ECHO_MONITOR_WATCHDOG_INTERVAL must be between 5s and 5m")

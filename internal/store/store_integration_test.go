@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -234,10 +236,31 @@ func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := domain.InboundMessage{MessageID: "message-1", ChatJID: binding.GroupJID, SenderJID: "reporter@s.whatsapp.net", SenderName: "Reporter", Body: "forms are blank", IsGroup: true, MentionedJIDs: []string{"echo@s.whatsapp.net"}, Timestamp: time.Now().UTC()}
+	imageData := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 504)...)
+	imageDigest := sha256.Sum256(imageData)
+	message := domain.InboundMessage{MessageID: "message-1", ChatJID: binding.GroupJID, SenderJID: "reporter@s.whatsapp.net", SenderName: "Reporter", Body: "forms are blank", IsGroup: true, MentionedJIDs: []string{"echo@s.whatsapp.net"}, Attachments: []domain.IncidentAttachment{{Kind: "image", MIMEType: "image/png", FileName: "screen.png", SizeBytes: int64(len(imageData)), SHA256: hex.EncodeToString(imageDigest[:]), Data: imageData}}, Timestamp: time.Now().UTC()}
 	first, created, err := st.CreateIncident(ctx, binding, message)
 	if err != nil || !created {
 		t.Fatalf("first create: created=%v err=%v", created, err)
+	}
+	attachments, err := st.LoadIncidentAttachments(ctx, first.ID)
+	if err != nil || len(attachments) != 1 || attachments[0].MIMEType != "image/png" || attachments[0].FileName != "screen.png" || string(attachments[0].Data) != string(imageData) {
+		t.Fatalf("incident attachment not retained: attachments=%#v err=%v", attachments, err)
+	}
+	metadata, err := st.ListIncidentAttachments(ctx, first.ID)
+	if err != nil || len(metadata) != 1 || len(metadata[0].Data) != 0 {
+		t.Fatalf("attachment metadata view loaded image bytes: attachments=%#v err=%v", metadata, err)
+	}
+	tampered := message
+	tampered.MessageID = "message-invalid-attachment"
+	tampered.Attachments = append([]domain.IncidentAttachment(nil), message.Attachments...)
+	tampered.Attachments[0].SHA256 = strings.Repeat("0", 64)
+	if _, _, err := st.CreateIncident(ctx, binding, tampered); err == nil {
+		t.Fatal("tampered attachment hash was accepted")
+	}
+	var tamperedIncidents int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM echo_incidents WHERE source_message_id=?`, tampered.MessageID).Scan(&tamperedIncidents); err != nil || tamperedIncidents != 0 {
+		t.Fatalf("invalid attachment did not roll back incident: count=%d err=%v", tamperedIncidents, err)
 	}
 	second, created, err := st.CreateIncident(ctx, binding, message)
 	if err != nil || created {
@@ -245,6 +268,17 @@ func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	}
 	if first.ID != second.ID {
 		t.Fatalf("idempotency failed: %s != %s", first.ID, second.ID)
+	}
+	if _, err := st.db.ExecContext(ctx, `UPDATE echo_incident_attachments SET created_at=? WHERE incident_id=?`, time.Now().UTC().Add(-48*time.Hour), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	pruned, err := st.PruneIncidentAttachments(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil || pruned != 1 {
+		t.Fatalf("prune incident attachments: count=%d err=%v", pruned, err)
+	}
+	attachments, err = st.LoadIncidentAttachments(ctx, first.ID)
+	if err != nil || len(attachments) != 0 {
+		t.Fatalf("expired incident attachment was retained: attachments=%#v err=%v", attachments, err)
 	}
 	repository, err := st.SaveRepository(ctx, domain.Repository{ProjectID: project.ID, Owner: "example", Name: "site", Role: "application", DefaultBranch: "main", Enabled: true})
 	if err != nil {
@@ -760,7 +794,7 @@ func TestMariaDBWorkerQueueHealthLifecycleIsAtomic(t *testing.T) {
 
 func cleanupIntegration(t *testing.T, st *Store) {
 	t.Helper()
-	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
+	tables := []string{"echo_audit_events", "echo_whatsapp_outbox", "echo_owner_settings", "echo_whatsapp_contacts", "echo_runtime_component_alerts", "echo_worker_health_alerts", "echo_worker_heartbeats", "echo_jobs", "echo_deployments", "echo_approvals", "echo_change_sets", "echo_analyses", "echo_incident_attachments", "echo_incident_messages", "echo_incidents", "echo_tool_runs", "echo_conversation_messages", "echo_conversations", "echo_service_alerts", "echo_monitor_events", "echo_services", "echo_environments", "echo_repositories", "echo_group_bindings", "echo_projects", "echo_briefing_settings"}
 	for _, table := range tables {
 		if _, err := st.db.Exec(`DELETE FROM ` + table); err != nil {
 			t.Fatal(err)

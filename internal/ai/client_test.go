@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/ReindeerGames/echo/internal/domain"
 	"github.com/ReindeerGames/echo/internal/security"
 	"github.com/ReindeerGames/echo/internal/store"
 )
@@ -35,6 +37,45 @@ func TestDiagnoseParsesStructuredResult(t *testing.T) {
 	}
 	if result.Confidence != "medium" {
 		t.Fatalf("unexpected result %#v", result)
+	}
+}
+
+func TestDiagnoseIncludesOnlyBoundedSupportedImages(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var payload struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content any    `json:"content"`
+			} `json:"messages"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if len(payload.Messages) != 2 {
+			t.Fatalf("unexpected messages %#v", payload.Messages)
+		}
+		content, ok := payload.Messages[1].Content.([]any)
+		if !ok || len(content) != 3 {
+			t.Fatalf("expected text and two bounded images, got %#v", payload.Messages[1].Content)
+		}
+		encoded, _ := json.Marshal(content)
+		body := string(encoded)
+		if !strings.Contains(body, `data:image/png;base64,cG5n`) || !strings.Contains(body, `data:image/jpeg;base64,anBlZw==`) || strings.Contains(body, "svg") || strings.Contains(body, "third") {
+			t.Fatalf("unexpected multimodal content %s", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"status\":\"complete\",\"confidence\":\"medium\",\"summary\":\"Read screenshot\",\"evidence\":[],\"proposal\":{\"action\":\"none\",\"repository\":\"\",\"description\":\"\",\"risks\":[],\"tests\":[]}}"}}]}`))
+	}))
+	defer server.Close()
+	attachments := []domain.IncidentAttachment{
+		{Kind: "image", MIMEType: "image/png", Data: []byte("png")},
+		{Kind: "image", MIMEType: "image/jpeg", Data: []byte("jpeg")},
+		{Kind: "image", MIMEType: "image/webp", FileName: "third", Data: []byte("third")},
+		{Kind: "image", MIMEType: "image/svg+xml", FileName: "svg", Data: []byte("svg")},
+	}
+	result, err := New(server.URL, "test", "test-model").Diagnose(context.Background(), "blank form", "repository evidence", attachments...)
+	if err != nil || result.Summary != "Read screenshot" {
+		t.Fatalf("unexpected multimodal diagnosis %#v err=%v", result, err)
 	}
 }
 

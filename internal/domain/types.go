@@ -303,7 +303,21 @@ type InboundMessage struct {
 	Body          string
 	IsGroup       bool
 	MentionedJIDs []string
+	Attachments   []IncidentAttachment
 	Timestamp     time.Time
+}
+
+type IncidentAttachment struct {
+	ID                string    `json:"id"`
+	IncidentID        string    `json:"incidentId"`
+	WhatsAppMessageID string    `json:"whatsappMessageId"`
+	Kind              string    `json:"kind"`
+	MIMEType          string    `json:"mimeType"`
+	FileName          string    `json:"fileName,omitempty"`
+	SizeBytes         int64     `json:"sizeBytes"`
+	SHA256            string    `json:"sha256"`
+	Data              []byte    `json:"-"`
+	CreatedAt         time.Time `json:"createdAt"`
 }
 
 type WhatsAppGroup struct {

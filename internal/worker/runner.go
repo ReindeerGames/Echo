@@ -574,7 +574,11 @@ func (r *Runner) analyze(ctx context.Context, job domain.Job) error {
 		_, err := r.store.SaveAnalysis(ctx, analysis)
 		return err
 	}
-	diagnosis, err := r.ai.Diagnose(ctx, incident.SourceBody, evidence)
+	attachments, err := r.store.LoadIncidentAttachments(ctx, incident.ID)
+	if err != nil {
+		return err
+	}
+	diagnosis, err := r.ai.Diagnose(ctx, incident.SourceBody, evidence, attachments...)
 	if err != nil {
 		return err
 	}

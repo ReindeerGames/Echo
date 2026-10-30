@@ -56,6 +56,13 @@ func run() error {
 	if pruned > 0 {
 		slog.Info("pruned expired assistant conversation messages", "count", pruned)
 	}
+	prunedAttachments, err := st.PruneIncidentAttachments(ctx, time.Now().UTC().Add(-cfg.Assistant.AttachmentRetention))
+	if err != nil {
+		return err
+	}
+	if prunedAttachments > 0 {
+		slog.Info("pruned expired incident attachments", "count", prunedAttachments)
+	}
 	state := runtimestate.New()
 	expectedComponents := []string{"monitor-watchdog", "worker-watchdog"}
 	if cfg.Worker.Enabled {

@@ -6,7 +6,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -23,7 +27,58 @@ import (
 	"github.com/polymorfa/hypermeow/types/events"
 	waLog "github.com/polymorfa/hypermeow/util/log"
 	"github.com/rs/zerolog"
+	"google.golang.org/protobuf/proto"
 )
+
+const maxIncidentImageBytes = 5 << 20
+
+var errIncidentImageTooLarge = errors.New("incident image exceeds byte limit")
+
+type boundedMediaFile struct {
+	*os.File
+	max int64
+}
+
+func (f *boundedMediaFile) Write(data []byte) (int, error) {
+	position, err := f.Seek(0, io.SeekCurrent)
+	if err != nil {
+		return 0, err
+	}
+	return writeBounded(data, position, f.max, f.File.Write)
+}
+
+func (f *boundedMediaFile) WriteAt(data []byte, offset int64) (int, error) {
+	return writeBounded(data, offset, f.max, func(value []byte) (int, error) {
+		return f.File.WriteAt(value, offset)
+	})
+}
+
+func (f *boundedMediaFile) Truncate(size int64) error {
+	if size > f.max {
+		return errIncidentImageTooLarge
+	}
+	return f.File.Truncate(size)
+}
+
+func writeBounded(data []byte, offset, limit int64, write func([]byte) (int, error)) (int, error) {
+	remaining := limit - offset
+	if remaining <= 0 {
+		return 0, errIncidentImageTooLarge
+	}
+	if int64(len(data)) <= remaining {
+		return write(data)
+	}
+	written, err := write(data[:remaining])
+	if err != nil {
+		return written, err
+	}
+	return written, errIncidentImageTooLarge
+}
+
+type inboundEnvelope struct {
+	message domain.InboundMessage
+	media   *waE2E.Message
+}
 
 type Gateway struct {
 	core      *store.Store
@@ -32,13 +87,13 @@ type Gateway struct {
 	dsn       string
 	client    *whatsmeow.Client
 	container *mdbstore.Container
-	messages  chan domain.InboundMessage
+	messages  chan inboundEnvelope
 	pairing   chan struct{}
 	mu        sync.RWMutex
 }
 
 func New(core *store.Store, workflows *workflow.Service, state *runtimestate.State, dsn string) *Gateway {
-	return &Gateway{core: core, workflows: workflows, runtime: state, dsn: dsn, messages: make(chan domain.InboundMessage, 512), pairing: make(chan struct{}, 1)}
+	return &Gateway{core: core, workflows: workflows, runtime: state, dsn: dsn, messages: make(chan inboundEnvelope, 512), pairing: make(chan struct{}, 1)}
 }
 
 func (g *Gateway) RequestPairing() error {
@@ -246,11 +301,19 @@ func (g *Gateway) handleEvent(raw any) {
 		if msg.Timestamp.IsZero() {
 			msg.Timestamp = time.Now().UTC()
 		}
-		if msg.IsGroup && strings.TrimSpace(msg.Body) == "" {
+		hasImage := hasIncidentImageCandidate(evt.Message)
+		if msg.IsGroup && strings.TrimSpace(msg.Body) == "" && !hasImage {
 			return
 		}
+		if msg.IsGroup && strings.TrimSpace(msg.Body) == "" {
+			msg.Body = "Image evidence attached from WhatsApp."
+		}
+		envelope := inboundEnvelope{message: msg}
+		if hasImage {
+			envelope.media = proto.Clone(evt.Message).(*waE2E.Message)
+		}
 		select {
-		case g.messages <- msg:
+		case g.messages <- envelope:
 		default:
 			slog.Error("WhatsApp inbound queue full", "message_id", msg.MessageID)
 			_ = g.core.Audit(context.Background(), "system", "gateway", "message.dropped", "whatsapp_message", msg.MessageID, "failed", map[string]any{"reason": "inbound queue full"})
@@ -263,7 +326,18 @@ func (g *Gateway) consumeInbound(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case msg := <-g.messages:
+		case envelope := <-g.messages:
+			msg := envelope.message
+			if envelope.media != nil {
+				attachment, err := g.downloadIncidentImage(ctx, msg.MessageID, envelope.media)
+				if err != nil {
+					slog.Warn("discard WhatsApp incident image", "error", err, "message_id", msg.MessageID)
+					msg.Body += " The attached image could not be retained safely."
+					_ = g.core.Audit(ctx, "system", "gateway", "attachment.rejected", "whatsapp_message", msg.MessageID, "denied", map[string]any{"reason": attachmentErrorCategory(err)})
+				} else {
+					msg.Attachments = append(msg.Attachments, attachment)
+				}
+			}
 			if msg.IsGroup {
 				incident, created, err := g.workflows.ReceiveGroupReport(ctx, g.deviceJIDs(), msg)
 				if err != nil {
@@ -290,6 +364,134 @@ func (g *Gateway) consumeInbound(ctx context.Context) error {
 				}
 			}
 		}
+	}
+}
+
+func (g *Gateway) downloadIncidentImage(ctx context.Context, messageID string, msg *waE2E.Message) (domain.IncidentAttachment, error) {
+	mimeType, fileName, declaredSize, ok := incidentImageMetadata(msg)
+	if !ok {
+		return domain.IncidentAttachment{}, errors.New("unsupported media type")
+	}
+	if declaredSize <= 0 || declaredSize > maxIncidentImageBytes {
+		return domain.IncidentAttachment{}, errors.New("image size exceeds limit")
+	}
+	g.mu.RLock()
+	client := g.client
+	g.mu.RUnlock()
+	if client == nil {
+		return domain.IncidentAttachment{}, errors.New("WhatsApp client unavailable")
+	}
+	downloadCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	temporary, err := os.CreateTemp("", "echo-whatsapp-image-*")
+	if err != nil {
+		return domain.IncidentAttachment{}, fmt.Errorf("prepare image download: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryName)
+	}()
+	file := &boundedMediaFile{File: temporary, max: maxIncidentImageBytes + 64}
+	var downloadable whatsmeow.DownloadableMessage
+	if image := msg.GetImageMessage(); image != nil {
+		downloadable = image
+	} else {
+		downloadable = msg.GetDocumentMessage()
+	}
+	if downloadable == nil {
+		return domain.IncidentAttachment{}, errors.New("unsupported media type")
+	}
+	err = client.DownloadToFile(downloadCtx, downloadable, file)
+	if err != nil {
+		if errors.Is(err, errIncidentImageTooLarge) {
+			return domain.IncidentAttachment{}, errors.New("downloaded image size exceeds limit")
+		}
+		return domain.IncidentAttachment{}, fmt.Errorf("download image: %w", err)
+	}
+	if _, err = temporary.Seek(0, io.SeekStart); err != nil {
+		return domain.IncidentAttachment{}, fmt.Errorf("read downloaded image: %w", err)
+	}
+	data, err := io.ReadAll(io.LimitReader(temporary, maxIncidentImageBytes+1))
+	if err != nil {
+		return domain.IncidentAttachment{}, fmt.Errorf("read downloaded image: %w", err)
+	}
+	if len(data) == 0 || len(data) > maxIncidentImageBytes {
+		return domain.IncidentAttachment{}, errors.New("downloaded image size exceeds limit")
+	}
+	detected, err := verifiedIncidentImageMIME(mimeType, data)
+	if err != nil {
+		return domain.IncidentAttachment{}, err
+	}
+	digest := sha256.Sum256(data)
+	return domain.IncidentAttachment{WhatsAppMessageID: messageID, Kind: "image", MIMEType: detected, FileName: safeAttachmentName(fileName), SizeBytes: int64(len(data)), SHA256: hex.EncodeToString(digest[:]), Data: data}, nil
+}
+
+func hasIncidentImageCandidate(msg *waE2E.Message) bool {
+	if image := msg.GetImageMessage(); image != nil {
+		return true
+	}
+	if document := msg.GetDocumentMessage(); document != nil && strings.HasPrefix(strings.ToLower(strings.TrimSpace(document.GetMimetype())), "image/") {
+		return true
+	}
+	return false
+}
+
+func incidentImageMetadata(msg *waE2E.Message) (string, string, int64, bool) {
+	if image := msg.GetImageMessage(); image != nil {
+		mimeType := strings.ToLower(strings.TrimSpace(image.GetMimetype()))
+		return mimeType, "", int64(image.GetFileLength()), allowedIncidentImageMIME(mimeType)
+	}
+	if document := msg.GetDocumentMessage(); document != nil {
+		mimeType := strings.ToLower(strings.TrimSpace(document.GetMimetype()))
+		return mimeType, document.GetFileName(), int64(document.GetFileLength()), allowedIncidentImageMIME(mimeType)
+	}
+	return "", "", 0, false
+}
+
+func allowedIncidentImageMIME(value string) bool {
+	return value == "image/jpeg" || value == "image/png" || value == "image/webp"
+}
+
+func verifiedIncidentImageMIME(declared string, data []byte) (string, error) {
+	detected := strings.ToLower(strings.TrimSpace(http.DetectContentType(data)))
+	declared = strings.ToLower(strings.TrimSpace(declared))
+	if !allowedIncidentImageMIME(detected) || declared == "" || detected != declared {
+		return "", errors.New("image content type mismatch")
+	}
+	return detected, nil
+}
+
+func safeAttachmentName(value string) string {
+	value = strings.TrimSpace(filepath.Base(value))
+	value = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return -1
+		}
+		return r
+	}, value)
+	return truncateAttachmentName(value, 255)
+}
+
+func truncateAttachmentName(value string, limit int) string {
+	runes := []rune(value)
+	if len(runes) <= limit {
+		return value
+	}
+	return string(runes[:limit])
+}
+
+func attachmentErrorCategory(err error) string {
+	value := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(value, "size"):
+		return "size_limit"
+	case strings.Contains(value, "type"), strings.Contains(value, "mime"):
+		return "unsupported_type"
+	case strings.Contains(value, "download"):
+		return "download_failed"
+	default:
+		return "unavailable"
 	}
 }
 
