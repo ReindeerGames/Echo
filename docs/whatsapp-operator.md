@@ -6,7 +6,7 @@ Selecting an owner in the control plane atomically queues a private confirmation
 
 Under **WhatsApp → Daily briefing**, the owner can opt into one automatic brief at an explicit local time and IANA timezone. Echo skips rendering while the schedule is disabled, before the local due time, or while no owner is configured. The outbox message, audit event, and last-sent local date commit atomically, so scheduler retries and restarts cannot send two briefs for the same local day. Immediate alerts are independent of this schedule.
 
-When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only thirteen function tools: current status, open alerts, service search, service detail, worker queue, deployment records, project listing, joined project health, bounded GitHub estate health, one live read-only GitHub repository status, safe recent activity, recent incident search, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, general web, code execution, deployment mutation, or other write tool.
+When OpenAI is configured, requests outside the deterministic command set use the Responses API with `store: false`. Echo keeps a bounded local conversation history and gives the model only fourteen function tools: current status, open alerts, service search, service detail, worker queue, deployment records, project listing, estate coverage gaps, joined project health, bounded GitHub estate health, one live read-only GitHub repository status, safe recent activity, recent incident search, and incident detail. Tool outputs, duration, success or failure, and the final reply are recorded locally for review under **Assistant**. There is no shell, SSH, general web, code execution, deployment mutation, or other write tool.
 
 Service detail includes observer freshness, evidence age, alert fingerprints and times, plus a strict allowlist of useful operational counters such as disk, memory, load, HTTP latency, container lifecycle, health, restarts, and heartbeat policy. Arbitrary detail keys and free-form failure text are never sent to the model, so a custom observer cannot smuggle credentials or unrestricted logs through monitoring evidence. Evidence objects above 64 KiB are omitted. Tool collections are bounded and declare when results were truncated.
 
@@ -14,6 +14,7 @@ Supported requests include:
 
 - `brief`, `daily brief`, or “good morning” for runtime health, monitoring coverage, open alerts and incidents, deployments needing attention, and bounded GitHub workflow health
 - `status` or “how are things?” for the estate summary
+- `coverage`, `setup status`, or “what isn't monitored?” for projects missing repository, group, service, heartbeat-policy, or fresh observer coverage
 - `activity`, `audit`, or “what happened?” for recent action/outcome/resource/time audit fields without actors or metadata
 - `alerts` or “anything wrong?” for open runtime conditions
 - `services` for the operations catalogue

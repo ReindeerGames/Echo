@@ -20,6 +20,7 @@ import (
 type fakeReader struct {
 	dashboard   domain.Dashboard
 	projects    []domain.Project
+	groups      []domain.GroupBinding
 	repos       []domain.Repository
 	services    []domain.Service
 	alerts      []domain.ServiceAlert
@@ -84,6 +85,9 @@ func (fakeToolModel) RespondWithTools(ctx context.Context, instructions string, 
 
 func (f fakeReader) Dashboard(context.Context) (domain.Dashboard, error)    { return f.dashboard, nil }
 func (f fakeReader) ListProjects(context.Context) ([]domain.Project, error) { return f.projects, nil }
+func (f fakeReader) ListGroupBindings(context.Context) ([]domain.GroupBinding, error) {
+	return f.groups, nil
+}
 func (f fakeReader) ListRepositories(context.Context, string) ([]domain.Repository, error) {
 	return f.repos, nil
 }
@@ -145,26 +149,71 @@ func (f fakeReader) ListAudit(context.Context, int) ([]domain.AuditEvent, error)
 
 func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 	tests := map[string]string{
-		"anything wrong?":     "alerts",
-		"good morning":        "brief",
-		"github status":       "repository_overview",
-		"what happened?":      "activity",
-		"how are things":      "status",
-		"service nudgie-web":  "service",
-		"what can you do?":    "help",
-		"list projects":       "projects",
-		"project invoices":    "project",
-		"incident inc_123456": "incident",
-		"failed jobs":         "jobs",
-		"repo invoices":       "repository",
-		"what is deployed?":   "deployments",
-		"open incidents":      "incidents",
+		"anything wrong?":       "alerts",
+		"good morning":          "brief",
+		"github status":         "repository_overview",
+		"what isn't monitored?": "coverage",
+		"what happened?":        "activity",
+		"how are things":        "status",
+		"service nudgie-web":    "service",
+		"what can you do?":      "help",
+		"list projects":         "projects",
+		"project invoices":      "project",
+		"incident inc_123456":   "incident",
+		"failed jobs":           "jobs",
+		"repo invoices":         "repository",
+		"what is deployed?":     "deployments",
+		"open incidents":        "incidents",
 	}
 	for input, expected := range tests {
 		got, _ := classify(input)
 		if got != expected {
 			t.Errorf("classify %q = %q, want %q", input, got, expected)
 		}
+	}
+}
+
+func TestEstateCoverageFindsRelationshipAndMonitoringGaps(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	reader := fakeReader{
+		projects: []domain.Project{
+			{ID: "prj_ready", Key: "ready", Name: "Ready", Enabled: true},
+			{ID: "prj_gaps", Key: "gaps", Name: "Gaps", Enabled: true},
+			{ID: "prj_disabled", Key: "disabled", Name: "Disabled", Enabled: false},
+		},
+		repos: []domain.Repository{
+			{ID: "repo_ready", ProjectID: "prj_ready", Enabled: true},
+			{ID: "repo_disabled", ProjectID: "prj_gaps", Enabled: false},
+		},
+		groups: []domain.GroupBinding{
+			{ID: "grp_ready", ProjectID: "prj_ready", GroupName: "Secret client room", GroupJID: "120363000000@g.us", Enabled: true},
+			{ID: "grp_disabled", ProjectID: "prj_gaps", Enabled: false},
+		},
+		services: []domain.Service{
+			{ID: "svc_ready", ProjectID: "prj_ready", Enabled: true, HeartbeatTimeoutSeconds: 120},
+			{ID: "svc_stale", ProjectID: "prj_gaps", Enabled: true, HeartbeatTimeoutSeconds: 60},
+			{ID: "svc_missing", ProjectID: "prj_gaps", Enabled: true, HeartbeatTimeoutSeconds: 60},
+			{ID: "svc_no_policy", ProjectID: "prj_gaps", Enabled: true},
+		},
+		events: []domain.MonitorEvent{
+			{ServiceID: "svc_ready", Source: "observer", Status: "healthy", ObservedAt: now.Add(-time.Minute)},
+			{ServiceID: "svc_stale", Source: "observer", Status: "healthy", ObservedAt: now.Add(-2 * time.Minute)},
+		},
+	}
+	responder := New(reader)
+	responder.now = func() time.Time { return now }
+
+	answer, intent, err := responder.Answer(context.Background(), "what isn't monitored?")
+	if err != nil || intent != "coverage" || !containsAll(answer, "Estate coverage · 2 enabled project(s) · 1 with gaps", "READY · Ready (ready) · 1 repo(s) · 1 group(s) · 1 service(s) · 1 fresh", "GAPS · Gaps (gaps) · no enabled repository; no enabled WhatsApp group; 1 stale service; 1 service without evidence; 1 service without heartbeat policy") {
+		t.Fatalf("unexpected coverage answer intent=%s body=%s err=%v", intent, answer, err)
+	}
+	if strings.Contains(answer, "Disabled") {
+		t.Fatalf("disabled project leaked into coverage answer: %s", answer)
+	}
+
+	output, err := responder.executeTool(context.Background(), "get_estate_coverage", json.RawMessage(`{}`))
+	if err != nil || !containsAll(output, `"enabled_project_count":2`, `"projects_with_gaps":1`, `"project":"Gaps"`, `"stale":1`, `"missing":1`, `"without_heartbeat_policy":1`, `"no enabled repository"`) || strings.Contains(output, `"Disabled"`) || strings.Contains(output, "Secret client room") || strings.Contains(output, "120363000000") {
+		t.Fatalf("unexpected coverage tool output=%s err=%v", output, err)
 	}
 }
 
