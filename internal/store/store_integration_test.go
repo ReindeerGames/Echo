@@ -477,6 +477,10 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 	if err != nil || len(result.Transitions) != 1 || result.Transitions[0].Kind != "opened" {
 		t.Fatalf("open alert: result=%#v err=%v", result, err)
 	}
+	var openingBody string
+	if err := st.db.QueryRowContext(ctx, `SELECT body FROM echo_whatsapp_outbox ORDER BY created_at DESC LIMIT 1`).Scan(&openingBody); err != nil || !strings.Contains(openingBody, `service Web`) || !strings.Contains(openingBody, `investigate Web`) {
+		t.Fatalf("alert notification did not guide investigation: body=%q err=%v", openingBody, err)
+	}
 	duplicate, err := st.RecordMonitorEvent(ctx, unhealthy, "owner@s.whatsapp.net")
 	if err != nil || !duplicate.Duplicate || len(duplicate.Transitions) != 0 {
 		t.Fatalf("deduplicate event: result=%#v err=%v", duplicate, err)

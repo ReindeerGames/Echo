@@ -699,6 +699,9 @@ func enqueueMonitorTransitions(ctx context.Context, tx *sql.Tx, ownerJID string,
 		}
 		alert := transition.Alert
 		body := fmt.Sprintf("Echo alert %s · %s\n%s (%s)\n%s", strings.ToUpper(transition.Kind), strings.ToUpper(alert.Severity), alert.ServiceName, alert.Fingerprint, alert.Summary)
+		if transition.Kind == "opened" || transition.Kind == "reopened" {
+			body += fmt.Sprintf("\n\nReply “service %s” for current evidence, or “investigate %s” for correlated diagnosis when AI tools are enabled.", alert.ServiceName, alert.ServiceName)
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO echo_whatsapp_outbox(id,chat_jid,body) VALUES(?,?,?)`, id.New("out"), ownerJID, body); err != nil {
 			return err
 		}
