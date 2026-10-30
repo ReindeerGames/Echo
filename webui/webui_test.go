@@ -63,6 +63,18 @@ func TestOpenAISettingsUIIsExposed(t *testing.T) {
 	}
 }
 
+func TestWhatsAppDeliveryFailuresAreVisible(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"pendingWhatsAppMessages", "deadWhatsAppMessages", "dead outbound messages"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("WhatsApp delivery health is missing %q", expected)
+		}
+	}
+}
+
 func TestIncidentActionFlowExplainsRepositoryGateAndApproval(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

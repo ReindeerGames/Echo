@@ -248,12 +248,14 @@ type AuditEvent struct {
 }
 
 type Dashboard struct {
-	OpenIncidents     int `json:"openIncidents"`
-	OpenAlerts        int `json:"openAlerts"`
-	PendingApprovals  int `json:"pendingApprovals"`
-	RunningJobs       int `json:"runningJobs"`
-	FailedDeployments int `json:"failedDeployments"`
-	EnabledProjects   int `json:"enabledProjects"`
+	OpenIncidents           int `json:"openIncidents"`
+	OpenAlerts              int `json:"openAlerts"`
+	PendingApprovals        int `json:"pendingApprovals"`
+	RunningJobs             int `json:"runningJobs"`
+	FailedDeployments       int `json:"failedDeployments"`
+	EnabledProjects         int `json:"enabledProjects"`
+	PendingWhatsAppMessages int `json:"pendingWhatsAppMessages"`
+	DeadWhatsAppMessages    int `json:"deadWhatsAppMessages"`
 }
 
 type InboundMessage struct {

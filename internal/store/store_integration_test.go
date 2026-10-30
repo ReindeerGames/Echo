@@ -158,7 +158,7 @@ func TestMariaDBMonitorEventLifecycle(t *testing.T) {
 		t.Fatalf("list alerts: items=%#v err=%v", alerts, err)
 	}
 	dashboard, err := st.Dashboard(ctx)
-	if err != nil || dashboard.OpenAlerts != 1 {
+	if err != nil || dashboard.OpenAlerts != 1 || dashboard.PendingWhatsAppMessages != 3 || dashboard.DeadWhatsAppMessages != 0 {
 		t.Fatalf("dashboard alert count: item=%#v err=%v", dashboard, err)
 	}
 	var notifications int

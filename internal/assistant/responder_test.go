@@ -85,14 +85,14 @@ func TestClassifyNaturalOperatorQuestions(t *testing.T) {
 func TestStatusAndServiceAnswersUseStoredEvidence(t *testing.T) {
 	now := time.Now().UTC()
 	reader := fakeReader{
-		dashboard: domain.Dashboard{OpenAlerts: 1, OpenIncidents: 2, PendingApprovals: 1},
+		dashboard: domain.Dashboard{OpenAlerts: 1, OpenIncidents: 2, PendingApprovals: 1, PendingWhatsAppMessages: 3, DeadWhatsAppMessages: 1},
 		services:  []domain.Service{{ID: "svc_1", Key: "nudgie-web", Name: "Nudgie web", ProjectName: "Nudgie", Kind: "application", Criticality: "high", Enabled: true}},
 		alerts:    []domain.ServiceAlert{{ServiceID: "svc_1", ServiceName: "Nudgie web", Severity: "critical", Summary: "Health check failed"}},
 		events:    []domain.MonitorEvent{{ServiceID: "svc_1", ServiceName: "Nudgie web", Status: "unhealthy", Source: "docker", Summary: "Health check failed", ObservedAt: now}},
 	}
 	responder := New(reader)
 	status, intent, err := responder.Answer(context.Background(), "status")
-	if err != nil || intent != "status" || !containsAll(status, "1 runtime alert", "Open incidents: 2") {
+	if err != nil || intent != "status" || !containsAll(status, "1 runtime alert", "Open incidents: 2", "WhatsApp delivery: 3 pending · 1 dead", "needs attention") {
 		t.Fatalf("unexpected status answer intent=%s err=%v body=%s", intent, err, status)
 	}
 	service, intent, err := responder.Answer(context.Background(), "service nudgie-web")

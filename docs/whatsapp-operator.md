@@ -24,4 +24,4 @@ Local owner messages and replies are retained for `ECHO_ASSISTANT_RETENTION` (30
 
 Questions never authorize mutation. Approval commands remain deliberately narrow: `approve <code>` or `reject <code>` resolves only the pending immutable action bound to that one-time code. An unrecognized request cannot run a shell command, contact a production host, execute repository code, or infer permission to change infrastructure.
 
-The deterministic commands remain available when AI is disabled or unavailable. Both paths preserve the separate exact-action approval boundary.
+The `status` command and its natural-language equivalent include pending and dead WhatsApp delivery counts. The same counts are visible on Overview and System, which remains useful when WhatsApp itself cannot deliver the warning. The deterministic commands remain available when AI is disabled or unavailable. Both paths preserve the separate exact-action approval boundary.

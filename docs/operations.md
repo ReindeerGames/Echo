@@ -7,6 +7,8 @@
 
 The WhatsApp, AI, GitHub, worker, deployment, and audit states are visible in the authenticated System UI.
 
+The Overview and System screens also show pending and dead WhatsApp outbox counts. A small pending count can be normal while the gateway sends; a growing pending count or any dead message means a notification or assistant reply has not been confirmed after bounded retries. Check the gateway connection and logs before intervening. Echo does not automatically replay dead messages because a network failure can be ambiguous and blind replay could duplicate a message.
+
 For every observer-managed service, configure a heartbeat timeout at least twice its reporting interval. An `observer-silent` alert means Echo is running but has stopped receiving evidence from that service's observer; check the observer process, network path, webhook secret, and the target health endpoint. Do not treat silence as proof that the workload itself is down.
 
 For host-resource monitoring, run `echo-observer` directly under the host's service manager as an unprivileged account. A containerized observer measures the namespaces and filesystem presented to that container. Keep host and application probes as separate Echo services so one healthy signal cannot clear the other's alert.

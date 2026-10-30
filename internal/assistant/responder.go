@@ -103,7 +103,7 @@ func (r *Responder) executeTool(ctx context.Context, name string, raw json.RawMe
 				enabled++
 			}
 		}
-		return marshal(map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "running_jobs": dashboard.RunningJobs, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled})
+		return marshal(map[string]any{"open_alerts": dashboard.OpenAlerts, "open_incidents": dashboard.OpenIncidents, "pending_approvals": dashboard.PendingApprovals, "running_jobs": dashboard.RunningJobs, "failed_deployments": dashboard.FailedDeployments, "enabled_projects": dashboard.EnabledProjects, "enabled_services": enabled, "pending_whatsapp_messages": dashboard.PendingWhatsAppMessages, "dead_whatsapp_messages": dashboard.DeadWhatsAppMessages})
 	case "get_open_alerts":
 		alerts, err := r.reader.ListServiceAlerts(ctx, "open")
 		if err != nil {
@@ -500,7 +500,11 @@ func (r *Responder) status(ctx context.Context) (string, error) {
 	if dashboard.OpenAlerts > 0 {
 		state = fmt.Sprintf("%d runtime alert(s) need attention.", dashboard.OpenAlerts)
 	}
-	return fmt.Sprintf("Echo operational status\n%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nRunning jobs: %d\nFailed deployments: %d", state, enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.RunningJobs, dashboard.FailedDeployments), nil
+	delivery := fmt.Sprintf("WhatsApp delivery: %d pending · %d dead", dashboard.PendingWhatsAppMessages, dashboard.DeadWhatsAppMessages)
+	if dashboard.DeadWhatsAppMessages > 0 {
+		delivery += " · needs attention in the control plane"
+	}
+	return fmt.Sprintf("Echo operational status\n%s\n\nServices: %d enabled\nOpen incidents: %d\nPending approvals: %d\nRunning jobs: %d\nFailed deployments: %d\n%s", state, enabled, dashboard.OpenIncidents, dashboard.PendingApprovals, dashboard.RunningJobs, dashboard.FailedDeployments, delivery), nil
 }
 
 func (r *Responder) alerts(ctx context.Context) (string, error) {
