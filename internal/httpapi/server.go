@@ -32,6 +32,7 @@ import (
 type Server struct {
 	cfg         config.Config
 	store       *store.Store
+	readiness   readinessStore
 	workflows   *workflow.Service
 	owners      *owner.Service
 	runtime     *runtimestate.State
@@ -43,6 +44,11 @@ type Server struct {
 	http        *http.Server
 }
 
+type readinessStore interface {
+	Ping(context.Context) error
+	SchemaStatus(context.Context) (domain.SchemaStatus, error)
+}
+
 type WhatsAppGroupLister interface {
 	ListGroups(context.Context) ([]domain.WhatsAppGroup, error)
 }
@@ -52,7 +58,7 @@ type WhatsAppPairer interface {
 }
 
 func New(cfg config.Config, st *store.Store, workflows *workflow.Service, owners *owner.Service, state *runtimestate.State, github *githubapp.Client, aiClient *ai.Client, groups WhatsAppGroupLister) *Server {
-	s := &Server{cfg: cfg, store: st, workflows: workflows, owners: owners, runtime: state, github: github, ai: aiClient, groupLister: groups, auth: newAuth(cfg.Security.AdminToken, cfg.Security.SessionSecret, cfg.Security.CookieSecure, cfg.Security.DevMode)}
+	s := &Server{cfg: cfg, store: st, readiness: st, workflows: workflows, owners: owners, runtime: state, github: github, ai: aiClient, groupLister: groups, auth: newAuth(cfg.Security.AdminToken, cfg.Security.SessionSecret, cfg.Security.CookieSecure, cfg.Security.DevMode)}
 	if pairer, ok := groups.(WhatsAppPairer); ok {
 		s.pairer = pairer
 	}
@@ -80,6 +86,7 @@ func (s *Server) routes(mux *http.ServeMux) {
 	protected := http.NewServeMux()
 	protected.HandleFunc("POST /api/v1/auth/logout", s.auth.logout)
 	protected.HandleFunc("GET /api/v1/bootstrap", s.bootstrap)
+	protected.HandleFunc("GET /api/v1/runtime", s.runtimeStatus)
 	protected.HandleFunc("GET /api/v1/dashboard", s.dashboard)
 	protected.HandleFunc("GET /api/v1/settings/github", s.githubSettings)
 	protected.HandleFunc("PUT /api/v1/settings/github", s.githubSettings)
@@ -127,11 +134,60 @@ func (s *Server) health(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
-	if err := s.store.Ping(ctx); err != nil {
-		writeError(w, http.StatusServiceUnavailable, "database_unavailable", "core database is unavailable")
-		return
+	checks := map[string]any{"database": "unavailable", "schema": "unavailable", "components": map[string]string{}}
+	ready := true
+	if s.readiness == nil || s.readiness.Ping(ctx) != nil {
+		ready = false
+	} else {
+		checks["database"] = "ready"
+		schema, err := s.readiness.SchemaStatus(ctx)
+		if err != nil {
+			ready = false
+		} else {
+			checks["schema"] = schema
+			if !schema.Current {
+				ready = false
+			}
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ready"})
+	componentReady := false
+	if s.runtime != nil {
+		var componentChecks map[string]string
+		componentReady, componentChecks = s.runtime.ComponentReadiness(s.expectedComponents())
+		checks["components"] = componentChecks
+	}
+	if !componentReady {
+		ready = false
+	}
+	status := http.StatusOK
+	state := "ready"
+	if !ready {
+		status = http.StatusServiceUnavailable
+		state = "not_ready"
+	}
+	writeJSON(w, status, map[string]any{"status": state, "checks": checks})
+}
+
+func (s *Server) expectedComponents() []string {
+	expected := []string{"monitor-watchdog", "worker-watchdog"}
+	if s.cfg.Worker.Enabled {
+		expected = append(expected, "worker")
+	}
+	if s.cfg.WhatsApp.Enabled {
+		expected = append(expected, "whatsapp-gateway")
+	}
+	return expected
+}
+
+func (s *Server) runtimeStatus(w http.ResponseWriter, _ *http.Request) {
+	components := []runtimestate.ComponentState{}
+	ready := false
+	checks := map[string]string{}
+	if s.runtime != nil {
+		components = s.runtime.Components()
+		ready, checks = s.runtime.ComponentReadiness(s.expectedComponents())
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ready": ready, "checks": checks, "components": components})
 }
 func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 	githubConfigured := false

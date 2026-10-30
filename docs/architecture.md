@@ -38,6 +38,12 @@ The patch path uses GitHub's blob/tree/commit/ref APIs. It creates one new commi
 
 MariaDB deadlocks and connection failure are allowed to surface to job retry logic; external mutations must carry enough identifiers to be reconciled before a retry.
 
+## Runtime supervision and readiness
+
+The all-in-one process supervises every required long-running loop. The worker, worker-health watchdog, monitor-heartbeat watchdog, and enabled WhatsApp gateway publish a small in-memory state machine and restart with bounded exponential backoff after an unexpected return. Raw errors remain in structured server logs; the authenticated runtime API exposes only a fixed safe detail and transition time.
+
+`/healthz` proves only that the HTTP process can answer. `/readyz` additionally requires core MariaDB reachability, agreement between applied and embedded migrations, and a `running` state from every component enabled by configuration. Container orchestration therefore stops routing traffic when Echo is alive but operationally incomplete.
+
 ## Deployment verification
 
 Dispatch and merge are not verification. In explicit-environment mode, a deployment stays `queued` until a GitHub `workflow_run` event with a valid HMAC signature matches repository, workflow, and artifact SHA. In repository-native mode, the approved worker polls GitHub for push workflows bound to the resulting default-branch commit. Only verified success resolves the incident; failure moves it to `failed` and notifies the owner.

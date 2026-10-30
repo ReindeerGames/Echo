@@ -14,6 +14,64 @@ import (
 	"github.com/ReindeerGames/echo/internal/monitor"
 )
 
+func TestMariaDBSchemaStatusDetectsDrift(t *testing.T) {
+	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
+	if dsn == "" {
+		t.Skip("ECHO_TEST_CORE_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := Open(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	status, err := st.SchemaStatus(ctx)
+	if err != nil || !status.Current || status.Missing != 0 || status.Expected != status.Applied {
+		t.Fatalf("unexpected current schema status: status=%#v err=%v", status, err)
+	}
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version := ""
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") && entry.Name() > version {
+			version = entry.Name()
+		}
+	}
+	if version == "" {
+		t.Fatal("no embedded migration found")
+	}
+	if _, err := st.db.ExecContext(ctx, `DELETE FROM echo_schema_migrations WHERE version=?`, version); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := st.db.ExecContext(context.Background(), `INSERT IGNORE INTO echo_schema_migrations (version) VALUES (?)`, version); err != nil {
+			t.Errorf("restore migration record: %v", err)
+		}
+	}()
+	status, err = st.SchemaStatus(ctx)
+	if err != nil || status.Current || status.Missing != 1 || status.Applied != status.Expected-1 {
+		t.Fatalf("schema drift not detected: status=%#v err=%v", status, err)
+	}
+	if _, err := st.db.ExecContext(ctx, `INSERT IGNORE INTO echo_schema_migrations (version) VALUES (?)`, version); err != nil {
+		t.Fatal(err)
+	}
+	const futureVersion = "999_future_test.sql"
+	if _, err := st.db.ExecContext(ctx, `INSERT INTO echo_schema_migrations (version) VALUES (?)`, futureVersion); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if _, err := st.db.ExecContext(context.Background(), `DELETE FROM echo_schema_migrations WHERE version=?`, futureVersion); err != nil {
+			t.Errorf("remove future migration record: %v", err)
+		}
+	}()
+	status, err = st.SchemaStatus(ctx)
+	if err != nil || status.Current || status.Missing != 0 || status.Unexpected != 1 {
+		t.Fatalf("unexpected migration not detected: status=%#v err=%v", status, err)
+	}
+}
+
 func TestMariaDBIncidentIsIdempotent(t *testing.T) {
 	dsn := os.Getenv("ECHO_TEST_CORE_DSN")
 	if dsn == "" {

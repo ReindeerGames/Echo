@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/domain"
@@ -39,7 +38,9 @@ func NewWatchdog(store HeartbeatStore, owners OwnerLookup, interval time.Duratio
 }
 
 func (w *Watchdog) Run(ctx context.Context) error {
-	w.sweepAndLog(ctx)
+	if _, err := w.Sweep(ctx, w.now()); err != nil {
+		return err
+	}
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -47,14 +48,10 @@ func (w *Watchdog) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			w.sweepAndLog(ctx)
+			if _, err := w.Sweep(ctx, w.now()); err != nil {
+				return err
+			}
 		}
-	}
-}
-
-func (w *Watchdog) sweepAndLog(ctx context.Context) {
-	if _, err := w.Sweep(ctx, w.now()); err != nil && ctx.Err() == nil {
-		slog.Error("monitor heartbeat watchdog sweep failed", "error", err)
 	}
 }
 

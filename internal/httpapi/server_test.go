@@ -5,6 +5,8 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -13,6 +15,85 @@ import (
 	"github.com/ReindeerGames/echo/internal/domain"
 	runtimestate "github.com/ReindeerGames/echo/internal/runtime"
 )
+
+type fakeReadinessStore struct {
+	pingErr error
+	schema  domain.SchemaStatus
+	err     error
+}
+
+func (f fakeReadinessStore) Ping(context.Context) error { return f.pingErr }
+func (f fakeReadinessStore) SchemaStatus(context.Context) (domain.SchemaStatus, error) {
+	return f.schema, f.err
+}
+
+func TestReadinessRequiresDatabaseSchemaAndComponents(t *testing.T) {
+	state := runtimestate.New()
+	for _, component := range []string{"monitor-watchdog", "worker-watchdog", "worker", "whatsapp-gateway"} {
+		state.UpdateComponent(component, "running", "")
+	}
+	server := &Server{
+		cfg:       config.Config{Worker: config.Worker{Enabled: true}, WhatsApp: config.WhatsApp{Enabled: true}},
+		readiness: fakeReadinessStore{schema: domain.SchemaStatus{Current: true, Expected: 4, Applied: 4}},
+		runtime:   state,
+	}
+	response := httptest.NewRecorder()
+	server.ready(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"ready"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestReadinessFailsForMissingSchema(t *testing.T) {
+	state := runtimestate.New()
+	state.UpdateComponent("monitor-watchdog", "running", "")
+	state.UpdateComponent("worker-watchdog", "running", "")
+	server := &Server{readiness: fakeReadinessStore{schema: domain.SchemaStatus{Expected: 4, Applied: 3, Missing: 1}}, runtime: state}
+	response := httptest.NewRecorder()
+	server.ready(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"missing":1`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestReadinessFailsForStoppedComponent(t *testing.T) {
+	state := runtimestate.New()
+	state.UpdateComponent("monitor-watchdog", "error", "safe public detail")
+	state.UpdateComponent("worker-watchdog", "running", "")
+	server := &Server{readiness: fakeReadinessStore{schema: domain.SchemaStatus{Current: true}}, runtime: state}
+	response := httptest.NewRecorder()
+	server.ready(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), `"monitor-watchdog":"error"`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), "safe public detail") {
+		t.Fatal("readiness response leaked component detail")
+	}
+}
+
+func TestReadinessFailsClosedWithoutDatabaseDetails(t *testing.T) {
+	state := runtimestate.New()
+	state.UpdateComponent("monitor-watchdog", "running", "")
+	state.UpdateComponent("worker-watchdog", "running", "")
+	server := &Server{readiness: fakeReadinessStore{pingErr: errors.New("password secret rejected")}, runtime: state}
+	response := httptest.NewRecorder()
+	server.ready(response, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if response.Code != http.StatusServiceUnavailable || strings.Contains(response.Body.String(), "password secret") {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+func TestRuntimeStatusIncludesExpectedComponentsThatAreStillStarting(t *testing.T) {
+	state := runtimestate.New()
+	state.UpdateComponent("monitor-watchdog", "running", "")
+	server := &Server{cfg: config.Config{Worker: config.Worker{Enabled: true}}, runtime: state}
+	response := httptest.NewRecorder()
+	server.runtimeStatus(response, httptest.NewRequest(http.MethodGet, "/api/v1/runtime", nil))
+	body := response.Body.String()
+	if response.Code != http.StatusOK || !strings.Contains(body, `"ready":false`) || !strings.Contains(body, `"worker":"starting"`) {
+		t.Fatalf("status=%d body=%s", response.Code, body)
+	}
+}
 
 func TestVerifyGitHubSignature(t *testing.T) {
 	body := []byte(`{"action":"completed"}`)

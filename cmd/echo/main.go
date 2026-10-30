@@ -71,28 +71,16 @@ func run() error {
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.Run() }()
 	if cfg.WhatsApp.Enabled {
-		go runGatewayLoop(ctx, gateway, state)
+		go superviseComponent(ctx, state, "whatsapp-gateway", func() error { return runGatewayOnce(ctx, gateway, state) })
 	}
 	if cfg.Worker.Enabled {
 		runner := worker.New(st, githubClient, aiClient, owners, cfg.Worker.WorkspaceRoot, cfg.Worker.PollInterval, cfg.Worker.JobLease, cfg.Worker.HeartbeatInterval, cfg.Worker.MaxFileBytes)
-		go func() {
-			if err := runner.Run(ctx); err != nil {
-				slog.Error("worker stopped", "error", err)
-			}
-		}()
+		go superviseComponent(ctx, state, "worker", func() error { return runner.Run(ctx) })
 	}
 	workerWatchdog := worker.NewHealthWatchdog(st, owners, cfg.Monitor.WatchdogInterval, cfg.Worker.HeartbeatTimeout, cfg.Worker.QueueStallTimeout, cfg.Worker.Enabled)
-	go func() {
-		if err := workerWatchdog.Run(ctx); err != nil {
-			slog.Error("worker health watchdog stopped", "error", err)
-		}
-	}()
+	go superviseComponent(ctx, state, "worker-watchdog", func() error { return workerWatchdog.Run(ctx) })
 	heartbeatWatchdog := monitor.NewWatchdog(st, owners, cfg.Monitor.WatchdogInterval)
-	go func() {
-		if err := heartbeatWatchdog.Run(ctx); err != nil {
-			slog.Error("monitor heartbeat watchdog stopped", "error", err)
-		}
-	}()
+	go superviseComponent(ctx, state, "monitor-watchdog", func() error { return heartbeatWatchdog.Run(ctx) })
 
 	select {
 	case <-ctx.Done():
@@ -106,27 +94,53 @@ func run() error {
 	return server.Shutdown(shutdownCtx)
 }
 
-func runGatewayLoop(ctx context.Context, gateway *whatsapp.Gateway, state *runtimestate.State) {
+func superviseComponent(ctx context.Context, state *runtimestate.State, name string, run func() error) {
 	backoff := time.Second
 	for {
-		err := gateway.Run(ctx)
 		if ctx.Err() != nil {
+			state.UpdateComponent(name, "stopped", "shutdown requested")
 			return
+		}
+		state.UpdateComponent(name, "running", "")
+		startedAt := time.Now()
+		err := run()
+		if ctx.Err() != nil {
+			state.UpdateComponent(name, "stopped", "shutdown requested")
+			return
+		}
+		state.UpdateComponent(name, "error", "stopped unexpectedly; retry scheduled")
+		if time.Since(startedAt) >= time.Minute {
+			backoff = time.Second
 		}
 		if err != nil {
-			slog.Error("WhatsApp gateway stopped", "error", err)
-			if state.WhatsApp().Status != "unpaired" {
-				state.UpdateWhatsApp(func(s *runtimestate.WhatsAppState) { s.Status = "error"; s.LastError = err.Error() })
-			}
+			slog.Error("component stopped", "component", name, "error", err)
+		} else {
+			slog.Error("component stopped unexpectedly", "component", name)
 		}
+		timer := time.NewTimer(backoff)
 		select {
 		case <-ctx.Done():
+			timer.Stop()
+			state.UpdateComponent(name, "stopped", "shutdown requested")
 			return
-		case <-time.After(backoff):
+		case <-timer.C:
 		}
-		backoff *= 2
-		if backoff > time.Minute {
-			backoff = time.Minute
+		if backoff < time.Minute {
+			backoff *= 2
+			if backoff > time.Minute {
+				backoff = time.Minute
+			}
 		}
 	}
+}
+
+func runGatewayOnce(ctx context.Context, gateway *whatsapp.Gateway, state *runtimestate.State) error {
+	err := gateway.Run(ctx)
+	if err != nil && ctx.Err() == nil && state.WhatsApp().Status != "unpaired" {
+		state.UpdateWhatsApp(func(s *runtimestate.WhatsAppState) {
+			s.Status = "error"
+			s.LastError = err.Error()
+		})
+	}
+	return err
 }

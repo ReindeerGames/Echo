@@ -2,8 +2,10 @@
 
 ## Health endpoints
 
-- `/healthz`: process liveness
-- `/readyz`: core MariaDB reachability and migration readiness
+- `/healthz`: process liveness only
+- `/readyz`: operational readiness across core MariaDB, exact agreement between applied and embedded migrations, and every required supervised runtime loop (worker, worker watchdog, monitor watchdog, and WhatsApp gateway when enabled)
+
+The System view shows each background component's current state and last transition. Echo restarts a component with bounded exponential backoff if it exits unexpectedly; readiness remains unavailable until the component is running again. Readiness responses expose only safe state labels, while the underlying error is retained in server logs.
 
 The WhatsApp, AI, GitHub, worker, deployment, and audit states are visible in the authenticated System UI.
 

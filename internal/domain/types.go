@@ -279,6 +279,14 @@ type WorkerHealthTransition struct {
 	Health WorkerHealth `json:"health"`
 }
 
+type SchemaStatus struct {
+	Current    bool `json:"current"`
+	Expected   int  `json:"expected"`
+	Applied    int  `json:"applied"`
+	Missing    int  `json:"missing"`
+	Unexpected int  `json:"unexpected"`
+}
+
 type InboundMessage struct {
 	MessageID     string
 	ChatJID       string

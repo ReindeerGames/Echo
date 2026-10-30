@@ -3,7 +3,6 @@ package worker
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"time"
 
 	"github.com/ReindeerGames/echo/internal/domain"
@@ -36,6 +35,9 @@ func NewHealthWatchdog(store HealthStore, owners HealthOwnerLookup, interval, he
 }
 
 func (w *HealthWatchdog) Run(ctx context.Context) error {
+	if _, _, err := w.Sweep(ctx, w.now()); err != nil {
+		return err
+	}
 	ticker := time.NewTicker(w.interval)
 	defer ticker.Stop()
 	for {
@@ -43,8 +45,8 @@ func (w *HealthWatchdog) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if _, _, err := w.Sweep(ctx, w.now()); err != nil && ctx.Err() == nil {
-				slog.Error("worker health watchdog sweep failed", "error", err)
+			if _, _, err := w.Sweep(ctx, w.now()); err != nil {
+				return err
 			}
 		}
 	}

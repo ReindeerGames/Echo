@@ -116,6 +116,43 @@ func Open(ctx context.Context, dsn string) (*Store, error) {
 func (s *Store) Close() error                   { return s.db.Close() }
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
+func (s *Store) SchemaStatus(ctx context.Context) (domain.SchemaStatus, error) {
+	entries, err := migrationFS.ReadDir("migrations")
+	if err != nil {
+		return domain.SchemaStatus{}, err
+	}
+	expected := map[string]struct{}{}
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".sql") {
+			expected[entry.Name()] = struct{}{}
+		}
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT version FROM echo_schema_migrations`)
+	if err != nil {
+		return domain.SchemaStatus{}, err
+	}
+	defer rows.Close()
+	applied := 0
+	unexpected := 0
+	for rows.Next() {
+		var version string
+		if err := rows.Scan(&version); err != nil {
+			return domain.SchemaStatus{}, err
+		}
+		if _, ok := expected[version]; ok {
+			applied++
+		} else {
+			unexpected++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return domain.SchemaStatus{}, err
+	}
+	status := domain.SchemaStatus{Expected: len(expected), Applied: applied, Missing: len(expected) - applied, Unexpected: unexpected}
+	status.Current = status.Missing == 0 && status.Unexpected == 0
+	return status, nil
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `SELECT GET_LOCK('echo_core_migrations', 30)`); err != nil {
 		return fmt.Errorf("lock migrations: %w", err)

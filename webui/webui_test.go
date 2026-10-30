@@ -90,6 +90,18 @@ func TestWorkerQueueFailuresAreVisibleWithoutRetryControl(t *testing.T) {
 	}
 }
 
+func TestRuntimeComponentsAndReadinessContractAreVisible(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"/api/v1/runtime", "Runtime components", "/healthz reports process liveness", "/readyz additionally verifies", "runtimeReady", "normalizedRuntime"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("runtime health UI is missing %q", expected)
+		}
+	}
+}
+
 func TestMonitoringSupportsServiceEvidenceAndPolicyEditing(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()
