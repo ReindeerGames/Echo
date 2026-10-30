@@ -12,11 +12,15 @@ The local stack is deliberately separate from Echo's normal Compose deployment. 
 
 The local database passwords and administrator token are predictable test defaults and must never be reused in production. The stack is isolated to `docker-compose.local.yml`; MariaDB is not exposed on a host port, and the control plane binds only to loopback.
 
+The local stack keeps both `ECHO_WHATSAPP_ENABLED=false` and `ECHO_PROACTIVE_NOTIFICATIONS_ENABLED=false` by default. Starting the stack therefore cannot reconnect a persisted linked-device session. If you explicitly enable the gateway, a paired account can receive direct replies and participate in an initiated incident workflow, but background monitoring, runtime, worker-health, GitHub-workflow, and daily-brief notifications remain visible only in the control plane. This prevents a persisted test owner or pairing from receiving an alert burst when a one-shot observer stops.
+
 ## Start and pair
 
 ```bash
 make local-up
 ```
+
+The control plane and observer harness work with WhatsApp offline. For a deliberate WhatsApp test, first set `ECHO_WHATSAPP_ENABLED=true` in `.env.local`, run `make local-restart`, and pair or reconnect the dedicated test account. Leave `ECHO_PROACTIVE_NOTIFICATIONS_ENABLED=false` while testing conversations. Enable it separately only when intentionally validating background notification delivery, and mute it again before leaving a one-shot observer stopped.
 
 If the workstation's saved Docker context points somewhere else, override the client explicitly, for example `make DOCKER='docker --host=unix:///var/run/docker.sock' local-up`. Echo never guesses or rewrites Docker contexts.
 
@@ -80,6 +84,8 @@ The target starts temporary loopback-only Docker and process metadata proxies pl
 The observer resolves the Docker Unix socket from the same client endpoint selected by `DOCKER`, `DOCKER_HOST`, or the active Docker context. It refuses a TCP endpoint because the local proxy is deliberately limited to a host-local socket. This keeps the container check aligned with the engine that started the test stack without changing the workstation's Docker context.
 
 All five seeded services expect a heartbeat within 60 seconds. If the observer is intentionally left stopped, the local watchdog opens `observer-silent` warnings. Running `make local-observe` records fresh evidence and resolves those alerts.
+
+With the safe local default, those open and resolved transitions are recorded in **Monitoring** and the audit trail but are not sent to WhatsApp.
 
 To enable real analysis, open **System → OpenAI connection**, enter the OpenAI API key and model, and save. Echo validates the credentials before encrypting the key in MariaDB. Application settings override the local deterministic mock immediately without restarting the stack.
 

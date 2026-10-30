@@ -61,6 +61,8 @@ Repository ownership coverage is visible in the Monitoring catalogue and in `sta
 
 Configure the owner without handling JIDs manually: send Echo a direct WhatsApp message, open **WhatsApp** in the authenticated control plane, refresh discovered contacts, and select that contact as owner. The owner setting and a private confirmation message are committed atomically, providing an immediate end-to-end delivery check and explaining which alerts will arrive there. Echo discovers direct-message contacts only; group participants are not harvested. The selection takes effect immediately and overrides the optional `ECHO_OWNER_JID` environment fallback.
 
+Proactive WhatsApp delivery is independently controlled by `ECHO_PROACTIVE_NOTIFICATIONS_ENABLED` and defaults to enabled. Muting it keeps monitoring, runtime, worker-health, GitHub-workflow, and daily-brief evidence in Echo without queueing those unsolicited messages; direct conversations and explicitly initiated workflows still operate. The authenticated UI shows the current posture so a test or paging handover cannot silently look fully armed.
+
 Configure OpenAI under **System → OpenAI connection**. Echo validates the key and selected model, encrypts the key in MariaDB with `ECHO_ENCRYPTION_KEY`, never returns it to the browser, and applies the new provider settings immediately. `ECHO_AI_*` remains only as an optional environment fallback.
 
 ## Requirements

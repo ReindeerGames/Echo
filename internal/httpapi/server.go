@@ -31,18 +31,19 @@ import (
 )
 
 type Server struct {
-	cfg         config.Config
-	store       *store.Store
-	readiness   readinessStore
-	workflows   *workflow.Service
-	owners      *owner.Service
-	runtime     *runtimestate.State
-	groupLister WhatsAppGroupLister
-	pairer      WhatsAppPairer
-	github      *githubapp.Client
-	ai          *ai.Client
-	auth        *auth
-	http        *http.Server
+	cfg           config.Config
+	store         *store.Store
+	readiness     readinessStore
+	workflows     *workflow.Service
+	owners        *owner.Service
+	notifications owner.Lookup
+	runtime       *runtimestate.State
+	groupLister   WhatsAppGroupLister
+	pairer        WhatsAppPairer
+	github        *githubapp.Client
+	ai            *ai.Client
+	auth          *auth
+	http          *http.Server
 }
 
 type readinessStore interface {
@@ -59,7 +60,7 @@ type WhatsAppPairer interface {
 }
 
 func New(cfg config.Config, st *store.Store, workflows *workflow.Service, owners *owner.Service, state *runtimestate.State, github *githubapp.Client, aiClient *ai.Client, groups WhatsAppGroupLister) *Server {
-	s := &Server{cfg: cfg, store: st, readiness: st, workflows: workflows, owners: owners, runtime: state, github: github, ai: aiClient, groupLister: groups, auth: newAuth(cfg.Security.AdminToken, cfg.Security.SessionSecret, cfg.Security.CookieSecure, cfg.Security.DevMode)}
+	s := &Server{cfg: cfg, store: st, readiness: st, workflows: workflows, owners: owners, notifications: owner.Notifications(owners, cfg.WhatsApp.Enabled && cfg.WhatsApp.ProactiveNotifications), runtime: state, github: github, ai: aiClient, groupLister: groups, auth: newAuth(cfg.Security.AdminToken, cfg.Security.SessionSecret, cfg.Security.CookieSecure, cfg.Security.DevMode)}
 	if pairer, ok := groups.(WhatsAppPairer); ok {
 		s.pairer = pairer
 	}
@@ -226,7 +227,7 @@ func (s *Server) bootstrap(w http.ResponseWriter, r *http.Request) {
 		status, aiErr := s.ai.Status(r.Context())
 		aiConfigured = aiErr == nil && status.Configured
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"actor": actorFrom(r.Context()), "environment": s.cfg.Environment, "features": map[string]any{"whatsapp": s.cfg.WhatsApp.Enabled, "ai": aiConfigured, "github": githubConfigured, "owner": ownerConfigured, "worker": s.cfg.Worker.Enabled, "monitor": s.cfg.Monitor.WebhookSecret != ""}, "csrf": csrfFromRequest(r)})
+	writeJSON(w, http.StatusOK, map[string]any{"actor": actorFrom(r.Context()), "environment": s.cfg.Environment, "features": map[string]any{"whatsapp": s.cfg.WhatsApp.Enabled, "proactiveNotifications": s.cfg.WhatsApp.ProactiveNotifications, "ai": aiConfigured, "github": githubConfigured, "owner": ownerConfigured, "worker": s.cfg.Worker.Enabled, "monitor": s.cfg.Monitor.WebhookSecret != ""}, "csrf": csrfFromRequest(r)})
 }
 func (s *Server) dashboard(w http.ResponseWriter, r *http.Request) {
 	item, err := s.store.Dashboard(r.Context())
@@ -785,9 +786,9 @@ func (s *Server) maintenanceWindows(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) cancelMaintenanceWindow(w http.ResponseWriter, r *http.Request) {
 	ownerJID := ""
-	if s.owners != nil {
+	if s.notifications != nil {
 		var err error
-		ownerJID, err = s.owners.JID(r.Context())
+		ownerJID, err = s.notifications.JID(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "maintenance_cancel_failed", "notification owner could not be resolved")
 			return
@@ -934,6 +935,10 @@ func (s *Server) whatsapp(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.runtime.WhatsApp())
 }
 func (s *Server) whatsappLink(w http.ResponseWriter, _ *http.Request) {
+	if !s.cfg.WhatsApp.Enabled {
+		writeError(w, http.StatusServiceUnavailable, "whatsapp_disabled", "WhatsApp is disabled by server configuration")
+		return
+	}
 	if s.pairer == nil {
 		writeError(w, http.StatusServiceUnavailable, "whatsapp_unavailable", "WhatsApp pairing is unavailable")
 		return
@@ -1074,8 +1079,8 @@ func (s *Server) monitorWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ownerJID := ""
-	if s.owners != nil {
-		ownerJID, err = s.owners.JID(r.Context())
+	if s.notifications != nil {
+		ownerJID, err = s.notifications.JID(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "monitor_event_failed", "monitor notification owner could not be resolved")
 			return
@@ -1087,7 +1092,7 @@ func (s *Server) monitorWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !result.Duplicate {
-		notificationSuppressed := false
+		notificationSuppressed := !s.cfg.WhatsApp.Enabled || !s.cfg.WhatsApp.ProactiveNotifications
 		for _, transition := range result.Transitions {
 			if transition.Suppressed {
 				notificationSuppressed = true

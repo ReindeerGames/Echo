@@ -96,6 +96,15 @@ func TestRuntimeStatusIncludesExpectedComponentsThatAreStillStarting(t *testing.
 	}
 }
 
+func TestBootstrapExposesProactiveNotificationPosture(t *testing.T) {
+	server := &Server{cfg: config.Config{WhatsApp: config.WhatsApp{Enabled: true, ProactiveNotifications: true}}}
+	response := httptest.NewRecorder()
+	server.bootstrap(response, httptest.NewRequest(http.MethodGet, "/api/v1/bootstrap", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"proactiveNotifications":true`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestVerifyGitHubSignature(t *testing.T) {
 	body := []byte(`{"action":"completed"}`)
 	mac := hmac.New(sha256.New, []byte("secret"))
@@ -135,11 +144,22 @@ func TestWhatsAppGroupDiscovery(t *testing.T) {
 func TestWhatsAppLinkStartsPairing(t *testing.T) {
 	pairer := &fakePairer{}
 	state := runtimestate.New()
-	server := &Server{pairer: pairer, runtime: state}
+	server := &Server{cfg: config.Config{WhatsApp: config.WhatsApp{Enabled: true}}, pairer: pairer, runtime: state}
 	request := httptest.NewRequest("POST", "/api/v1/whatsapp/link", nil)
 	response := httptest.NewRecorder()
 	server.whatsappLink(response, request)
 	if response.Code != 202 || !pairer.called {
+		t.Fatalf("status=%d called=%v body=%s", response.Code, pairer.called, response.Body.String())
+	}
+}
+
+func TestWhatsAppLinkRejectsDisabledGateway(t *testing.T) {
+	pairer := &fakePairer{}
+	server := &Server{pairer: pairer, runtime: runtimestate.New()}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/whatsapp/link", nil)
+	response := httptest.NewRecorder()
+	server.whatsappLink(response, request)
+	if response.Code != http.StatusServiceUnavailable || pairer.called || !strings.Contains(response.Body.String(), "whatsapp_disabled") {
 		t.Fatalf("status=%d called=%v body=%s", response.Code, pairer.called, response.Body.String())
 	}
 }

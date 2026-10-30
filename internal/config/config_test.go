@@ -87,6 +87,22 @@ func TestDevelopmentAllowsPairingBeforeOwnerIsConfigured(t *testing.T) {
 	}
 }
 
+func TestProactiveNotificationsCanBeMutedIndependently(t *testing.T) {
+	setDatabaseEnv(t)
+	t.Setenv("ECHO_ENV", "development")
+	t.Setenv("ECHO_WHATSAPP_ENABLED", "true")
+	t.Setenv("ECHO_PROACTIVE_NOTIFICATIONS_ENABLED", "false")
+	t.Setenv("ECHO_OWNER_JID", "")
+	t.Setenv("ECHO_DEV_MODE", "true")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.WhatsApp.Enabled || cfg.WhatsApp.ProactiveNotifications {
+		t.Fatalf("unexpected WhatsApp delivery posture: %#v", cfg.WhatsApp)
+	}
+}
+
 func TestAssistantRetentionIsBounded(t *testing.T) {
 	setDatabaseEnv(t)
 	t.Setenv("ECHO_ENV", "development")

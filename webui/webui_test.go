@@ -168,6 +168,18 @@ func TestMonitoringSupportsBoundedPlannedMaintenance(t *testing.T) {
 	}
 }
 
+func TestUIShowsProactiveNotificationMute(t *testing.T) {
+	request := httptest.NewRequest("GET", "/app.js", nil)
+	response := httptest.NewRecorder()
+	Handler().ServeHTTP(response, request)
+	body := response.Body.String()
+	for _, expected := range []string{"proactiveNotifications", "The WhatsApp gateway is offline", "will not reconnect a persisted session", "Proactive WhatsApp notifications are muted", "Monitoring, runtime, worker-health, GitHub-workflow and daily-brief updates remain visible here"} {
+		if response.Code != 200 || !strings.Contains(body, expected) {
+			t.Fatalf("notification mute posture is missing %q", expected)
+		}
+	}
+}
+
 func TestMonitoringSupportsAlertAcknowledgementLifecycle(t *testing.T) {
 	request := httptest.NewRequest("GET", "/app.js", nil)
 	response := httptest.NewRecorder()

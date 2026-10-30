@@ -40,12 +40,13 @@ type Database struct {
 }
 
 type WhatsApp struct {
-	Enabled         bool
-	OwnerJID        string
-	DeviceName      string
-	HistorySync     bool
-	ContextWindow   int
-	OutboxRetention time.Duration
+	Enabled                bool
+	ProactiveNotifications bool
+	OwnerJID               string
+	DeviceName             string
+	HistorySync            bool
+	ContextWindow          int
+	OutboxRetention        time.Duration
 }
 
 type GitHub struct {
@@ -112,12 +113,13 @@ func Load() (Config, error) {
 		},
 		Database: database,
 		WhatsApp: WhatsApp{
-			Enabled:         boolean("ECHO_WHATSAPP_ENABLED", true),
-			OwnerJID:        strings.TrimSpace(os.Getenv("ECHO_OWNER_JID")),
-			DeviceName:      env("ECHO_WHATSAPP_DEVICE_NAME", "Echo"),
-			HistorySync:     boolean("ECHO_WHATSAPP_HISTORY_SYNC", false),
-			ContextWindow:   integer("ECHO_WHATSAPP_CONTEXT_WINDOW", 5),
-			OutboxRetention: duration("ECHO_WHATSAPP_OUTBOX_RETENTION", 30*24*time.Hour),
+			Enabled:                boolean("ECHO_WHATSAPP_ENABLED", true),
+			ProactiveNotifications: boolean("ECHO_PROACTIVE_NOTIFICATIONS_ENABLED", true),
+			OwnerJID:               strings.TrimSpace(os.Getenv("ECHO_OWNER_JID")),
+			DeviceName:             env("ECHO_WHATSAPP_DEVICE_NAME", "Echo"),
+			HistorySync:            boolean("ECHO_WHATSAPP_HISTORY_SYNC", false),
+			ContextWindow:          integer("ECHO_WHATSAPP_CONTEXT_WINDOW", 5),
+			OutboxRetention:        duration("ECHO_WHATSAPP_OUTBOX_RETENTION", 30*24*time.Hour),
 		},
 		GitHub: GitHub{
 			APIBaseURL:      strings.TrimRight(env("ECHO_GITHUB_API_URL", "https://api.github.com"), "/"),

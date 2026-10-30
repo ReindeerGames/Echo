@@ -61,8 +61,9 @@ func run() error {
 	}
 	policies := policy.New()
 	owners := owner.New(st, cfg.WhatsApp.OwnerJID)
-	reporter := &runtimeComponentReporter{store: st, owners: owners, recoveryWindow: 30 * time.Second}
-	resolveDisabledComponentAlerts(ctx, st, owners, cfg.Worker.Enabled, cfg.WhatsApp.Enabled)
+	notificationOwners := owner.Notifications(owners, cfg.WhatsApp.Enabled && cfg.WhatsApp.ProactiveNotifications)
+	reporter := &runtimeComponentReporter{store: st, owners: notificationOwners, recoveryWindow: 30 * time.Second}
+	resolveDisabledComponentAlerts(ctx, st, notificationOwners, cfg.Worker.Enabled, cfg.WhatsApp.Enabled)
 	retention := maintenance.NewRetention(st, cfg.Assistant.Retention, cfg.Assistant.AttachmentRetention, cfg.Monitor.Retention, cfg.WhatsApp.OutboxRetention, 24*time.Hour)
 	go superviseComponent(ctx, state, "retention-maintenance", func() error { return retention.Run(ctx) }, reporter)
 
@@ -71,7 +72,7 @@ func run() error {
 		return err
 	}
 	githubClient := githubapp.New(vault, cfg.GitHub.APIBaseURL, cfg.Worker.MaxRepoBytes)
-	githubWatchdog := githubmonitor.New(st, githubClient, owners, cfg.GitHub.MonitorInterval)
+	githubWatchdog := githubmonitor.New(st, githubClient, notificationOwners, cfg.GitHub.MonitorInterval)
 	go superviseComponent(ctx, state, "github-watchdog", func() error { return githubWatchdog.Run(ctx) }, reporter)
 	aiClient := ai.NewManaged(vault, cfg.AI.Enabled, cfg.AI.BaseURL, cfg.AI.APIKey, cfg.AI.Model)
 	workflows := workflow.New(st, policies, owners, aiClient, githubClient, state, expectedComponents, cfg.Assistant.HistoryLimit, cfg.Security.ApprovalTTL)
@@ -82,16 +83,16 @@ func run() error {
 	go func() { serverErr <- server.Run() }()
 	if cfg.WhatsApp.Enabled {
 		go superviseComponent(ctx, state, "whatsapp-gateway", func() error { return runGatewayOnce(ctx, gateway, state) }, reporter)
-		dailyBriefs := briefing.New(st, owners, workflows, time.Minute)
+		dailyBriefs := briefing.New(st, notificationOwners, workflows, time.Minute)
 		go superviseComponent(ctx, state, "daily-brief-scheduler", func() error { return dailyBriefs.Run(ctx) }, reporter)
 	}
 	if cfg.Worker.Enabled {
 		runner := worker.New(st, githubClient, aiClient, owners, cfg.Worker.WorkspaceRoot, cfg.Worker.PollInterval, cfg.Worker.JobLease, cfg.Worker.HeartbeatInterval, cfg.Worker.MaxFileBytes)
 		go superviseComponent(ctx, state, "worker", func() error { return runner.Run(ctx) }, reporter)
 	}
-	workerWatchdog := worker.NewHealthWatchdog(st, owners, cfg.Monitor.WatchdogInterval, cfg.Worker.HeartbeatTimeout, cfg.Worker.QueueStallTimeout, cfg.Worker.Enabled)
+	workerWatchdog := worker.NewHealthWatchdog(st, notificationOwners, cfg.Monitor.WatchdogInterval, cfg.Worker.HeartbeatTimeout, cfg.Worker.QueueStallTimeout, cfg.Worker.Enabled)
 	go superviseComponent(ctx, state, "worker-watchdog", func() error { return workerWatchdog.Run(ctx) }, reporter)
-	heartbeatWatchdog := monitor.NewWatchdog(st, owners, cfg.Monitor.WatchdogInterval, cfg.Monitor.AlertReminderInterval)
+	heartbeatWatchdog := monitor.NewWatchdog(st, notificationOwners, cfg.Monitor.WatchdogInterval, cfg.Monitor.AlertReminderInterval)
 	go superviseComponent(ctx, state, "monitor-watchdog", func() error { return heartbeatWatchdog.Run(ctx) }, reporter)
 
 	select {

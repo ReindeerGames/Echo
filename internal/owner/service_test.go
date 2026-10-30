@@ -14,6 +14,16 @@ type memoryContactStore struct {
 	updated time.Time
 }
 
+type countingLookup struct {
+	calls int
+	jid   string
+}
+
+func (l *countingLookup) JID(context.Context) (string, error) {
+	l.calls++
+	return l.jid, nil
+}
+
 func (m *memoryContactStore) GetOwnerContact(context.Context) (domain.WhatsAppContact, time.Time, error) {
 	if m.contact.ID == "" {
 		return domain.WhatsAppContact{}, time.Time{}, store.ErrNotFound
@@ -44,5 +54,17 @@ func TestApplicationOwnerOverridesEnvironmentFallback(t *testing.T) {
 	jid, err := service.JID(context.Background())
 	if err != nil || jid != selected.JID {
 		t.Fatalf("unexpected dynamic owner JID %q err=%v", jid, err)
+	}
+}
+
+func TestNotificationLookupCanMuteWithoutResolvingOwner(t *testing.T) {
+	source := &countingLookup{jid: "27820000000@s.whatsapp.net"}
+	jid, err := Notifications(source, false).JID(context.Background())
+	if err != nil || jid != "" || source.calls != 0 {
+		t.Fatalf("muted notification lookup resolved owner: jid=%q calls=%d err=%v", jid, source.calls, err)
+	}
+	jid, err = Notifications(source, true).JID(context.Background())
+	if err != nil || jid != source.jid || source.calls != 1 {
+		t.Fatalf("enabled notification lookup did not delegate: jid=%q calls=%d err=%v", jid, source.calls, err)
 	}
 }

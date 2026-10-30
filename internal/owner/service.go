@@ -21,8 +21,31 @@ type Service struct {
 	fallback string
 }
 
+type Lookup interface {
+	JID(context.Context) (string, error)
+}
+
+type notificationLookup struct {
+	source  Lookup
+	enabled bool
+}
+
 func New(st contactStore, fallback string) *Service {
 	return &Service{store: st, fallback: strings.TrimSpace(fallback)}
+}
+
+// Notifications returns a view of the owner used only by unsolicited
+// background delivery paths. Muting it does not remove the configured owner
+// or prevent replies to owner-initiated conversations.
+func Notifications(source Lookup, enabled bool) Lookup {
+	return &notificationLookup{source: source, enabled: enabled}
+}
+
+func (s *notificationLookup) JID(ctx context.Context) (string, error) {
+	if !s.enabled || s.source == nil {
+		return "", nil
+	}
+	return s.source.JID(ctx)
 }
 
 func (s *Service) Current(ctx context.Context) (domain.OwnerSettings, error) {
